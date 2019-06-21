@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 
 from astropy.io import fits
+from astropy.nddata import CCDData
 
 
 def solve_field(fitsfile, sigma=3.0. x_size=1800, y_size=1800):
@@ -27,3 +28,5 @@ def solve_field(fitsfile, sigma=3.0. x_size=1800, y_size=1800):
     y_size: int (default: 1800)
         Y size of the trimmged image.
     """
+    data = CCDData.read(fitfile, unit=u.adu)
+    data.header['GAIN'] = 1.0

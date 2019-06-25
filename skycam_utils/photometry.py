@@ -10,7 +10,7 @@ import astropy.units as u
 from astropy import stats
 from astropy.io import fits
 from astropy.convolution import Gaussian2DKernel
-from astropy.table import Table
+from astropy.table import Table, hstack
 from astropy.wcs import WCS
 from astropy.coordinates import SkyCoord
 from astropy.nddata import CCDData
@@ -25,6 +25,7 @@ def load_bright_star_catalog():
     """
     catpath = pkg_resources.resource_filename(__name__, os.path.join("data", "bright_star_sloan.fits"))
     phot_cat = Table.read(catpath)
+    phot_cat['coords'] = SkyCoord(phot_cat['_RAJ2000'], phot_cat['_DEJ2000'], frame='icrs', unit='deg')
     return phot_cat
 
 
@@ -115,3 +116,19 @@ def make_segmentation_image(data, fwhm=2.0, snr=5.0, x_size=5, y_size=5, npixels
     if deblend:
         segm = photutils.deblend_sources(data, segm, npixels=npixels, filter_kernel=kernel, nlevels=nlevels, contrast=contrast)
     return segm
+
+
+def make_catalog(data, segm, wcs, max_sep=10.*u.arcmin):
+    """
+    Measure source properties from data, segmentation image, and wcs and match against photometric catalog. Returned
+    trimmed and matched combination catalog.
+    """
+    cat = photutils.source_properties(data, segm, wcs=wcs)
+    cat['obs_mag'] = -2.5 * np.log10(cat['source_sum'])
+    phot_cat = load_bright_star_catalog()
+    idx, d2d, d3d = cat['sky_centroid_icrs'].match_to_catalog_sky(phot_cat['coords'])
+    sep_constraint = d2d < max_sep
+    c_matched = cat[sep_constraint]
+    p_matched = phot_cat[idx[sep_constraint]]
+    combined = hstack([p_matched, c_matched])
+    return combined

@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 
 from astropy.io import fits
-from astropy.nddata import CCDData
+from astropy.nddata import CCDData, Cutout2D
 
 
 def solve_field(fitsfile, sigma=3.0. x_size=1800, y_size=1800):
@@ -28,5 +28,37 @@ def solve_field(fitsfile, sigma=3.0. x_size=1800, y_size=1800):
     y_size: int (default: 1800)
         Y size of the trimmged image.
     """
-    data = CCDData.read(fitfile, unit=u.adu)
-    data.header['GAIN'] = 1.0
+
+    if isinstance(fitsfile, str):
+        fitsfile = Path(fitsfile)
+    im = CCDData.read(fitfile, unit=u.adu)
+
+    xmid = int(im.shape[1]/2)
+    ymid = int(im.shape[0]/2)
+
+    trimmed = CCDData(Cutout2D(im, (xmid, ymid), (y_size, x_size), copy=True))
+
+    trimmed_path = fitsfile.with_suffix(".trimmed.fits")
+    trimmed.write(trimmed_path)
+
+    subprocess.run(
+        [
+            "solve-field",
+            str(trimmed_path),
+            "--continue",
+            "--no-background-subtraction",
+            "--sigma",
+            "3.0",
+            "--keep-xylist",
+            "%s.xy",
+            "-L",
+            "120",
+            "-H",
+            "150",
+            "-u",
+            "app"
+        ]
+    )
+
+    solved_path = fitsfile.with_suffix(".new")
+    return solved_path

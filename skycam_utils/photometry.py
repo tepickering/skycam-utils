@@ -1,5 +1,7 @@
 # Licensed under a 3-clause BSD style license - see LICENSE.rst
 
+import os
+import pkg_resources
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +17,15 @@ from astropy.nddata import CCDData
 
 import ccdproc
 import photutils
+
+
+def load_bright_star_catalog():
+    """
+    Load the catalog containing Sloan photometry for the brightest stars
+    """
+    catpath = pkg_resources.resource_filename(__name__, os.path.join("data", "bright_star_sloan.fits"))
+    phot_cat = Table.read(catpath)
+    return phot_cat
 
 
 def make_background(data, sigma=2., snr=2., npixels=7, boxsize=(7, 7), filter_size=(3, 3), mask_sources=True):

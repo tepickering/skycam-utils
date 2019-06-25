@@ -122,6 +122,18 @@ def make_catalog(data, segm, wcs, max_sep=10.*u.arcmin):
     """
     Measure source properties from data, segmentation image, and wcs and match against photometric catalog. Returned
     trimmed and matched combination catalog.
+
+    data : 2D `~numpy.ndarray`
+        Image containing sources to extract.
+
+    segm : `~photutils.segmentation.SegmentationImage`
+        Segmentation image created from data.
+
+    wcs : `~astropy.wcs.WCS`
+        WCS to use for the image.
+
+    max_sep : `~astropy.units.Quantity` (default: 10 * u.arcmin)
+        Maximum separation to use when matching catalog coordinates.
     """
     cat = photutils.source_properties(data, segm, wcs=wcs)
     cat['obs_mag'] = -2.5 * np.log10(cat['source_sum'])

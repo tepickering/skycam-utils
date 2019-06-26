@@ -6,11 +6,12 @@ from pathlib import Path
 
 import numpy as np
 
+import astropy.units as u
 from astropy.io import fits
 from astropy.nddata import CCDData, Cutout2D
 
 
-def solve_field(fitsfile, sigma=3.0. x_size=1800, y_size=1800):
+def solve_field(fitsfile, sigma=3.0, x_size=1800, y_size=1800):
     """
     Run astronomy.net's solver to find the WCS for at least part of an all-sky image. The solver doesn't work
     well with a full image so by default we trim it down to the central part of the image. This is sufficient for
@@ -31,15 +32,15 @@ def solve_field(fitsfile, sigma=3.0. x_size=1800, y_size=1800):
 
     if isinstance(fitsfile, str):
         fitsfile = Path(fitsfile)
-    im = CCDData.read(fitfile, unit=u.adu)
+    im = CCDData.read(fitsfile)
 
     xmid = int(im.shape[1]/2)
     ymid = int(im.shape[0]/2)
 
-    trimmed = CCDData(Cutout2D(im, (xmid, ymid), (y_size, x_size), copy=True))
+    trimmed = CCDData(Cutout2D(im, (xmid, ymid), (y_size, x_size), copy=True).data, unit=u.adu)
 
     trimmed_path = fitsfile.with_suffix(".trimmed.fits")
-    trimmed.write(trimmed_path)
+    trimmed.write(trimmed_path, overwrite=True)
 
     subprocess.run(
         [
@@ -60,5 +61,5 @@ def solve_field(fitsfile, sigma=3.0. x_size=1800, y_size=1800):
         ]
     )
 
-    solved_path = fitsfile.with_suffix(".new")
+    solved_path = fitsfile.with_suffix(".trimmed.new")
     return solved_path

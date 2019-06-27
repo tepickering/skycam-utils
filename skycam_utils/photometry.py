@@ -29,7 +29,7 @@ def load_bright_star_catalog():
     return phot_cat
 
 
-def make_background(data, sigma=2., snr=2., npixels=7, boxsize=(7, 7), filter_size=(3, 3), mask_sources=True):
+def make_background(data, sigma=3., snr=3., npixels=4, boxsize=(10, 10), filter_size=(5, 5), mask_sources=True):
     """
     Use photutils to create a background model from the input data.
 
@@ -147,5 +147,4 @@ def make_catalog(data, segm, wcs, max_sep=10.*u.arcmin, border_width=10):
     sep_constraint = d2d < max_sep
     c_matched = cat[sep_constraint]
     p_matched = phot_cat[idx[sep_constraint]]
-    combined = Table(hstack([p_matched, c_matched]))
-    return combined
+    return c_matched, p_matched

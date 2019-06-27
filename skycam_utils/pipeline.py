@@ -40,14 +40,14 @@ def process_image(fitsfile):
 
     segm = make_segmentation_image(solved)
 
-    catalog = make_catalog(solved, segm, solved.wcs)
+    s_cat, p_cat = make_catalog(solved, segm, solved.wcs)
     #catalog.write(fitsfile.with_suffix(".cat.fits"), overwrite=True)
 
     filt = im.header['FILTER']
     filt_col = f'{filt}_mag'
 
-    phot_off = catalog[filt_col] - catalog['obs_mag']
-    cut = catalog[filt_col] < 3.5
+    phot_off = p_cat[filt_col] - s_cat['obs_mag']
+    cut = p_cat[filt_col] < 4.0
     zp = phot_off[cut].mean()
 
     pix_scales = wcs.utils.proj_plane_pixel_scales(solved.wcs)
@@ -57,4 +57,4 @@ def process_image(fitsfile):
 
     sky_mag.write(fitsfile.with_suffix(".sky.fits"), overwrite=True)
 
-    return catalog
+    return s_cat, p_cat

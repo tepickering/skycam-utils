@@ -24,9 +24,10 @@ def load_bright_star_catalog():
     Load the catalog containing Sloan photometry for the brightest stars
     """
     catpath = pkg_resources.resource_filename(__name__, os.path.join("data", "bright_star_sloan.fits"))
-    phot_cat = Table.read(catpath)
+    phot_cat = Table.read(catpath, memmap=True)
     phot_cat['coords'] = SkyCoord(phot_cat['_RAJ2000'], phot_cat['_DEJ2000'], frame='icrs', unit='deg')
-    return phot_cat
+    cut = phot_cat['g_mag'] < 5.0
+    return phot_cat[cut]
 
 
 def make_background(data, sigma=3., snr=3., npixels=4, boxsize=(10, 10), filter_size=(5, 5), mask_sources=True):

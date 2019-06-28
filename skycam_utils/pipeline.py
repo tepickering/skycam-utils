@@ -53,7 +53,7 @@ def process_image(fitsfile):
     pix_scales = wcs.utils.proj_plane_pixel_scales(solved.wcs)
     pix_area = pix_scales[0] * pix_scales[1] * 3600.**2
 
-    sky_mag = CCDData(zp + (-2.5 * np.log10(bkg_image.data/pix_area)), unit=u.adu)
+    sky_mag = CCDData(zp + (-2.5 * np.log10(bkg_image.data/pix_area)), unit=u.mag / u.arcsec**2)
 
     sky_mag.write(fitsfile.with_suffix(".sky.fits"), overwrite=True)
 

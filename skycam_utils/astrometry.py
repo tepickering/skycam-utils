@@ -1,13 +1,9 @@
 # Licensed under a 3-clause BSD style license - see LICENSE.rst
 
-
 import subprocess
 from pathlib import Path
 
-import numpy as np
-
 import astropy.units as u
-from astropy.io import fits
 from astropy.nddata import CCDData, Cutout2D
 
 

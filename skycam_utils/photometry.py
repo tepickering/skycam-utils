@@ -2,20 +2,15 @@
 
 import os
 import pkg_resources
-from pathlib import Path
 
 import numpy as np
 
 import astropy.units as u
 from astropy import stats
-from astropy.io import fits
 from astropy.convolution import Gaussian2DKernel
-from astropy.table import Table, hstack
-from astropy.wcs import WCS
+from astropy.table import Table
 from astropy.coordinates import SkyCoord
-from astropy.nddata import CCDData
 
-import ccdproc
 import photutils
 
 

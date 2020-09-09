@@ -41,7 +41,7 @@ def process_image(fitsfile):
     segm = make_segmentation_image(solved)
 
     s_cat, p_cat = make_catalog(solved, segm, solved.wcs)
-    #catalog.write(fitsfile.with_suffix(".cat.fits"), overwrite=True)
+    # catalog.write(fitsfile.with_suffix(".cat.fits"), overwrite=True)
 
     filt = im.header['FILTER']
     filt_col = f'{filt}_mag'

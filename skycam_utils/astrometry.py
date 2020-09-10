@@ -49,7 +49,7 @@ def solve_field(fitsfile, sigma=3.0, x_size=1800, y_size=1800):
             "--keep-xylist",
             "%s.xy",
             "-L",
-            "120",
+            "100",
             "-H",
             "150",
             "-u",

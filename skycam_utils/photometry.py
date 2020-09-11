@@ -25,6 +25,16 @@ def load_bright_star_catalog():
     return phot_cat[cut]
 
 
+def load_skycam_catalog():
+    """
+    Load the curated skycam catalog that combines the bright star catalog with Sloan photometry
+    with a larger catalog that includes the star names as well.
+    """
+    catpath = pkg_resources.resource_filename(__name__, os.path.join("data", "skycam_stars.csv"))
+    skycam_cat = Table.read(catpath)
+    return skycam_cat
+
+
 def make_background(data, sigma=3., snr=3., npixels=4, boxsize=(10, 10), filter_size=(5, 5), mask_sources=True):
     """
     Use photutils to create a background model from the input data.

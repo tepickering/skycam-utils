@@ -5,6 +5,10 @@ from pathlib import Path
 
 import astropy.units as u
 from astropy.nddata import CCDData, Cutout2D
+from astropy.coordinates import EarthLocation
+
+
+MMT_LOCATION = EarthLocation.from_geodetic("-110:53:04.4", "31:41:19.6", 2600 * u.m)
 
 
 def solve_field(fitsfile, sigma=3.0, x_size=1800, y_size=1800):

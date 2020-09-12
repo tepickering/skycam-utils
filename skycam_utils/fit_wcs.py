@@ -103,7 +103,7 @@ class wcs_azp(object):
 
     def __call__(self, x0):
         """
-        
+
         """
         self.set_wcs(x0)
         # XXX, az alt, or alt az?
@@ -122,6 +122,10 @@ class wcs_zea(wcs_azp):
         super(wcs_zea, self).__init__(x, y, alt, az, a_order=a_order,
                                       b_order=b_order, crpix1=crpix1, crpix2=crpix2)
         self.w.wcs.ctype = ["RA---ZEA-SIP", "DEC--ZEA-SIP"]
+        n_a = int((self.a_order + 1)**2)
+        n_b = int((self.b_order + 1)**2)
+        self.a_ind = np.arange(n_a) + 8
+        self.b_ind = np.arange(n_b) + self.a_ind.max() + 1
 
     def set_wcs(self, x0):
         """

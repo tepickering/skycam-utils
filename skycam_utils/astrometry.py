@@ -5,10 +5,20 @@ from pathlib import Path
 
 import astropy.units as u
 from astropy.nddata import CCDData, Cutout2D
-from astropy.coordinates import EarthLocation
-
+from astropy.coordinates import EarthLocation, SkyCoord, AltAz
+from astropy.time import Time
 
 MMT_LOCATION = EarthLocation.from_geodetic("-110:53:04.4", "31:41:19.6", 2600 * u.m)
+
+
+def update_altaz(cat, time=Time.now(), ra='RA', dec='Dec', ra_unit=u.deg, dec_unit=u.deg, location=MMT_LOCATION):
+    """
+    Update Alt and Az columns for input catalog for given time and location
+    """
+    coords = SkyCoord(ra=cat[ra]*ra_unit, dec=cat[dec]*dec_unit)
+    ack = coords.transform_to(AltAz(obstime=time, location=location))
+    cat['Alt'], cat['Az'] = ack.alt, ack.az
+    return cat
 
 
 def solve_field(fitsfile, sigma=3.0, x_size=1800, y_size=1800):

@@ -124,7 +124,7 @@ def make_segmentation_image(data, fwhm=2.0, snr=5.0, x_size=5, y_size=5, npixels
     return segm
 
 
-def make_catalog(data, segm, wcs, max_sep=10.*u.arcmin, border_width=10):
+def make_catalog(data, segm, border_width=10):
     """
     Measure source properties from data, segmentation image, and wcs and match against photometric catalog. Returned
     trimmed and matched combination catalog.
@@ -135,22 +135,12 @@ def make_catalog(data, segm, wcs, max_sep=10.*u.arcmin, border_width=10):
     segm : `~photutils.segmentation.SegmentationImage`
         Segmentation image created from data.
 
-    wcs : `~astropy.wcs.WCS`
-        WCS to use for the image.
-
-    max_sep : `~astropy.units.Quantity` (default: 10 * u.arcmin)
-        Maximum separation to use when matching catalog coordinates.
-
     border_width : int (default: 10)
         Remove source labels within border_wiidth from the edges of the data.
     """
     segm.remove_border_labels(border_width=border_width)
-    prop_cat = photutils.source_properties(data, segm, wcs=wcs)
+    prop_cat = photutils.source_properties(data, segm)
     cat = prop_cat.to_table()
     cat['obs_mag'] = -2.5 * np.log10(cat['source_sum'])
-    phot_cat = load_bright_star_catalog()
-    idx, d2d, d3d = cat['sky_centroid_icrs'].match_to_catalog_sky(phot_cat['coords'])
-    sep_constraint = d2d < max_sep
-    c_matched = cat[sep_constraint]
-    p_matched = phot_cat[idx[sep_constraint]]
-    return c_matched, p_matched
+    cat.keep_columns(['id', 'xcentroid', 'ycentroid', 'source_sum', 'background_mean', 'obs_mag'])
+    return cat

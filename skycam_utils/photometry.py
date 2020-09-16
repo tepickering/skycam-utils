@@ -10,8 +10,31 @@ from astropy import stats
 from astropy.convolution import Gaussian2DKernel
 from astropy.table import Table
 from astropy.coordinates import SkyCoord
+from astropy.io import fits
 
 import photutils
+
+
+def load_mask(year=2020):
+    """
+    Load appropriate mask image for the given year
+    """
+    if year in [2017, 2018, 2019, 2020]:
+        mask_file = "mask_2017_2020.fits"
+    if year in [2011, 2012]:
+        mask_file = "mask_2011.fits"
+    if year in [2015, 2016]:
+        mask_file = "mask_2016.fits"
+    else:
+        print(f"Mask not yet implemented for {year}.")
+        return None
+
+    mask_path = pkg_resources.resource_filename(__name__, os.path.join("data", mask_file))
+
+    with fits.open(mask_path) as hdul:
+        im = hdul[0].data
+
+    return im
 
 
 def load_bright_star_catalog():

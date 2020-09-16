@@ -21,9 +21,9 @@ def load_mask(year=2020):
     """
     if year in [2017, 2018, 2019, 2020]:
         mask_file = "mask_2017_2020.fits"
-    if year in [2011, 2012]:
+    elif year in [2011, 2012]:
         mask_file = "mask_2011.fits"
-    if year in [2015, 2016]:
+    elif year in [2015, 2016]:
         mask_file = "mask_2016.fits"
     else:
         print(f"Mask not yet implemented for {year}.")
@@ -58,7 +58,8 @@ def load_skycam_catalog():
     return skycam_cat
 
 
-def make_background(data, sigma=3., snr=3., npixels=4, boxsize=(10, 10), filter_size=(5, 5), mask_sources=True):
+def make_background(data, sigma=3., snr=3., npixels=4, boxsize=(10, 10),
+                    filter_size=(5, 5), mask_sources=True, inmask=None):
     """
     Use photutils to create a background model from the input data.
 
@@ -80,13 +81,21 @@ def make_background(data, sigma=3., snr=3., npixels=4, boxsize=(10, 10), filter_
     filter_size : tuple or int (default: (3, 3))
         Window size of the 2D median filter to apply to the low-res background map
 
-    mask_source : bool (default: True)
+    mask_sources : bool (default: True)
         If true, then use `~photutils.make_source_mask` to mask sources before creating background
     """
     sigma_clip = stats.SigmaClip(sigma=sigma)
     bkg_estimator = photutils.SExtractorBackground()
+    if inmask is not None:
+        cov_mask = np.zeros_like(inmask, dtype=bool)
+        cov_mask[inmask != np.nan] = False
+        cov_mask[inmask == np.nan] = True
+    else:
+        cov_mask = np.zeros_like(data, dtype=bool)
+
     if mask_sources:
-        mask = photutils.make_source_mask(data, snr=snr, npixels=npixels)
+        src_mask = photutils.make_source_mask(data, snr=snr, npixels=npixels, mask=cov_mask)
+        mask = (cov_mask | src_mask)
         bkg = photutils.Background2D(
             data,
             boxsize,
@@ -101,7 +110,8 @@ def make_background(data, sigma=3., snr=3., npixels=4, boxsize=(10, 10), filter_
             boxsize,
             filter_size=filter_size,
             sigma_clip=sigma_clip,
-            bkg_estimator=bkg_estimator
+            bkg_estimator=bkg_estimator,
+            mask=cov_mask
         )
     return bkg
 

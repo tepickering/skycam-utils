@@ -183,3 +183,30 @@ def make_catalog(data, segm, border_width=10, background=None):
     cat['obs_mag'] = -2.5 * np.log10(cat['source_sum'])
     cat.keep_columns(['id', 'xcentroid', 'ycentroid', 'source_sum', 'background_mean', 'obs_mag'])
     return cat
+
+
+def match_stars(skycat, srccat, in_wcs, max_sep=1*u.deg):
+    """
+    skycat : `~astropy.table.Table`
+        Skycam catalog as produced by load_skycam_catalog() with Alt and Az columns
+        added for the appropriate time.
+
+    srccat : `~astropy.table.Table`
+        Source catalog as produced by make_catalog().
+
+    in_wcs : `~astropy.wcs.WCS`
+        WCS used to create Alt/Az for skycat.
+
+    max_sep : `~astropy.units.Quantity` (default: 1 degree)
+        Separation criterium for valid matching.
+    """
+    pred_az, pred_alt = in_wcs.all_pix2world(srccat['xcentroid'], srccat['ycentroid'], 0)
+    pred_coord = SkyCoord(ra=pred_az*u.deg, dec=pred_alt*u.deg)
+    act_coord = SkyCoord(ra=skycat['Az'], dec=skycat['Alt'])
+    idx, d2d, d3d = pred_coord.match_to_catalog_sky(act_coord)
+    sep_constraint = d2d < max_sep
+    matches = srccat[sep_constraint]
+    cat_matches = skycat[idx[sep_constraint]]
+    matched_cat = hstack([cat_matches, matches])
+    matched_cat.sort('obs_mag')
+    return matched_cat

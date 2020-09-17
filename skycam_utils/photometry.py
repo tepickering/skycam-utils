@@ -8,7 +8,7 @@ import numpy as np
 import astropy.units as u
 from astropy import stats
 from astropy.convolution import Gaussian2DKernel
-from astropy.table import Table
+from astropy.table import Table, hstack
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
 
@@ -185,7 +185,7 @@ def make_catalog(data, segm, border_width=10, background=None):
     return cat
 
 
-def match_stars(skycat, srccat, in_wcs, max_sep=1*u.deg):
+def match_stars(skycat, srccat, in_wcs, max_sep=1.5*u.deg):
     """
     skycat : `~astropy.table.Table`
         Skycam catalog as produced by load_skycam_catalog() with Alt and Az columns

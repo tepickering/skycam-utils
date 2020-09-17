@@ -1,6 +1,8 @@
 # Licensed under a 3-clause BSD style license - see LICENSE.rst
 
+import os
 import subprocess
+import pkg_resources
 from pathlib import Path
 
 import astropy.units as u

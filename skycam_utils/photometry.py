@@ -8,7 +8,7 @@ import numpy as np
 import astropy.units as u
 from astropy import stats
 from astropy.convolution import Gaussian2DKernel
-from astropy.table import Table, hstack
+from astropy.table import Table, hstack, unique
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
 
@@ -203,10 +203,13 @@ def match_stars(skycat, srccat, in_wcs, max_sep=1.5*u.deg):
     pred_az, pred_alt = in_wcs.all_pix2world(srccat['xcentroid'], srccat['ycentroid'], 0)
     pred_coord = SkyCoord(ra=pred_az*u.deg, dec=pred_alt*u.deg)
     act_coord = SkyCoord(ra=skycat['Az'], dec=skycat['Alt'])
-    idx, d2d, d3d = pred_coord.match_to_catalog_sky(act_coord)
+    idx, d2d, d3d = pred_coord.match_to_catalog_sky(act_coord, nthneighbor=1)
     sep_constraint = d2d < max_sep
     matches = srccat[sep_constraint]
     cat_matches = skycat[idx[sep_constraint]]
     matched_cat = hstack([cat_matches, matches])
     matched_cat.sort('obs_mag')
+
+    # If we get multiple matches, keep the brightest one. May be wrong, but at least consistent
+    matched_cat = unique(matched_cat, keys='Star Name', keep='first')
     return matched_cat

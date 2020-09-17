@@ -7,8 +7,30 @@ import astropy.units as u
 from astropy.nddata import CCDData, Cutout2D
 from astropy.coordinates import EarthLocation, SkyCoord, AltAz
 from astropy.time import Time
+from astropy.wcs import WCS
 
 MMT_LOCATION = EarthLocation.from_geodetic("-110:53:04.4", "31:41:19.6", 2600 * u.m)
+
+
+def load_wcs(year=2020):
+    """
+    Load appropriate WCS for the given year
+    """
+    if year in [2017, 2018, 2019, 2020]:
+        wcs_file = "wcs_2019.fits"
+    elif year in [2011, 2012]:
+        wcs_file = "wcs_2011.fits"
+    elif year in [2015, 2016]:
+        wcs_file = "wcs_2016.fits"
+    else:
+        print(f"WCS not yet implemented for {year}.")
+        return None
+
+    wcs_path = pkg_resources.resource_filename(__name__, os.path.join("data", wcs_file))
+
+    wcs = WCS(wcs_path)
+
+    return wcs
 
 
 def update_altaz(cat, time=Time.now(), ra='RA', dec='Dec', ra_unit=u.deg, dec_unit=u.deg, location=MMT_LOCATION):

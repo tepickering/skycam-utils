@@ -105,7 +105,7 @@ def process_stellacam_image(fitsfile, wcs=None, mask=None, write=False, zp=0.):
 
     segm = make_segmentation_image(diff.data)
 
-    catalog = make_catalog(im, segm)
+    catalog = make_catalog(im, segm, background=bkg)
     if write:
         catalog.write(fitsfile.with_suffix(".cat.csv"), overwrite=True)
 

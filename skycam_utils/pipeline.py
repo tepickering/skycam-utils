@@ -1,5 +1,6 @@
 # Licensed under a 3-clause BSD style license - see LICENSE.rst
 
+import datetime
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +13,19 @@ from astropy.nddata import CCDData
 
 from .photometry import make_background, make_segmentation_image, make_catalog
 from .astrometry import solve_field
+
+
+def get_ut(hdr, year=2020):
+    """
+    When the UT is actually valid in the stellacam image headers, it's one format for
+    2011-2012 (and maybe earlier) and another for 2015 onwards.
+    """
+    if year < 2013:
+        tobs = Time(f"{hdr['DATE']}T{hdr['UT']}", scale='utc')
+    else:
+        dt = datetime.datetime.strptime(hdr['UT'], "%a %b %d %H:%M:%S %Y")
+        tobs = Time(dt, scale='utc')
+    return tobs
 
 
 def process_asi_image(fitsfile):

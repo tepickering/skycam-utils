@@ -121,6 +121,8 @@ def process_stellacam_image(fitsfile, year, write=False, zp=0., return_products=
     mask = load_mask(year=year)
     wcs = load_wcs(year=year)
     tobs = get_ut(hdr, year=year)
+    tobs.format = 'iso'
+
     skycat = update_altaz(load_skycam_catalog(), time=tobs)
 
     bkg = make_background(im, boxsize=(5, 5), filter_size=(3, 3), inmask=mask)
@@ -138,6 +140,7 @@ def process_stellacam_image(fitsfile, year, write=False, zp=0., return_products=
 
     catalog = make_catalog(im, segm, background=bkg)
     matched = match_stars(skycat, catalog, wcs, max_sep=2.5*u.deg)
+    matched['UT'] = tobs.value
     try:
         matched.write(fitsfile.with_suffix(".cat.csv"), overwrite=True)
     except:

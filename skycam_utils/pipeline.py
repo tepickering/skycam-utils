@@ -186,12 +186,14 @@ def process_stellacam_dir():
     parser.add_argument(
         '--zeropoint',
         help="Photometric zeropoint to apply to source magnitudes. (default: 0.0)",
+        type=float,
         default=0.0
     )
 
     parser.add_argument(
         '--nproc',
         help="Number of processors to utilize. (default: 6)",
+        type=int,
         default=6
     )
 

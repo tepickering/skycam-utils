@@ -94,7 +94,7 @@ def make_background(data, sigma=3., snr=3., npixels=4, boxsize=(10, 10),
         cov_mask = np.zeros_like(data, dtype=bool)
 
     if mask_sources:
-        src_mask = photutils.make_source_mask(data, snr=snr, npixels=npixels, mask=cov_mask)
+        src_mask = photutils.make_source_mask(data, nsigma=snr, npixels=npixels, mask=cov_mask)
         mask = (cov_mask | src_mask)
         bkg = photutils.Background2D(
             data,
@@ -150,7 +150,7 @@ def make_segmentation_image(data, fwhm=2.0, snr=5.0, x_size=5, y_size=5, npixels
     sigma = fwhm * stats.gaussian_fwhm_to_sigma
     kernel = Gaussian2DKernel(sigma, x_size=x_size, y_size=y_size)
     kernel.normalize()
-    threshold = photutils.detect_threshold(data, snr=snr)
+    threshold = photutils.detect_threshold(data, nsigma=snr)
     segm = photutils.detect_sources(data, threshold, npixels=npixels, filter_kernel=kernel)
     if deblend:
         segm = photutils.deblend_sources(data, segm, npixels=npixels, filter_kernel=kernel, nlevels=nlevels, contrast=contrast)

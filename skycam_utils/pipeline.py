@@ -9,6 +9,7 @@ from pathlib import Path
 from functools import partial
 
 import numpy as np
+import pandas as pd
 
 import astropy
 import astropy.units as u
@@ -207,6 +208,14 @@ def process_stellacam_dir():
     with multiprocessing.Pool(processes=args.nproc) as pool:
         pool.map(process, files)
 
+    print("Now go through the output CSVs, group the data by star, and output the photometry for each star...")
+    frames = []
+    for csv in rootdir.glob("*.csv"):
+        frames.append(pd.read_csv(csv))
+    df = pd.concat(frames)
+    g = df.groupby('Star Name')
+    for k in g.groups.keys():
+        g.get_group(k).to_csv(rootdir / f"star_{k.replace(' ', '_').lower()}.csv")
 
 if __name__ == "__main__":
     process_stellacam_dir()

@@ -221,10 +221,14 @@ def process_stellacam_dir():
     frames = []
     for csv in rootdir.glob("*.csv"):
         frames.append(pd.read_csv(csv))
-    df = pd.concat(frames)
-    g = df.groupby('Star Name')
-    for k in g.groups.keys():
-        g.get_group(k).to_csv(rootdir / f"star_{k.replace(' ', '_').lower()}.csv")
+
+    if len(frames) > 0:
+        df = pd.concat(frames)
+        g = df.groupby('Star Name')
+        for k in g.groups.keys():
+            g.get_group(k).to_csv(rootdir / f"star_{k.replace(' ', '_').lower()}.csv")
+    else:
+        print(f"No photometry extracted for f{rootdir.name}...")
 
 if __name__ == "__main__":
     process_stellacam_dir()

@@ -2,7 +2,6 @@
 
 import os
 import pkg_resources
-import warnings
 
 import numpy as np
 
@@ -14,9 +13,6 @@ from astropy.coordinates import SkyCoord
 from astropy.io import fits
 
 import photutils
-
-
-warnings.filterwarnings('ignore')
 
 
 def load_mask(year=2020):
@@ -156,11 +152,9 @@ def make_segmentation_image(data, fwhm=2.0, snr=5.0, x_size=5, y_size=5, npixels
     kernel.normalize()
     threshold = photutils.detect_threshold(data, nsigma=snr)
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        segm = photutils.detect_sources(data, threshold, npixels=npixels, filter_kernel=kernel)
-        if deblend:
-            segm = photutils.deblend_sources(data, segm, npixels=npixels, filter_kernel=kernel, nlevels=nlevels, contrast=contrast)
+    segm = photutils.detect_sources(data, threshold, npixels=npixels, filter_kernel=kernel)
+    if deblend:
+        segm = photutils.deblend_sources(data, segm, npixels=npixels, filter_kernel=kernel, nlevels=nlevels, contrast=contrast)
 
     return segm
 

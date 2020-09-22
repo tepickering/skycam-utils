@@ -155,7 +155,10 @@ def make_segmentation_image(data, fwhm=2.0, snr=5.0, x_size=5, y_size=5, npixels
     kernel = Gaussian2DKernel(sigma, x_size=x_size, y_size=y_size)
     kernel.normalize()
     threshold = photutils.detect_threshold(data, nsigma=snr)
-    segm = photutils.detect_sources(data, threshold, npixels=npixels, filter_kernel=kernel)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        segm = photutils.detect_sources(data, threshold, npixels=npixels, filter_kernel=kernel)
     if deblend:
         segm = photutils.deblend_sources(data, segm, npixels=npixels, filter_kernel=kernel, nlevels=nlevels, contrast=contrast)
     return segm

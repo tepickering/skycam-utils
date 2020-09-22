@@ -5,11 +5,17 @@ import subprocess
 import pkg_resources
 from pathlib import Path
 
+import numpy as np
+from scipy.optimize import minimize
+
 import astropy.units as u
 from astropy.nddata import CCDData, Cutout2D
 from astropy.coordinates import EarthLocation, SkyCoord, AltAz
 from astropy.time import Time
 from astropy.wcs import WCS
+from astropy.wcs.utils import fit_wcs_from_points
+from astropy.wcs.wcs import WCSHDO_SIP
+from .fit_wcs import wcs_zea
 
 MMT_LOCATION = EarthLocation.from_geodetic("-110:53:04.4", "31:41:19.6", 2600 * u.m)
 
@@ -33,6 +39,51 @@ def load_wcs(year=2020):
     wcs = WCS(wcs_path)
 
     return wcs
+
+
+def initial_wcs_fit(catalog, x_key='xcentroid', y_key='ycentroid', alt_key='Alt', az_key='Az', crpix1=324, crpix2=235, cdelt=0.3):
+    """
+    Use wcs_zea() routine borrowed from LSST to make an initial linear fit to an all-sky camera image.
+    The input catalog needs to have both X/Y image positions and object Alt/Az.
+    """
+    fun = wcs_zea(
+        catalog[x_key],
+        catalog[y_key],
+        catalog[alt_key],
+        catalog[az_key],
+        crpix1=crpix1,
+        crpix2=crpix2,
+        a_order=2,
+        b_order=2
+    )
+    init = np.array([crpix1, crpix2, 1, 1, cdelt, 0.003, 0.003, cdelt])
+    x0 = init
+    fit_result = minimize(fun, x0)
+    wcs_initial = fun.return_wcs(fit_result.x)
+    return wcs_initial
+
+
+def wcs_sip_fit(cat_df, init_wcs, sip_degree=3, x_key='xcentroid', y_key='ycentroid', alt_key='Alt', az_key='Az'):
+    """
+    Take an initial WCS and refine it with SIP distortion terms by fitting to a larger catalog in a pandas
+    datafrom, cat_df. The input dataframe needs to have both X/Y image positions and object Alt/Az.
+    """
+    wcs_refined = fit_wcs_from_points(
+        (cat_df[x_key].array, cat_df[y_key].array),
+        SkyCoord(cat_df[az_key]*u.deg, cat_df[alt_key]*u.deg),
+        projection=init_wcs,
+        proj_point=SkyCoord(0*u.deg, 90*u.deg),
+        sip_degree=sip_degree
+    )
+    return wcs_refined
+
+
+def write_sip(in_wcs, outfile, overwrite=False):
+    """
+    Write input WCS to a FITS file and include the SIP information in the header. This is not done by default
+    and you need to set an obscure flag to make it happen.
+    """
+    in_wcs.to_fits(relax=WCSHDO_SIP).writeto(outfile, overwrite=overwrite)
 
 
 def update_altaz(cat, time=Time.now(), ra='RA', dec='Dec', ra_unit=u.deg, dec_unit=u.deg, location=MMT_LOCATION):

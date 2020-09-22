@@ -17,12 +17,15 @@ import astropy.wcs as wcs
 from astropy.io import fits
 from astropy.nddata import CCDData
 from astropy.time import Time
+from astropy.utils import iers
 
 from .photometry import make_background, make_segmentation_image, make_catalog, load_mask, match_stars, load_skycam_catalog
 from .astrometry import solve_field, load_wcs, update_altaz
 
 
 warnings.filterwarnings('ignore')
+iers.conf.auto_download = False
+iers.conf.auto_max_age = None
 
 
 def get_ut(hdr, year=2020):

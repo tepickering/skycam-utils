@@ -2,6 +2,7 @@
 
 import os
 import pkg_resources
+import warnings
 
 import numpy as np
 
@@ -13,6 +14,9 @@ from astropy.coordinates import SkyCoord
 from astropy.io import fits
 
 import photutils
+
+
+warnings.filterwarnings('ignore')
 
 
 def load_mask(year=2020):

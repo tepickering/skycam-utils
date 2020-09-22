@@ -198,11 +198,20 @@ def process_stellacam_dir():
         default=6
     )
 
+    parser.add_argument(
+        "-z",
+        help="Process .fits.gz files",
+        action="store_true"
+    )
+
     args = parser.parse_args()
 
     rootdir = Path(args.rootdir)
     year = int(rootdir.name[0:4])
-    files = sorted(list(rootdir.glob("*.fits")))
+    if args.z:
+        files = sorted(list(rootdir.glob("*.fits.gz")))
+    else:
+        files = sorted(list(rootdir.glob("*.fits")))
 
     process = partial(process_stellacam_image, year=year, write=args.writefits, zp=args.zeropoint)
     with multiprocessing.Pool(processes=args.nproc) as pool:

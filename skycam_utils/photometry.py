@@ -159,8 +159,9 @@ def make_segmentation_image(data, fwhm=2.0, snr=5.0, x_size=5, y_size=5, npixels
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         segm = photutils.detect_sources(data, threshold, npixels=npixels, filter_kernel=kernel)
-    if deblend:
-        segm = photutils.deblend_sources(data, segm, npixels=npixels, filter_kernel=kernel, nlevels=nlevels, contrast=contrast)
+        if deblend:
+            segm = photutils.deblend_sources(data, segm, npixels=npixels, filter_kernel=kernel, nlevels=nlevels, contrast=contrast)
+
     return segm
 
 

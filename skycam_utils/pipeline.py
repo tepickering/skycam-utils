@@ -231,7 +231,7 @@ def process_stellacam_dir():
         for k in g.groups.keys():
             g.get_group(k).to_csv(rootdir / f"star_{k.replace(' ', '_').lower()}.csv")
     else:
-        print(f"No photometry extracted for f{rootdir.name}...")
+        print(f"No photometry extracted for {rootdir.name}...")
 
 if __name__ == "__main__":
     process_stellacam_dir()

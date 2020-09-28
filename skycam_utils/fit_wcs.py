@@ -34,7 +34,6 @@ class wcs_azp(object):
         self.w.wcs.crpix = [crpix1, crpix2]
         # Fix the reference pixel to zenith
         self.w.wcs.crval = [0, 90]
-        #self.w.wcs.ctype = ["RA---ZEA", "DEC--ZEA"]
         self.w.wcs.ctype = ["RA---AZP-SIP", "DEC--AZP-SIP"]
 
         self.world_coords = np.vstack((az, alt))
@@ -109,8 +108,9 @@ class wcs_azp(object):
         # XXX, az alt, or alt az?
         try:
             pix_x, pix_y = self.w.all_world2pix(self.az, self.alt, 0)
-        except:
+        except Exception as e:
             # if the SIP can't be inverted.
+            print(f"Can't invert SIP: {e}")
             return np.inf
         # Let's try changing this to a median to help if stars are mis-matched
         resid_sq = np.sum((self.x - pix_x)**2 + (self.y - pix_y)**2)
@@ -207,9 +207,11 @@ class wcs_refine(wcs_azp):
         self.what_min = what_min
         # Assume all stars are V=10 for distance purposes
         if location is None:
-            self.location = EarthLocation(lat=-30.2444*u.degree,
-                                     lon=-70.7494*u.degree,
-                                     height=2650.0*u.meter)
+            self.location = EarthLocation(  # for LSST
+                lat=-30.2444*u.degree,
+                lon=-70.7494*u.degree,
+                height=2650.0*u.meter
+            )
         else:
             self.location = location
 
@@ -252,7 +254,8 @@ class wcs_refine(wcs_azp):
         try:
             indx, d2, d3 = self.ref_catalog.match_to_catalog_3d(observed_cat)
             result = (indx, d2.value, d3.value)
-        except:
+        except Exception as e:
+            print(f"Failed to match to reference catalog: {e}")
             result = ([], np.inf, np.inf)
         return result
 
@@ -297,9 +300,11 @@ class wcs_refine_zea(wcs_zea):
         self.what_min = what_min
         # Assume all stars are V=10 for distance purposes
         if location is None:
-            self.location = EarthLocation(lat=-30.2444*u.degree,
-                                     lon=-70.7494*u.degree,
-                                     height=2650.0*u.meter)
+            self.location = EarthLocation(
+                lat=-30.2444*u.degree,
+                lon=-70.7494*u.degree,
+                height=2650.0*u.meter
+            )
         else:
             self.location = location
 
@@ -342,7 +347,8 @@ class wcs_refine_zea(wcs_zea):
         try:
             indx, d2, d3 = self.ref_catalog.match_to_catalog_3d(observed_cat)
             result = (indx, d2.value, d3.value)
-        except:
+        except Exception as e:
+            print(f"Failed to 3D match to reference catalog: {e}")
             result = ([], np.inf, np.inf)
         return result
 

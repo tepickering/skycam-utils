@@ -147,7 +147,8 @@ def process_stellacam_image(fitsfile, year, write=False, zp=0., return_products=
     matched['UT'] = tobs.value
     try:
         matched.write(fitsfile.with_suffix(".cat.csv"), overwrite=True)
-    except:
+    except Exception as e:
+        print(f"Oops! Can't write CSV output for {fitsfile}: {e}")
         pass
 
     if wcs is not None:
@@ -232,6 +233,7 @@ def process_stellacam_dir():
             g.get_group(k).to_csv(rootdir / f"star_{k.replace(' ', '_').lower()}.csv")
     else:
         print(f"No photometry extracted for {rootdir.name}...")
+
 
 if __name__ == "__main__":
     process_stellacam_dir()

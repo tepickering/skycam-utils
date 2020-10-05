@@ -33,6 +33,9 @@ def get_ut(hdr, year=2020):
     When the UT is actually valid in the stellacam image headers, it's one format for
     2011-2012 (and maybe earlier) and another for 2015 onwards.
     """
+    if 'FOO' in hdr['UT']:
+        return None
+
     if year < 2013:
         tobs = Time(f"{hdr['DATE']}T{hdr['UT']}", scale='utc')
     else:
@@ -114,6 +117,12 @@ def process_stellacam_image(fitsfile, year, write=False, zp=0., return_products=
         im = hdul[0].data
         hdr = hdul[0].header
 
+    tobs = get_ut(hdr, year=year)
+
+    if tobs is None:
+        print(f"No valid UT in {fitsfile}...")
+        return None
+
     # we only do the full photometric analysis when the camera is in the dark sky steady state
     # configuration of 256 frames integration with a gain of 106.
     if hdr['FRAME'] != '256 Frames' or hdr['GAIN'] != 106:
@@ -124,7 +133,6 @@ def process_stellacam_image(fitsfile, year, write=False, zp=0., return_products=
 
     mask = load_mask(year=year)
     wcs = load_wcs(year=year)
-    tobs = get_ut(hdr, year=year)
     tobs.format = 'iso'
 
     skycat = update_altaz(load_skycam_catalog(), time=tobs)

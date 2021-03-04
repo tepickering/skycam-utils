@@ -15,11 +15,11 @@ from astropy.io import fits
 import photutils
 
 
-def load_mask(year=2020):
+def load_mask(year=2021):
     """
     Load appropriate mask image for the given year
     """
-    if year in [2017, 2018, 2019, 2020]:
+    if year in [2017, 2018, 2019, 2020, 2021]:
         mask_file = "mask_2017_2020.fits"
     elif year in [2011, 2012]:
         mask_file = "mask_2011.fits"

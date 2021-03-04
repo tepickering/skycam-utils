@@ -28,7 +28,7 @@ iers.conf.auto_download = False
 iers.conf.auto_max_age = None
 
 
-def get_ut(hdr, year=2020):
+def get_ut(hdr, year=2021):
     """
     When the UT is actually valid in the stellacam image headers, it's one format for
     2011-2012 (and maybe earlier) and another for 2015 onwards.

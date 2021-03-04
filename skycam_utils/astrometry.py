@@ -20,11 +20,11 @@ from .fit_wcs import wcs_zea
 MMT_LOCATION = EarthLocation.from_geodetic("-110:53:04.4", "31:41:19.6", 2600 * u.m)
 
 
-def load_wcs(year=2020):
+def load_wcs(year=2021):
     """
     Load appropriate WCS for the given year
     """
-    if year in [2017, 2018, 2019, 2020]:
+    if year in [2017, 2018, 2019, 2020, 2021]:
         wcs_file = "wcs_2019.fits"
     elif year in [2011, 2012]:
         wcs_file = "wcs_2011.fits"

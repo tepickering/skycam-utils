@@ -8,6 +8,9 @@ import warnings
 from pathlib import Path
 from functools import partial
 
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+
 import numpy as np
 import pandas as pd
 
@@ -18,9 +21,11 @@ from astropy.io import fits
 from astropy.nddata import CCDData
 from astropy.time import Time
 from astropy.utils import iers
+from astropy.coordinates import AltAz, get_moon, get_sun
+from astropy.visualization import ZScaleInterval, SqrtStretch, ImageNormalize
 
 from .photometry import make_background, make_segmentation_image, make_catalog, load_mask, match_stars, load_skycam_catalog
-from .astrometry import solve_field, load_wcs, update_altaz
+from .astrometry import solve_field, load_wcs, update_altaz, MMT_LOCATION
 
 
 warnings.filterwarnings('ignore')
@@ -42,6 +47,134 @@ def get_ut(hdr, year=2021):
         dt = datetime.datetime.strptime(hdr['UT'], "%a %b %d %H:%M:%S %Y")
         tobs = Time(dt, scale='utc')
     return tobs
+
+
+def stellacam_strip_image(rootdir, writefile=True, outfile=None, compressed=True, year=2021):
+    """
+    Process a directory of stellacam all-sky images and generate a strip image composed of the center column of
+    each all-sky image. This provides a strip chart of the sky as it passes overhead. A FITS HDU list is returned
+    and optionally written to disk that consists of the image data, a 2D mask to reject data where the sun is > -18 deg
+    or the moon > -10 deg, and an array containing timestamps for each image in matplotlib date2num format.
+
+    Parameters:
+        rootdir : str or `~pathlib.PosixPath`
+            Directory of stellacam all-sky camera images to process
+
+        writefile : bool
+            Write generated HDU list to FITS file or not
+
+        outfile : None or str
+            If writefile=True, specify output filename. If none, will default to strip_<rootdir>.fits.
+
+        compressed : bool
+            Toggle processing compressed *.fits.gz files if True or *.fits if False.
+
+        year : int (default=2021)
+            Year the data was taken. Used to determine how to parse image header.
+
+    Returns:
+        hdul : `~astropy.io.fits.HDUList`
+    """
+    rootdir = Path(rootdir)
+    if compressed:
+        files = rootdir.glob("*.fits.gz")
+    else:
+        files = rootdir.glob("*.fits")
+    strips = []
+    masks = []
+    times = []
+    for f in files:
+        with fits.open(f) as hdul:
+            im = hdul[0].data.astype(float)
+            hdr = hdul[0].header
+            utc = get_ut(hdr, year=year)
+            times.append(utc)
+            aa_frame = AltAz(obstime=utc, location=MMT_LOCATION)
+            moon = get_moon(utc, MMT_LOCATION)
+            sun = get_sun(utc)
+            moon_aa = moon.transform_to(aa_frame)
+            sun_aa = sun.transform_to(aa_frame)
+            if sun_aa.alt < 0 * u.deg:  # only process images while the sun is below the horizon
+                moon_down = moon_aa.alt < -10 * u.deg
+                sun_down = sun_aa.alt < -18 * u.deg
+                if hdr['FRAME'] == '256 Frames' and hdr['GAIN'] == 106 and moon_down and sun_down:
+                    masks.append(np.zeros(480))
+                else:
+                    masks.append(np.ones(480))
+                strip = im[:, 319]
+                strips.append(strip)
+    st_im = np.flipud(np.swapaxes(np.array(strips), 0, 1))
+    st_mask = np.flipud(np.swapaxes(np.array(masks), 0, 1))
+    masked = CCDData(st_im, unit="adu", mask=st_mask)
+    hdul = masked.to_hdu()
+    mt = mdates.date2num(Time(times).to_datetime())
+    col = fits.Column(name="mtime", array=mt, format='D')
+    hdul.append(fits.BinTableHDU.from_columns([col]))
+    if writefile:
+        if outfile is None:
+            outfile = f"strip_{rootdir}.fits"
+        hdul.writeto(outfile, overwrite=True)
+    return hdul
+
+
+def load_strip_image(fitsfile):
+    """
+    Load strip image data from fitsfile and return CCDData object and array of image observation times.
+
+    Parameters:
+        fitsfile : str or `~pathlib.Path`
+            Filename of FITS file to load
+
+    Returns:
+        (ccd_data, ut_array) : (`~astropy.nddata.CCDData`, `~np.ndarray`)
+            CCDData object containing image and mask data, float array containing UT observation times in matplotlib format
+    """
+    ut_array = np.array(fits.open(fitsfile)[2].data, dtype=float)
+    ccd_data = CCDData.read(fitsfile, hdu=0)
+    return ccd_data, ut_array
+
+
+def plot_strip_image(fitsfile, savefile=None, masked=False, cmap='viridis', contrast=0.2, stretch=SqrtStretch()):
+    """
+    Generate 2D plot of strip image
+
+    Parameters:
+        fitsfile : str or `~pathlib.Path`
+            FITS file to load strip image data from
+
+        savefile : str or `~pathlib.Path` (default: None)
+            Optional filename to write figure to.
+
+        masked : bool (default: False)
+            If true, apply mask defining dark sky (moon < -10 deg, sun < -18 deg) before plotting.
+
+        cmap : str (default: 'viridis')
+            Colormap to use for 2D data
+
+        contrast : float (default: 0.2)
+            Contrast parameter to pass to ZScaleInterval
+
+        stretch : Subclass of `~astropy.visualization.BaseStretch` (default: `~astropy.visualization.SqrtStretch`)
+            Stretch class to use for mapping data values to figure output
+    """
+    ccd_data, ut_array = load_strip_image(fitsfile)
+    if masked:
+        plot_data = ccd_data
+    else:
+        plot_data = ccd_data.data
+    fig, ax = plt.subplots(figsize=(18, 6))
+    ysize = plot_data.data.shape[0]
+    norm = ImageNormalize(plot_data, interval=ZScaleInterval(contrast=contrast), stretch=stretch)
+    extent = (ut_array[0], ut_array[-1], 0, ysize-1)
+    ax.imshow(plot_data, extent=extent, aspect='auto', norm=norm, cmap=cmap)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+    ax.xaxis.set_major_locator(mdates.HourLocator())
+    ax.set_yticks([0, ysize/2, ysize-1])
+    ax.set_yticklabels(['S', 'Z', 'N'])
+    ax.set_xlabel("UT")
+    if savefile is not None:
+        fig.savefig(savefile)
+    return fig
 
 
 def process_asi_image(fitsfile):

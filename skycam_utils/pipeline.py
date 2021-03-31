@@ -172,6 +172,8 @@ def plot_strip_image(fitsfile, savefile=None, masked=False, cmap='viridis', cont
     ax.set_yticks([0, ysize/2, ysize-1])
     ax.set_yticklabels(['S', 'Z', 'N'])
     ax.set_xlabel("UT")
+    dt = mdates.num2date(ut_array[-1])
+    ax.set_title(dt.strftime("%Y-%m-%d"))
     if savefile is not None:
         fig.savefig(savefile)
     return fig

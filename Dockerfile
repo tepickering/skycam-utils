@@ -1,10 +1,11 @@
-FROM python:3.8-slim
+FROM python:3.8
 
 LABEL maintainer="te.pickering@gmail.com"
 
-RUN apt update && apt -y install git
+COPY . .
+
 RUN python -m pip install --upgrade pip
-RUN pip install git+https://github.com/tepickering/skycam-utils#egg=skycam_utils[all]
+RUN pip install -e .[all]
 
 COPY scripts/iers.py /usr/local/bin/iers.py
 

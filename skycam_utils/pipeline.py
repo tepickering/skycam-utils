@@ -351,31 +351,44 @@ def process_stellacam_dir():
         action="store_true"
     )
 
+    parser.add_argument(
+        "-s", "--strip",
+        help="Process directory to create strip image and plot",
+        action="store_true"
+    )
+
     args = parser.parse_args()
 
     rootdir = Path(args.rootdir)
     year = int(rootdir.name[0:4])
-    if args.z:
-        files = sorted(list(rootdir.glob("*.fits.gz")))
+
+    if args.strip:
+        out_fits = f"strip_{rootdir}.fits"
+        out_pdf = f"strip_{rootdir}.pdf"
+        stellacam_strip_image(rootdir, writefile=True, outfile=out_fits, compressed=args.z, year=year)
+        plot_strip_image(out_fits, savefile=out_pdf, masked=False, cmap='viridis', contrast=0.2, stretch=SqrtStretch())
     else:
-        files = sorted(list(rootdir.glob("*.fits")))
+        if args.z:
+            files = sorted(list(rootdir.glob("*.fits.gz")))
+        else:
+            files = sorted(list(rootdir.glob("*.fits")))
 
-    process = partial(process_stellacam_image, year=year, write=args.writefits, zp=args.zeropoint)
-    with multiprocessing.Pool(processes=args.nproc) as pool:
-        pool.map(process, files)
+        process = partial(process_stellacam_image, year=year, write=args.writefits, zp=args.zeropoint)
+        with multiprocessing.Pool(processes=args.nproc) as pool:
+            pool.map(process, files)
 
-    print("Now go through the output CSVs, group the data by star, and output the photometry for each star...")
-    frames = []
-    for csv in rootdir.glob("*.csv"):
-        frames.append(pd.read_csv(csv))
+        print("Now go through the output CSVs, group the data by star, and output the photometry for each star...")
+        frames = []
+        for csv in rootdir.glob("*.csv"):
+            frames.append(pd.read_csv(csv))
 
-    if len(frames) > 0:
-        df = pd.concat(frames)
-        g = df.groupby('Star Name')
-        for k in g.groups.keys():
-            g.get_group(k).to_csv(rootdir / f"star_{k.replace(' ', '_').lower()}.csv")
-    else:
-        print(f"No photometry extracted for {rootdir.name}...")
+        if len(frames) > 0:
+            df = pd.concat(frames)
+            g = df.groupby('Star Name')
+            for k in g.groups.keys():
+                g.get_group(k).to_csv(rootdir / f"star_{k.replace(' ', '_').lower()}.csv")
+        else:
+            print(f"No photometry extracted for {rootdir.name}...")
 
 
 if __name__ == "__main__":

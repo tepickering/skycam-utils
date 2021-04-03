@@ -101,7 +101,7 @@ def stellacam_strip_image(rootdir, writefile=True, outfile=None, compressed=True
                     masks.append(np.zeros(480))
                 else:
                     masks.append(np.ones(480))
-                strip = im[:, 319]
+                strip = np.copy(im[:, 319])
                 strips.append(strip)
     st_im = np.flipud(np.swapaxes(np.array(strips), 0, 1))
     st_mask = np.flipud(np.swapaxes(np.array(masks), 0, 1))

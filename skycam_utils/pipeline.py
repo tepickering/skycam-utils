@@ -77,9 +77,9 @@ def stellacam_strip_image(rootdir, writefile=True, outfile=None, compressed=True
     """
     rootdir = Path(rootdir)
     if compressed:
-        files = rootdir.glob("*.fits.gz")
+        files = sorted(list(rootdir.glob("*.fits.gz")))
     else:
-        files = rootdir.glob("*.fits")
+        files = sorted(list(rootdir.glob("*.fits")))
     strips = []
     masks = []
     times = []

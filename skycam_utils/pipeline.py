@@ -85,36 +85,43 @@ def stellacam_strip_image(rootdir, writefile=True, outfile=None, compressed=True
     times = []
     for f in files:
         with fits.open(f) as hdul:
-            im = hdul[0].data.astype(float)
-            hdr = hdul[0].header
-            utc = get_ut(hdr, year=year)
-            times.append(utc)
-            aa_frame = AltAz(obstime=utc, location=MMT_LOCATION)
-            moon = get_moon(utc, MMT_LOCATION)
-            sun = get_sun(utc)
-            moon_aa = moon.transform_to(aa_frame)
-            sun_aa = sun.transform_to(aa_frame)
-            if sun_aa.alt < 0 * u.deg:  # only process images while the sun is below the horizon
-                moon_down = moon_aa.alt < -10 * u.deg
-                sun_down = sun_aa.alt < -18 * u.deg
-                if hdr['FRAME'] == '256 Frames' and hdr['GAIN'] == 106 and moon_down and sun_down:
-                    masks.append(np.zeros(480))
-                else:
-                    masks.append(np.ones(480))
-                strip = np.copy(im[:, 319])
-                strips.append(strip)
-    st_im = np.flipud(np.swapaxes(np.array(strips), 0, 1))
-    st_mask = np.flipud(np.swapaxes(np.array(masks), 0, 1))
-    masked = CCDData(st_im, unit="adu", mask=st_mask)
-    hdul = masked.to_hdu()
-    mt = mdates.date2num(Time(times).to_datetime())
-    col = fits.Column(name="mtime", array=mt, format='D')
-    hdul.append(fits.BinTableHDU.from_columns([col]))
-    if writefile:
-        if outfile is None:
-            outfile = f"strip_{rootdir}.fits"
-        hdul.writeto(outfile, overwrite=True)
-    return hdul
+            try:
+                im = hdul[0].data.astype(float)
+                hdr = hdul[0].header
+                utc = get_ut(hdr, year=year)
+                times.append(utc)
+                aa_frame = AltAz(obstime=utc, location=MMT_LOCATION)
+                moon = get_moon(utc, MMT_LOCATION)
+                sun = get_sun(utc)
+                moon_aa = moon.transform_to(aa_frame)
+                sun_aa = sun.transform_to(aa_frame)
+                if sun_aa.alt < 0 * u.deg:  # only process images while the sun is below the horizon
+                    moon_down = moon_aa.alt < -10 * u.deg
+                    sun_down = sun_aa.alt < -18 * u.deg
+                    if hdr['FRAME'] == '256 Frames' and hdr['GAIN'] == 106 and moon_down and sun_down:
+                        masks.append(np.zeros(480))
+                    else:
+                        masks.append(np.ones(480))
+                    strip = np.copy(im[:, 319])
+                    strips.append(strip)
+            except Exception as e:
+                print(f"Failed to process {f}: {e}\n")
+
+    if len(strips) > 0:
+        st_im = np.flipud(np.swapaxes(np.array(strips), 0, 1))
+        st_mask = np.flipud(np.swapaxes(np.array(masks), 0, 1))
+        masked = CCDData(st_im, unit="adu", mask=st_mask)
+        hdul = masked.to_hdu()
+        mt = mdates.date2num(Time(times).to_datetime())
+        col = fits.Column(name="mtime", array=mt, format='D')
+        hdul.append(fits.BinTableHDU.from_columns([col]))
+        if writefile:
+            if outfile is None:
+                outfile = f"strip_{rootdir}.fits"
+            hdul.writeto(outfile, overwrite=True)
+        return hdul
+    else:
+        return None
 
 
 def load_strip_image(fitsfile):
@@ -365,8 +372,9 @@ def process_stellacam_dir():
     if args.strip:
         out_fits = f"strip_{rootdir}.fits"
         out_pdf = f"strip_{rootdir}.pdf"
-        stellacam_strip_image(rootdir, writefile=True, outfile=out_fits, compressed=args.z, year=year)
-        plot_strip_image(out_fits, savefile=out_pdf, masked=False, cmap='viridis', contrast=0.2, stretch=SqrtStretch())
+        hdul = stellacam_strip_image(rootdir, writefile=True, outfile=out_fits, compressed=args.z, year=year)
+        if hdul is not None:
+            plot_strip_image(out_fits, savefile=out_pdf, masked=False, cmap='viridis', contrast=0.2, stretch=SqrtStretch())
     else:
         if args.z:
             files = sorted(list(rootdir.glob("*.fits.gz")))

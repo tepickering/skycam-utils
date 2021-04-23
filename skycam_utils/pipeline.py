@@ -89,7 +89,6 @@ def stellacam_strip_image(rootdir, writefile=True, outfile=None, compressed=True
                 im = hdul[0].data.astype(float)
                 hdr = hdul[0].header
                 utc = get_ut(hdr, year=year)
-                times.append(utc)
                 aa_frame = AltAz(obstime=utc, location=MMT_LOCATION)
                 moon = get_moon(utc, MMT_LOCATION)
                 sun = get_sun(utc)
@@ -103,6 +102,7 @@ def stellacam_strip_image(rootdir, writefile=True, outfile=None, compressed=True
                     else:
                         masks.append(np.ones(480))
                     strip = np.copy(im[:, 319])
+                    times.append(utc)
                     strips.append(strip)
             except Exception as e:
                 print(f"Failed to process {f}: {e}\n")

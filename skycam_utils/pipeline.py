@@ -94,7 +94,7 @@ def stellacam_strip_image(rootdir, writefile=True, outfile=None, compressed=True
                 sun = get_sun(utc)
                 moon_aa = moon.transform_to(aa_frame)
                 sun_aa = sun.transform_to(aa_frame)
-                if sun_aa.alt < 0 * u.deg:  # only process images while the sun is below the horizon
+                if sun_aa.alt < -1 * u.deg:  # only process images while the sun is below the horizon
                     moon_down = moon_aa.alt < -10 * u.deg
                     sun_down = sun_aa.alt < -18 * u.deg
                     if hdr['FRAME'] == '256 Frames' and hdr['GAIN'] == 106 and moon_down and sun_down:
@@ -169,13 +169,14 @@ def plot_strip_image(fitsfile, savefile=None, masked=False, cmap='viridis', cont
         plot_data = ccd_data
     else:
         plot_data = ccd_data.data
-    fig, ax = plt.subplots(figsize=(18, 6))
+    fig, ax = plt.subplots(figsize=(12, 4))
     ysize = plot_data.data.shape[0]
     norm = ImageNormalize(plot_data, interval=ZScaleInterval(contrast=contrast), stretch=stretch)
     extent = (ut_array[0], ut_array[-1], 0, ysize-1)
     ax.imshow(plot_data, extent=extent, aspect='auto', norm=norm, cmap=cmap)
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
     ax.xaxis.set_major_locator(mdates.HourLocator())
+    fig.autofmt_xdate()
     ax.set_yticks([0, ysize/2, ysize-1])
     ax.set_yticklabels(['S', 'Z', 'N'])
     ax.set_xlabel("UT")

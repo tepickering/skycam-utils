@@ -8,7 +8,7 @@ import astropy.visualization as viz
 
 
 def fits_to_fig(filename, outimage=None, outfig=None, rotation=3, xcen=1003, ycen=707, radius=680,
-                powerstretch=0.75, contrast=0.35, gscale=0.7, bscale=1.7):
+                powerstretch=0.75, contrast=0.35, gscale=0.7, bscale=1.7, figsize=12):
     """
     Take a FITS file as produced by the alcor OMEA 8C and create a trimmed, rotated, and annotated figure
     file appropriate for display
@@ -37,6 +37,8 @@ def fits_to_fig(filename, outimage=None, outfig=None, rotation=3, xcen=1003, yce
         Scale factor to apply to green channel
     bscale : float (default=1.7)
         Scale factor to apply to blue channel
+    figsize : float (default=12)
+        Size of matplotlib figure in inches
     """
     hdul = fits.open(filename)
     im = np.transpose(hdul[0].data, axes=(1, 2, 0)) - 2000  # 2000 is a bit above the normal bias level of the camera.
@@ -58,7 +60,7 @@ def fits_to_fig(filename, outimage=None, outfig=None, rotation=3, xcen=1003, yce
     if outimage is not None:
         plt.imsave(outimage, im)
 
-    fig, ax = plt.subplots(figsize=(8, 8))
+    fig, ax = plt.subplots(figsize=(figsize, figsize))
     circle = Circle((radius, radius), radius, facecolor='none', edgecolor=(0, 0, 0), linewidth=1, alpha=0.5)
     ax.add_patch(circle)
     ax.axis("off")

@@ -7,7 +7,7 @@ from astropy.io import fits
 import astropy.visualization as viz
 
 
-def fits_to_fig(filename, outimage=None, outfig=None, rotation=3, xcen=1003, ycen=707, radius=680,
+def fits_to_fig(filename, outimage=None, outfig=None, rotation=2.5, xcen=1003, ycen=707, radius=680,
                 powerstretch=0.75, contrast=0.35, gscale=0.7, bscale=1.7, figsize=12):
     """
     Take a FITS file as produced by the alcor OMEA 8C and create a trimmed, rotated, and annotated figure

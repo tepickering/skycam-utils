@@ -64,7 +64,6 @@ def fits_to_fig(filename, outimage=None, outfig=None, rotation=2.5, xcen=1003, y
     circle = Circle((radius, radius), radius, facecolor='none', edgecolor=(0, 0, 0), linewidth=1, alpha=0.5)
     ax.add_patch(circle)
     ax.axis("off")
-
     im_plot = plt.imshow(im)
     im_plot.set_clip_path(circle)
 
@@ -73,11 +72,12 @@ def fits_to_fig(filename, outimage=None, outfig=None, rotation=2.5, xcen=1003, y
     pax.set_theta_zero_location("N")
     yticks = np.array([15, 30, 45, 60, 75]) / 90.0
     ylabels = [" 75°", " 60°", " 45°", " 30°", " 15°"]
-    pax.set_yticks(yticks, labels=ylabels, color="white", alpha=0.5)
+    pax.set_yticks(yticks, labels=ylabels, color="white", alpha=0.5, fontsize=16)
     pax.set_rlabel_position(90)
     pax.tick_params(grid_alpha=0.5)
+    pax.tick_params(axis='x', labelsize=16, labelcolor='silver', pad=10)
 
     if outfig is not None:
-        plt.savefig(outfig)
+        plt.savefig(outfig, transparent=True, bbox_inches='tight', pad_inches = 0)
 
     return fig

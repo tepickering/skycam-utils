@@ -1,6 +1,6 @@
 #!/bin/bash
 
-datedir = $1
+datedir="$1"
 
 mkdir -p /mnt/d/skycam/movies/$datedir
 

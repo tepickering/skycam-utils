@@ -49,4 +49,5 @@ if mmt_catra < 0:
     mmt_ra = mmt_lst
     mmt_dec = mmt_lat
 
-print(f"now_alcor: {now_alcor} mmt_ra: {mmt_ra}, mmt_dec: {mmt_dec}")
+with open("position.txt", "w") as f:
+    f.write(f"{now_alcor}\n{mmt_ra}\n{mmt_dec}\n")

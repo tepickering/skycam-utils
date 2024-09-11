@@ -49,4 +49,4 @@ if mmt_catra < 0:
     mmt_ra = mmt_lst
     mmt_dec = mmt_lat
 
-print(f"now_alcor: {now} mmt_ra: {mmt_ra}, mmt_dec: {mmt_dec}")
+print(f"now_alcor: {now_alcor} mmt_ra: {mmt_ra}, mmt_dec: {mmt_dec}")

@@ -52,7 +52,10 @@ while True:
         mmt_ra = mmt_lst
         mmt_dec = mmt_lat
 
-    with open("/mnt/d/skycam/mmt_position.txt", "w") as f:
-        f.write(f"{now_alcor}\n{mmt_ra}\n{mmt_dec}\n")
+    try:
+        with open("/mnt/d/skycam/mmt_position.txt", "w") as f:
+            f.write(f"{now_alcor}\n{mmt_ra}\n{mmt_dec}\n")
+    except Exception as e:
+        print(e)
 
     time.sleep(5)

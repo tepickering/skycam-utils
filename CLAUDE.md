@@ -67,10 +67,6 @@ process_stellacam_image(fitsfile, year)
 
 Borrowed from LSST. Provides `wcs_zea` / `wcs_azp` callable classes used as objective functions for `scipy.optimize.minimize` in `astrometry.initial_wcs_fit()`. `wcs_sip_fit()` then refines with SIP distortion via `astropy.wcs.utils.fit_wcs_from_points`. SIP terms only survive a write if you use `write_sip()` — `to_fits()` drops them by default.
 
-### IERS
-
-`pipeline.py` disables IERS auto-download (`iers.conf.auto_download = False`). The Dockerfile pre-fetches IERS data via `scripts/iers.py` at image build time. If you see IERS errors locally, run `scripts/iers.py` once.
-
 ## `scripts/` is operational, not packaged
 
 These run on the live skycam host (Windows WSL — paths like `/mnt/d/skycam/...`, `/mnt/c/Users/skycam/...`) and on `ops.mmto.arizona.edu`. They are **not** part of the installed Python package and are not on PYTHONPATH:

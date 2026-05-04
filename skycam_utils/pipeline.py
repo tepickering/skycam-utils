@@ -20,7 +20,6 @@ import astropy.wcs as wcs
 from astropy.io import fits
 from astropy.nddata import CCDData
 from astropy.time import Time
-from astropy.utils import iers
 from astropy.coordinates import AltAz, get_moon, get_sun
 from astropy.visualization import ZScaleInterval, SqrtStretch, ImageNormalize
 
@@ -29,8 +28,6 @@ from .astrometry import solve_field, load_wcs, update_altaz, MMT_LOCATION
 
 
 warnings.filterwarnings('ignore')
-iers.conf.auto_download = False
-iers.conf.auto_max_age = None
 
 
 def get_ut(hdr, year=2021):

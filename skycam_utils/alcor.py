@@ -1,3 +1,4 @@
+import argparse
 from pathlib import Path
 
 import numpy as np
@@ -186,3 +187,82 @@ def plot_alcor_fits(filename, outimage=None, outfig=None, rotation=0.4, xcen=696
         plt.savefig(outfig, transparent=True, bbox_inches='tight', pad_inches = 0)
 
     return fig
+
+
+def alcor_proc_fits_cli():
+    """
+    CLI entry point for `alcor_proc_fits`. Writes a processed FITS file with
+    the alt/az WCS encoded in the header.
+    """
+    parser = argparse.ArgumentParser(
+        description="Process an alcor OMEA 8C FITS image into a zenith-centered, north-up FITS file with alt/az WCS."
+    )
+    parser.add_argument("filename", help="Input alcor FITS file.")
+    parser.add_argument("-o", "--output", default=None, help="Output FITS path (default: <input>_proc.fits).")
+    parser.add_argument("--overwrite", action="store_true", help="Overwrite output file if it exists.")
+    parser.add_argument("--rotation", type=float, default=0.4, help="Camera rotation w.r.t. true north (deg).")
+    parser.add_argument("--xcen", type=int, default=696, help="X center of illuminated region.")
+    parser.add_argument("--ycen", type=int, default=698, help="Y center of illuminated region.")
+    parser.add_argument("--radius", type=int, default=680, help="Half-width of trimmed square around (xcen, ycen).")
+    parser.add_argument("--horizon-radius", type=float, default=662, help="Pixel radius from zenith at altitude=0.")
+    args = parser.parse_args()
+
+    out = alcor_proc_fits(
+        args.filename,
+        output_file=args.output,
+        overwrite=args.overwrite,
+        rotation=args.rotation,
+        xcen=args.xcen,
+        ycen=args.ycen,
+        radius=args.radius,
+        horizon_radius=args.horizon_radius,
+    )
+    print(out)
+
+
+def plot_alcor_fits_cli():
+    """
+    CLI entry point for `plot_alcor_fits`. Writes an annotated PDF figure by
+    default, named after the input file with `.fits` replaced by `.pdf`.
+    """
+    parser = argparse.ArgumentParser(
+        description="Render an annotated all-sky figure from an alcor OMEA 8C FITS image."
+    )
+    parser.add_argument("filename", help="Input alcor FITS file.")
+    parser.add_argument(
+        "-o", "--outfig", default=None,
+        help="Output figure path (default: <input>.pdf). Format inferred from extension."
+    )
+    parser.add_argument("--outimage", default=None, help="If set, also write the raw stretched image to this path.")
+    parser.add_argument("--rotation", type=float, default=0.4, help="Camera rotation w.r.t. true north (deg).")
+    parser.add_argument("--xcen", type=int, default=696, help="X center of illuminated region.")
+    parser.add_argument("--ycen", type=int, default=698, help="Y center of illuminated region.")
+    parser.add_argument("--radius", type=int, default=680, help="Half-width of trimmed square around (xcen, ycen).")
+    parser.add_argument("--horizon-radius", type=float, default=662, help="Pixel radius from zenith at altitude=0.")
+    parser.add_argument("--powerstretch", type=float, default=0.75, help="Power-stretch exponent.")
+    parser.add_argument("--contrast", type=float, default=0.35, help="ZScale contrast factor.")
+    parser.add_argument("--gscale", type=float, default=0.7, help="Green channel scale factor.")
+    parser.add_argument("--bscale", type=float, default=1.7, help="Blue channel scale factor.")
+    parser.add_argument("--figsize", type=float, default=12, help="Matplotlib figure size in inches.")
+    args = parser.parse_args()
+
+    outfig = args.outfig
+    if outfig is None:
+        outfig = str(args.filename).replace(".fits", ".pdf", 1)
+
+    plot_alcor_fits(
+        args.filename,
+        outimage=args.outimage,
+        outfig=outfig,
+        rotation=args.rotation,
+        xcen=args.xcen,
+        ycen=args.ycen,
+        radius=args.radius,
+        horizon_radius=args.horizon_radius,
+        powerstretch=args.powerstretch,
+        contrast=args.contrast,
+        gscale=args.gscale,
+        bscale=args.bscale,
+        figsize=args.figsize,
+    )
+    print(outfig)

@@ -45,6 +45,8 @@ extra = [
 
 [project.scripts]
 process_stellacam_dir = "skycam_utils.pipeline:process_stellacam_dir"
+alcor_proc_fits = "skycam_utils.alcor:alcor_proc_fits_cli"
+plot_alcor_fits = "skycam_utils.alcor:plot_alcor_fits_cli"
 
 [tool.setuptools.packages.find]
 include = ["skycam_utils*"]

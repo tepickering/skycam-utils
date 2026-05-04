@@ -1,8 +1,7 @@
 # Licensed under a 3-clause BSD style license - see LICENSE.rst
 
-import os
 import subprocess
-import pkg_resources
+from importlib.resources import files
 from pathlib import Path
 
 import numpy as np
@@ -34,9 +33,9 @@ def load_wcs(year=2021):
         print(f"WCS not yet implemented for {year}.")
         return None
 
-    wcs_path = pkg_resources.resource_filename(__name__, os.path.join("data", wcs_file))
+    wcs_path = files(__package__) / "data" / wcs_file
 
-    wcs = WCS(wcs_path)
+    wcs = WCS(str(wcs_path))
 
     return wcs
 

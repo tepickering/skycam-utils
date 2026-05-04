@@ -1,0 +1,26 @@
+name: skycam
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.14
+  - pip
+  - astropy
+  - astropy-iers-data
+  - numpy
+  - scipy
+  - matplotlib
+  - pandas
+  - photutils
+  - scikit-image
+  - ccdproc
+  - regions
+  - redis-py
+  - pytest
+  - pytest-astropy
+  - pytest-cov
+  - sphinx-astropy
+  - jupyter
+  - ipykernel
+  - ipympl
+  - pip:
+      - -e .

@@ -1,0 +1,38 @@
+name: pytest
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: Python 3.14
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        shell: bash -el {0}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create conda environment
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest
+          environment-file: environment.yml
+          activate-environment: skycam
+          python-version: "3.14"
+          auto-activate-base: false
+
+      - name: Show environment
+        run: |
+          python --version
+          conda info
+          conda list
+
+      - name: Run tests
+        run: pytest

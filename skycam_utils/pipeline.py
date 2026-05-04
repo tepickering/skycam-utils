@@ -20,8 +20,7 @@ import astropy.wcs as wcs
 from astropy.io import fits
 from astropy.nddata import CCDData
 from astropy.time import Time
-from astropy.utils import iers
-from astropy.coordinates import AltAz, get_moon, get_sun
+from astropy.coordinates import AltAz, get_body, get_sun
 from astropy.visualization import ZScaleInterval, SqrtStretch, ImageNormalize
 
 from .photometry import make_background, make_segmentation_image, make_catalog, load_mask, match_stars, load_skycam_catalog
@@ -29,8 +28,6 @@ from .astrometry import solve_field, load_wcs, update_altaz, MMT_LOCATION
 
 
 warnings.filterwarnings('ignore')
-iers.conf.auto_download = False
-iers.conf.auto_max_age = None
 
 
 def get_ut(hdr, year=2021):
@@ -90,7 +87,7 @@ def stellacam_strip_image(rootdir, writefile=True, outfile=None, compressed=True
                 hdr = hdul[0].header
                 utc = get_ut(hdr, year=year)
                 aa_frame = AltAz(obstime=utc, location=MMT_LOCATION)
-                moon = get_moon(utc, MMT_LOCATION)
+                moon = get_body("moon", utc, MMT_LOCATION)
                 sun = get_sun(utc)
                 moon_aa = moon.transform_to(aa_frame)
                 sun_aa = sun.transform_to(aa_frame)

@@ -1,7 +1,6 @@
 # Licensed under a 3-clause BSD style license - see LICENSE.rst
 
-import os
-import pkg_resources
+from importlib.resources import files
 
 import numpy as np
 
@@ -29,9 +28,9 @@ def load_mask(year=2021):
         print(f"Mask not yet implemented for {year}.")
         return None
 
-    mask_path = pkg_resources.resource_filename(__name__, os.path.join("data", mask_file))
+    mask_path = files(__package__) / "data" / mask_file
 
-    with fits.open(mask_path) as hdul:
+    with fits.open(str(mask_path)) as hdul:
         im = hdul[0].data
 
     return im
@@ -41,8 +40,8 @@ def load_bright_star_catalog():
     """
     Load the catalog containing Sloan photometry for the brightest stars
     """
-    catpath = pkg_resources.resource_filename(__name__, os.path.join("data", "bright_star_sloan.fits"))
-    phot_cat = Table.read(catpath, memmap=True)
+    catpath = files(__package__) / "data" / "bright_star_sloan.fits"
+    phot_cat = Table.read(str(catpath), memmap=True)
     phot_cat['coords'] = SkyCoord(phot_cat['_RAJ2000'], phot_cat['_DEJ2000'], frame='icrs', unit='deg')
     cut = phot_cat['g_mag'] < 5.0
     return phot_cat[cut]
@@ -53,8 +52,8 @@ def load_skycam_catalog():
     Load the curated skycam catalog that combines the bright star catalog with Sloan photometry
     with a larger catalog that includes the star names as well.
     """
-    catpath = pkg_resources.resource_filename(__name__, os.path.join("data", "skycam_stars.csv"))
-    skycam_cat = Table.read(catpath)
+    catpath = files(__package__) / "data" / "skycam_stars.csv"
+    skycam_cat = Table.read(str(catpath))
     return skycam_cat
 
 

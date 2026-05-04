@@ -1,18 +1,13 @@
-FROM python:3.8
+FROM python:3.12-slim
 
 LABEL maintainer="te.pickering@gmail.com"
 
-COPY . .
+COPY . /src
+WORKDIR /src
 
-RUN python -m pip install --upgrade pip
-RUN pip install -e .[all]
-
-COPY scripts/iers.py /usr/local/bin/iers.py
+RUN python -m pip install --upgrade pip && pip install .
 
 VOLUME ["/data"]
-
 WORKDIR /data
-
-RUN /usr/local/bin/iers.py
 
 ENTRYPOINT ["process_stellacam_dir"]

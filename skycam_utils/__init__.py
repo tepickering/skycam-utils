@@ -1,29 +1,8 @@
 # Licensed under a 3-clause BSD style license - see LICENSE.rst
 
-# Packages may add whatever they like to this file, but
-# should keep this content at the top.
-# ----------------------------------------------------------------------------
-from ._astropy_init import *   # noqa
-# ----------------------------------------------------------------------------
+try:
+    from ._version import version as __version__
+except ImportError:
+    __version__ = "0.0.0"
 
-# Enforce Python version check during package import.
-# This is the same check as the one at the top of setup.py
-import sys
-from distutils.version import LooseVersion
-
-__minimum_python_version__ = "3.7"
-
-__all__ = []
-
-
-class UnsupportedPythonError(Exception):
-    pass
-
-
-if LooseVersion(sys.version) < LooseVersion(__minimum_python_version__):
-    raise UnsupportedPythonError("skycam_utils does not support Python < {}"
-                                 .format(__minimum_python_version__))
-
-if not _ASTROPY_SETUP_:   # noqa
-    # For egg_info test builds to pass, put package imports here.
-    pass
+__all__ = ["__version__"]

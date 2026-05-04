@@ -19,5 +19,8 @@ dependencies:
   - pytest-astropy
   - pytest-cov
   - sphinx-astropy
+  - jupyter
+  - ipykernel
+  - ipympl
   - pip:
       - -e .

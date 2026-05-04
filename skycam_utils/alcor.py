@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 from scipy.ndimage import rotate
 import matplotlib.pyplot as plt
@@ -64,8 +66,47 @@ def load_alcor_fits(filename, rotation=0.4, xcen=696, ycen=698, radius=680, hori
     wcs.wcs.crpix = [radius + 0.5, radius + 0.5]
     wcs.wcs.crval = [0.0, 90.0]
     wcs.wcs.cdelt = [cdelt, cdelt]
+    # Native pole == celestial pole here (CRVAL2=+90), so set LONPOLE explicitly:
+    # leaving it to wcslib's default produces a 180° azimuth offset because its
+    # default for this degenerate case is 180°, not the spec's 0°.
+    wcs.wcs.lonpole = 0.0
 
     return im, wcs
+
+
+def alcor_proc_fits(filename, output_file=None, overwrite=False, **kwargs):
+    """
+    Process an alcor OMEA 8C FITS file via `load_alcor_fits` and write a new
+    FITS file containing the zenith-centered, north-up image with the
+    alt/az WCS encoded in the header.
+
+    Parameters
+    ----------
+    filename : str or `~pathlib.Path`
+        Input FITS file.
+    output_file : str or `~pathlib.Path` or None (default=None)
+        Output path. If None, derived from `filename` by replacing the
+        first `.fits` substring with `_proc.fits`.
+    overwrite : bool (default=False)
+        Passed through to `fits.PrimaryHDU.writeto`.
+    **kwargs
+        Forwarded to `load_alcor_fits` (rotation, xcen, ycen, radius,
+        horizon_radius).
+
+    Returns
+    -------
+    output_file : `~pathlib.Path`
+        Path to the written FITS file.
+    """
+    im, wcs = load_alcor_fits(filename, **kwargs)
+    if output_file is None:
+        output_file = str(filename).replace(".fits", "_proc.fits", 1)
+    output_file = Path(output_file)
+
+    cube = np.transpose(np.flipud(im), axes=(2, 0, 1)).astype(np.float32)
+    hdu = fits.PrimaryHDU(data=cube, header=wcs.to_header())
+    hdu.writeto(output_file, overwrite=overwrite)
+    return output_file
 
 
 def plot_alcor_fits(filename, outimage=None, outfig=None, rotation=0.4, xcen=696, ycen=698, radius=680,

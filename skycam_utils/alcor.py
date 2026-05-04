@@ -101,7 +101,12 @@ def alcor_proc_fits(filename, output_file=None, overwrite=False, **kwargs):
     """
     im, wcs = load_alcor_fits(filename, **kwargs)
     if output_file is None:
-        output_file = str(filename).replace(".fits", "_proc.fits", 1)
+        stem = str(filename)
+        for ext in (".fits.bz2", ".fits.gz", ".fits"):
+            if stem.endswith(ext):
+                stem = stem[: -len(ext)]
+                break
+        output_file = stem + "_proc.fits"
     output_file = Path(output_file)
 
     cube = np.transpose(np.flipud(im), axes=(2, 0, 1)).astype(np.float32)
@@ -248,7 +253,12 @@ def plot_alcor_fits_cli():
 
     outfig = args.outfig
     if outfig is None:
-        outfig = str(args.filename).replace(".fits", ".pdf", 1)
+        stem = str(args.filename)
+        for ext in (".fits.bz2", ".fits.gz", ".fits"):
+            if stem.endswith(ext):
+                stem = stem[: -len(ext)]
+                break
+        outfig = stem + ".pdf"
 
     plot_alcor_fits(
         args.filename,

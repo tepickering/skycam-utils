@@ -27,8 +27,7 @@ MANIFEST
 .vscode/
 
 # version files
-version.py
-cython_version.py
+_version.py
 
 # PyInstaller
 #  Usually these files are written by a python script from a template

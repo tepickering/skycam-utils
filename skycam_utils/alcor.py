@@ -1,16 +1,19 @@
 import argparse
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
 from scipy.ndimage import rotate
+from scipy.ndimage import shift as ndimage_shift
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
 import matplotlib.dates as mdates
 from astropy.io import fits
 from astropy.time import Time
 from astropy.wcs import WCS
+from astropy.wcs.utils import fit_wcs_from_points
 
 import astropy.units as u
 import astropy.visualization as viz
@@ -92,7 +95,85 @@ def select_dark_frames(files, sun_alt_max=-18.0, location=MMT_LOCATION):
     return [f for f, k in zip(files, keep) if k]
 
 
-def load_alcor_fits(filename, rotation=0.4, xcen=696, ycen=698, radius=680, horizon_radius=662):
+def _base_arc_wcs(radius, horizon_radius, k1):
+    """Construct the linear ARC WCS (no SIP) for the given geometry."""
+    cdelt = 90.0 / (horizon_radius * k1)
+    wcs = WCS(naxis=2)
+    wcs.wcs.ctype = ["RA---ARC", "DEC--ARC"]
+    wcs.wcs.crpix = [radius + 0.5, radius + 0.5]
+    wcs.wcs.crval = [0.0, 90.0]
+    wcs.wcs.cdelt = [cdelt, cdelt]
+    wcs.wcs.lonpole = 0.0
+    return wcs
+
+
+def _arc_fit_template(radius, horizon_radius, k1):
+    """ARC template carrying the plate scale in the CD matrix.
+
+    ``fit_wcs_from_points`` forces ``cdelt=(1, 1)`` and fits the CD matrix, so
+    the linear plate scale must be encoded in CD rather than CDELT. Without it
+    the identity-CD initial guess maps the synthetic grid >180 deg from the
+    zenith pole, where the ARC projection is undefined and the least-squares
+    seed becomes non-finite.
+    """
+    cdelt = 90.0 / (horizon_radius * k1)
+    wcs = WCS(naxis=2)
+    wcs.wcs.ctype = ["RA---ARC", "DEC--ARC"]
+    wcs.wcs.crpix = [radius + 0.5, radius + 0.5]
+    wcs.wcs.crval = [0.0, 90.0]
+    wcs.wcs.cd = [[cdelt, 0.0], [0.0, cdelt]]
+    wcs.wcs.lonpole = 0.0
+    return wcs
+
+
+@lru_cache(maxsize=32)
+def build_alcor_wcs(radius=ALCOR_RADIUS, horizon_radius=ALCOR_HORIZON_RADIUS,
+                    radial_coeffs=ALCOR_RADIAL_COEFFS, sip_degree=5):
+    """
+    Build an ARC-projection WCS for the processed alcor frame. When the radial
+    model has non-trivial higher-order terms, the deviation from the linear
+    (equidistant) mapping is encoded as SIP distortion fitted from a synthetic
+    grid of the forward model, so ``world_to_pixel``/``to_header`` reproduce the
+    lens distortion. Cached because the geometry is fixed across images.
+
+    Note: the quadratic radial term (``k2``) produces a displacement field that
+    scales as ``rho * (u, v)`` (an odd radial power, i.e. involving
+    ``sqrt(u**2 + v**2)``), which a finite-degree SIP polynomial cannot
+    represent exactly; for the calibration-scale coefficients used here the SIP
+    reproduces the forward model to a few tenths of a pixel over the full FOV.
+    """
+    radial_coeffs = tuple(float(c) for c in radial_coeffs)
+    k1, k2, k3 = radial_coeffs
+    if abs(k2) < 1e-12 and abs(k3) < 1e-12:
+        return _base_arc_wcs(radius, horizon_radius, k1)
+
+    template = _arc_fit_template(radius, horizon_radius, k1)
+
+    # Synthetic grid spanning the FOV (avoid the alt=90 pole singularity).
+    alt_grid = np.linspace(2.0, 89.5, 40)
+    az_grid = np.linspace(0.0, 350.0, 36)
+    alt_mesh, az_mesh = np.meshgrid(alt_grid, az_grid)
+    alt_flat = alt_mesh.ravel()
+    az_flat = az_mesh.ravel()
+    x, y = _predict_pixels(
+        alt_flat, az_flat,
+        xshift=0.0, yshift=0.0, rotation=0.0,
+        radial_coeffs=radial_coeffs, radius=radius, horizon_radius=horizon_radius,
+    )
+    world = SkyCoord(az_flat * u.deg, alt_flat * u.deg)
+    wcs = fit_wcs_from_points(
+        (x, y), world,
+        projection=template,
+        proj_point=SkyCoord(0 * u.deg, 90 * u.deg),
+        sip_degree=sip_degree,
+    )
+    return wcs
+
+
+def load_alcor_fits(filename, rotation=ALCOR_ROTATION, xcen=696, ycen=698,
+                    radius=ALCOR_RADIUS, horizon_radius=ALCOR_HORIZON_RADIUS,
+                    xshift=ALCOR_XSHIFT, yshift=ALCOR_YSHIFT,
+                    radial_coeffs=ALCOR_RADIAL_COEFFS, sip_degree=5):
     """
     Load a FITS image from the alcor OMEA 8C all-sky camera and return a
     zenith-centered, north-up RGB image along with a WCS that maps pixel
@@ -141,17 +222,16 @@ def load_alcor_fits(filename, rotation=0.4, xcen=696, ycen=698, radius=680, hori
     yu = ycen + radius
     im = im[yl:yu, xl:xu, :]
     im = np.flipud(rotate(im, rotation, reshape=False))
+    if xshift != 0.0 or yshift != 0.0:
+        # Recenter the zenith onto the array center (rows=y, cols=x, channels untouched).
+        im = ndimage_shift(im, shift=(-yshift, -xshift, 0.0), order=1, mode="constant", cval=0.0)
 
-    cdelt = 90.0 / horizon_radius
-    wcs = WCS(naxis=2)
-    wcs.wcs.ctype = ['RA---ARC', 'DEC--ARC']
-    wcs.wcs.crpix = [radius + 0.5, radius + 0.5]
-    wcs.wcs.crval = [0.0, 90.0]
-    wcs.wcs.cdelt = [cdelt, cdelt]
-    # Native pole == celestial pole here (CRVAL2=+90), so set LONPOLE explicitly:
-    # leaving it to wcslib's default produces a 180° azimuth offset because its
-    # default for this degenerate case is 180°, not the spec's 0°.
-    wcs.wcs.lonpole = 0.0
+    wcs = build_alcor_wcs(
+        radius=radius,
+        horizon_radius=horizon_radius,
+        radial_coeffs=tuple(float(c) for c in radial_coeffs),
+        sip_degree=sip_degree,
+    )
 
     return im, wcs
 

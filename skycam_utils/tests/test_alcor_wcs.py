@@ -18,6 +18,8 @@ from skycam_utils.alcor import (
     ALCOR_RADIAL_COEFFS,
     _predict_pixels,
     _sun_altitude,
+    build_alcor_wcs,
+    load_alcor_fits,
     select_dark_frames,
 )
 
@@ -75,3 +77,43 @@ def test_select_dark_frames_filters_by_sun_altitude(tmp_path):
 
     selected = select_dark_frames([day, dark, twilight], sun_alt_max=-18.0)
     assert selected == [dark]
+
+
+def test_build_alcor_wcs_idealized_matches_equidistant():
+    wcs = build_alcor_wcs(radius=680, horizon_radius=662, radial_coeffs=(1.0, 0.0, 0.0))
+    assert list(wcs.wcs.ctype) == ["RA---ARC", "DEC--ARC"]
+    np.testing.assert_allclose(wcs.wcs.crpix, [680.5, 680.5])
+    np.testing.assert_allclose(wcs.wcs.cdelt, [90.0 / 662.0, 90.0 / 662.0])
+    assert wcs.sip is None  # no SIP attached when the model is purely linear
+
+    az = np.array([0.0, 90.0, 180.0, 270.0])
+    px, py = wcs.world_to_pixel_values(az, np.zeros_like(az))
+    radii = np.hypot(px - 679.5, py - 679.5)
+    np.testing.assert_allclose(radii, 662.0, atol=1e-6)
+
+
+def test_build_alcor_wcs_with_radial_term_reproduces_forward_model():
+    coeffs = (1.0, 0.02, 0.05)
+    wcs = build_alcor_wcs(radius=680, horizon_radius=662, radial_coeffs=coeffs)
+    assert wcs.sip is not None
+
+    alt = np.array([80.0, 60.0, 40.0, 20.0, 5.0])
+    az = np.array([10.0, 100.0, 190.0, 280.0, 350.0])
+    model_x, model_y = _predict_pixels(alt, az, radial_coeffs=coeffs)
+    wcs_x, wcs_y = wcs.world_to_pixel_values(az, alt)
+    # The quadratic radial term (k2) produces a displacement field that scales as
+    # rho*(u, v) -- an odd radial power involving sqrt(u**2 + v**2) -- which a
+    # finite-degree SIP polynomial cannot represent exactly. The best stable fit
+    # (any degree 4-6, any synthetic grid) plateaus near ~0.22 px; degrees >=7 are
+    # numerically unstable in the raw-pixel SIP basis. So we require the SIP to
+    # reproduce the radial model to better than 0.3 px across the FOV.
+    np.testing.assert_allclose(wcs_x, model_x, atol=0.3)
+    np.testing.assert_allclose(wcs_y, model_y, atol=0.3)
+
+
+def test_load_alcor_fits_idealized_defaults_unchanged():
+    test_fits = Path(__file__).with_name("test.fits.bz2")
+    im, wcs = load_alcor_fits(test_fits)
+    assert im.shape == (1360, 1360, 3)
+    np.testing.assert_allclose(wcs.wcs.crpix, [680.5, 680.5])
+    np.testing.assert_allclose(wcs.wcs.cdelt, [90.0 / 662.0, 90.0 / 662.0])

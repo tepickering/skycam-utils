@@ -37,6 +37,8 @@ def _invert_radial(z_deg, radial_coeffs, n_iter=8):
     (true for physical near-equidistant coefficients).
     """
     k1, k3, k5 = radial_coeffs
+    if k1 <= 0:
+        raise ValueError("radial coefficient k1 must be positive")
     t = np.asarray(z_deg, dtype=float) / 90.0
     rho = t / k1  # equidistant first guess
     for _ in range(n_iter):
@@ -167,7 +169,6 @@ def _fit_sip_inverse(a, b, radius, sip_degree):
     return ap, bp
 
 
-@lru_cache(maxsize=32)
 def build_alcor_wcs(radius=ALCOR_RADIUS, horizon_radius=ALCOR_HORIZON_RADIUS,
                     radial_coeffs=ALCOR_RADIAL_COEFFS, sip_degree=5):
     """
@@ -186,8 +187,20 @@ def build_alcor_wcs(radius=ALCOR_RADIUS, horizon_radius=ALCOR_HORIZON_RADIUS,
     detector pixel offsets, so the SIP coefficients are constructed analytically
     (not fitted) and reproduce the plate solution to numerical precision over
     the whole FOV.
+
+    Accepts any iterable of radial coefficients (coerced to a tuple for caching)
+    and returns a fresh WCS copy on each call, so the cached canonical object is
+    never mutated by callers.
     """
-    radial_coeffs = tuple(float(c) for c in radial_coeffs)
+    wcs = _build_alcor_wcs_cached(
+        int(radius), float(horizon_radius),
+        tuple(float(c) for c in radial_coeffs), int(sip_degree),
+    )
+    return wcs.deepcopy()
+
+
+@lru_cache(maxsize=32)
+def _build_alcor_wcs_cached(radius, horizon_radius, radial_coeffs, sip_degree):
     k1, k3, k5 = radial_coeffs
     base = _base_arc_wcs(radius, horizon_radius, k1)
     if abs(k3) < 1e-12 and abs(k5) < 1e-12:
@@ -246,6 +259,25 @@ def load_alcor_fits(filename, rotation=ALCOR_ROTATION, xcen=696, ycen=698,
         Half-width of the trimmed square around (xcen, ycen).
     horizon_radius : float (default=662)
         Pixel radius from zenith at which altitude=0.
+    xshift : float (default=0.0)
+        Zenith offset from the array center in the x (column) direction, in
+        pixels. A non-zero value shifts the image via ``scipy.ndimage.shift``
+        so that the zenith falls on the geometric center of the output array.
+    yshift : float (default=0.0)
+        Zenith offset from the array center in the y (row) direction, in
+        pixels. Applied together with ``xshift`` in a single
+        ``scipy.ndimage.shift`` call.
+    radial_coeffs : tuple of float (default=(1.0, 0.0, 0.0))
+        The ``(k1, k3, k5)`` odd-power plate-solution coefficients describing
+        the lens distortion via ``z = 90*(k1*rho + k3*rho**3 + k5*rho**5)``,
+        where ``rho = r / horizon_radius`` is the normalized detector radius
+        and ``z = 90 - alt`` is the zenith angle in degrees. Any iterable is
+        accepted and coerced to a tuple. The idealized equidistant mapping
+        corresponds to ``(1.0, 0.0, 0.0)``.
+    sip_degree : int (default=5)
+        Degree of the SIP polynomial used to encode lens distortion in the
+        WCS. A degree of 5 is required to represent the ``k5`` term exactly;
+        lower values may be used when only ``k3`` is non-zero.
 
     Returns
     -------
@@ -314,7 +346,7 @@ def alcor_proc_fits(filename, output_file=None, overwrite=False, **kwargs):
     output_file = Path(output_file)
 
     cube = np.transpose(np.flipud(im), axes=(2, 0, 1)).astype(np.float32)
-    hdu = fits.PrimaryHDU(data=cube, header=wcs.to_header())
+    hdu = fits.PrimaryHDU(data=cube, header=wcs.to_header(relax=True))
     hdu.writeto(output_file, overwrite=overwrite)
     return output_file
 

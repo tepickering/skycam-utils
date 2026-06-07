@@ -109,8 +109,8 @@ def test_build_alcor_wcs_with_radial_term_reproduces_forward_model():
     # k5*rho**5). Its Cartesian displacement is an exact degree-5 polynomial, so
     # the analytic SIP reproduces the plate solution to numerical precision in
     # both directions (world->pixel via astropy's iterative refinement of A/B).
-    np.testing.assert_allclose(wcs_x, model_x, atol=1e-3)
-    np.testing.assert_allclose(wcs_y, model_y, atol=1e-3)
+    np.testing.assert_allclose(wcs_x, model_x, atol=1e-4)
+    np.testing.assert_allclose(wcs_y, model_y, atol=1e-4)
 
 
 def test_load_alcor_fits_idealized_defaults_unchanged():

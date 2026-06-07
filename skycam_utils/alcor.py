@@ -425,7 +425,7 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=3.0, sun_alt_max=-
 
 def save_alcor_residual_plot(alt, az, obs_x, obs_y, params, output_file,
                              radius=ALCOR_RADIUS, horizon_radius=ALCOR_HORIZON_RADIUS,
-                             figsize=(18, 5.5), dpi=150, quiver_scale=25.0):
+                             figsize=(18, 5.5), dpi=150, nbins=30, min_per_cell=3):
     """
     Diagnostic plot of the fitted WCS residuals for matched stars, as three
     panels, and return the output path:
@@ -437,9 +437,11 @@ def save_alcor_residual_plot(alt, az, obs_x, obs_y, params, output_file,
        residual that varies with azimuth at fixed zenith indicates azimuthal
        asymmetry (lens/sensor decenter or tilt) that the azimuthally-symmetric
        radial model cannot capture.
-    3. The refined residual vector field over the detector, arrows magnified by
-       ``quiver_scale`` -- the spatial pattern (coherent radial / swirl /
-       elliptical vs. incoherent) classifies the structure at a glance.
+    3. The refined residual vector field over the detector, binned onto an
+       ``nbins`` x ``nbins`` grid (cells with at least ``min_per_cell`` matches)
+       and shown as one mean arrow per cell, auto-scaled. Averaging cancels the
+       incoherent scatter from mismatches so the coherent structure (radial /
+       swirl / elliptical) stands out; per-star arrows would saturate the panel.
     """
     alt = np.asarray(alt, dtype=float)
     az = np.asarray(az, dtype=float)
@@ -475,16 +477,37 @@ def save_alcor_residual_plot(alt, az, obs_x, obs_y, params, output_file,
     fig.colorbar(sc, ax=ax_a, label="zenith angle (deg)")
 
     cen = radius - 0.5
-    q = ax_v.quiver(obs_x, obs_y, dx, dy, after, angles="xy",
-                    scale_units="xy", scale=1.0 / quiver_scale,
-                    cmap="viridis", width=0.003)
+    # Bin the residual vectors onto a grid and average per cell, so coherent
+    # structure survives while incoherent (mismatch) scatter cancels out.
+    extent = 2.0 * radius
+    cell = extent / nbins
+    cx_i = np.clip((obs_x / cell).astype(int), 0, nbins - 1)
+    cy_i = np.clip((obs_y / cell).astype(int), 0, nbins - 1)
+    flat = cy_i * nbins + cx_i
+    n = nbins * nbins
+    count = np.bincount(flat, minlength=n).astype(float)
+    sum_dx = np.bincount(flat, weights=dx, minlength=n)
+    sum_dy = np.bincount(flat, weights=dy, minlength=n)
+    keep = count >= min_per_cell
+    cells = np.where(keep)[0]
+    mean_dx = sum_dx[cells] / count[cells]
+    mean_dy = sum_dy[cells] / count[cells]
+    gx = (cells % nbins + 0.5) * cell
+    gy = (cells // nbins + 0.5) * cell
+    gmag = np.hypot(mean_dx, mean_dy)
+    p90 = np.percentile(gmag, 90) if gmag.size else 1.0
+    amp = (1.5 * cell) / (p90 + 1e-9)  # 90th-pct arrow spans ~1.5 cells
+    q = ax_v.quiver(gx, gy, mean_dx, mean_dy, gmag, angles="xy",
+                    scale_units="xy", scale=1.0 / amp, cmap="viridis", width=0.004)
     ax_v.plot(cen, cen, "r+", ms=14, label="zenith (array center)")
     ax_v.set_aspect("equal")
-    ax_v.set_title(f"refined residual vector field (x{quiver_scale:g})")
+    ax_v.set_xlim(0, extent)
+    ax_v.set_ylim(0, extent)
+    ax_v.set_title(f"binned mean residual vectors ({nbins}x{nbins}, x{amp:.0f})")
     ax_v.set_xlabel("x (pix)")
     ax_v.set_ylabel("y (pix)")
     ax_v.legend(loc="upper right")
-    fig.colorbar(q, ax=ax_v, label="pixel residual")
+    fig.colorbar(q, ax=ax_v, label="mean |residual| (pix)")
 
     fig.suptitle("Alcor WCS residuals")
     output_file = Path(output_file)

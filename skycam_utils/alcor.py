@@ -6,13 +6,14 @@ from pathlib import Path
 
 import numpy as np
 from scipy.ndimage import rotate
+from scipy.optimize import least_squares
 from scipy.ndimage import shift as ndimage_shift
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
 import matplotlib.dates as mdates
 from astropy.io import fits
 from astropy.stats import sigma_clipped_stats
-from astropy.table import Table
+from astropy.table import Table, hstack
 from astropy.time import Time
 from astropy.wcs import WCS, Sip
 from photutils.detection import DAOStarFinder
@@ -93,6 +94,95 @@ def _predict_pixels(
     x = (radius - 0.5) + xshift - r * np.sin(ang)
     y = (radius - 0.5) + yshift + r * np.cos(ang)
     return x, y
+
+
+def _fit_params(alt, az, obs_x, obs_y, init_params, radius=ALCOR_RADIUS,
+                horizon_radius=ALCOR_HORIZON_RADIUS):
+    """
+    Least-squares fit of (xshift, yshift, rotation, k3, k5) to matched stars.
+    k1 is held at 1.0 (the zenith plate scale is set by horizon_radius); k3, k5
+    are the odd-power radial distortion coefficients. Returns an updated params
+    dict with keys xshift, yshift, rotation, radial_coeffs=(1.0, k3, k5).
+    """
+    alt = np.asarray(alt, dtype=float)
+    az = np.asarray(az, dtype=float)
+    obs_x = np.asarray(obs_x, dtype=float)
+    obs_y = np.asarray(obs_y, dtype=float)
+    p0 = np.array([
+        init_params["xshift"], init_params["yshift"], init_params["rotation"],
+        init_params["radial_coeffs"][1], init_params["radial_coeffs"][2],
+    ], dtype=float)
+
+    def residuals(p):
+        xshift, yshift, rot, k3, k5 = p
+        x, y = _predict_pixels(alt, az, xshift=xshift, yshift=yshift, rotation=rot,
+                               radial_coeffs=(1.0, k3, k5), radius=radius,
+                               horizon_radius=horizon_radius)
+        return np.concatenate([x - obs_x, y - obs_y])
+
+    result = least_squares(residuals, p0)
+    xshift, yshift, rot, k3, k5 = result.x
+    return dict(xshift=float(xshift), yshift=float(yshift), rotation=float(rot),
+                radial_coeffs=(1.0, float(k3), float(k5)))
+
+
+def match_alcor_stars(cat, detections, init_params,
+                      z_steps=(20.0, 40.0, 60.0, 75.0, 90.0), tolerance=12.0,
+                      radius=ALCOR_RADIUS, horizon_radius=ALCOR_HORIZON_RADIUS):
+    """
+    Match catalog stars (with Alt/Az/Vmag columns) to detected sources by
+    bootstrapping outward from the zenith.
+
+    For each zenith-angle cutoff in ``z_steps`` the catalog stars within that
+    cutoff are projected to pixels with the current geometry parameters and
+    matched to the nearest detection within ``tolerance`` pixels. When multiple
+    catalog stars claim the same detection the brighter one (smaller Vmag) wins.
+    After each step the geometry is refit (:func:`_fit_params`) and the cutoff
+    expands. Returns a table of matched (catalog + detection) rows.
+    """
+    det_x = np.asarray(detections["xcentroid"], dtype=float)
+    det_y = np.asarray(detections["ycentroid"], dtype=float)
+    params = dict(init_params)
+
+    matched_idx = {}  # detection index -> (catalog row index, vmag)
+    cat_z = 90.0 - np.asarray(cat["Alt"], dtype=float)
+    vmag = np.asarray(cat["Vmag"], dtype=float)
+
+    for z_cut in z_steps:
+        within = np.where(cat_z <= z_cut)[0]
+        if within.size == 0:
+            continue
+        px, py = _predict_pixels(
+            cat["Alt"][within], cat["Az"][within],
+            xshift=params["xshift"], yshift=params["yshift"], rotation=params["rotation"],
+            radial_coeffs=tuple(params["radial_coeffs"]), radius=radius, horizon_radius=horizon_radius,
+        )
+        claims = {}  # detection index -> (cat row index, vmag, dist)
+        for cat_i, x, y in zip(within, np.atleast_1d(px), np.atleast_1d(py)):
+            d = np.hypot(det_x - x, det_y - y)
+            j = int(np.argmin(d))
+            if d[j] > tolerance:
+                continue
+            prev = claims.get(j)
+            if prev is None or vmag[cat_i] < prev[1]:
+                claims[j] = (cat_i, vmag[cat_i], d[j])
+        matched_idx = {j: (ci, vm) for j, (ci, vm, _) in claims.items()}
+        if len(matched_idx) >= 3:
+            cat_rows = [ci for ci, _ in matched_idx.values()]
+            det_rows = list(matched_idx.keys())
+            params = _fit_params(
+                cat["Alt"][cat_rows], cat["Az"][cat_rows],
+                det_x[det_rows], det_y[det_rows],
+                init_params=params, radius=radius, horizon_radius=horizon_radius,
+            )
+
+    if not matched_idx:
+        return hstack([Table(cat[[]]), Table(detections[[]])])
+    det_rows = list(matched_idx.keys())
+    cat_rows = [ci for ci, _ in matched_idx.values()]
+    out = hstack([Table(cat[cat_rows]), Table(detections[det_rows])])
+    return out
+
 
 
 def _sun_altitude(time, location=MMT_LOCATION):

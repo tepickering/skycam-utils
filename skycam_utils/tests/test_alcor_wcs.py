@@ -10,6 +10,7 @@ _MPLCONFIGDIR = Path(tempfile.gettempdir()) / "skycam-utils-matplotlib"
 _MPLCONFIGDIR.mkdir(exist_ok=True)
 os.environ.setdefault("MPLCONFIGDIR", str(_MPLCONFIGDIR))
 
+from astropy.table import Table as _Table
 from astropy.time import Time
 
 from skycam_utils.alcor import (
@@ -22,6 +23,7 @@ from skycam_utils.alcor import (
     build_alcor_wcs,
     detect_alcor_stars,
     load_alcor_fits,
+    match_alcor_stars,
     select_dark_frames,
 )
 
@@ -165,3 +167,29 @@ def test_alcor_reference_altaz_filters_and_refracts():
     a_refr = float(cat["Alt"][list(cat["HD"]).index(hd)])
     a_none = float(no_refr["Alt"][list(no_refr["HD"]).index(hd)])
     assert a_refr >= a_none - 1e-6
+
+
+def _fake_detections(alt, az, params):
+    x, y = _predict_pixels(alt, az, **params)
+    return _Table({"xcentroid": np.asarray(x), "ycentroid": np.asarray(y),
+                   "flux": np.linspace(1000, 100, len(np.atleast_1d(x)))})
+
+
+def test_match_alcor_stars_recovers_correspondences():
+    alt = np.array([85.0, 70.0, 55.0, 40.0, 25.0, 10.0])
+    az = np.array([15.0, 80.0, 150.0, 210.0, 290.0, 340.0])
+    cat = _Table({"Alt": alt, "Az": az, "Vmag": np.linspace(0.5, 3.0, len(alt))})
+
+    true_params = dict(xshift=4.0, yshift=-3.0, rotation=0.6, radial_coeffs=(1.0, 0.03, 0.04))
+    det = _fake_detections(alt, az, true_params)
+
+    matched = match_alcor_stars(
+        cat, det,
+        init_params=dict(xshift=0.0, yshift=0.0, rotation=0.0, radial_coeffs=(1.0, 0.0, 0.0)),
+        z_steps=(20.0, 45.0, 70.0, 90.0), tolerance=12.0,
+    )
+    assert len(matched) >= 5
+    assert {"Alt", "Az", "xcentroid", "ycentroid"}.issubset(matched.colnames)
+    for row in matched:
+        ex, ey = _predict_pixels(row["Alt"], row["Az"], **true_params)
+        assert np.hypot(row["xcentroid"] - ex, row["ycentroid"] - ey) < 1e-6

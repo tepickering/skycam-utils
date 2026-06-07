@@ -15,6 +15,46 @@ from astropy.wcs import WCS
 import astropy.visualization as viz
 
 
+ALCOR_RADIUS = 680
+ALCOR_HORIZON_RADIUS = 662
+ALCOR_ROTATION = 0.4
+ALCOR_XSHIFT = 0.0
+ALCOR_YSHIFT = 0.0
+ALCOR_RADIAL_COEFFS = (1.0, 0.0, 0.0)
+
+
+def _predict_pixels(
+    alt,
+    az,
+    xshift=ALCOR_XSHIFT,
+    yshift=ALCOR_YSHIFT,
+    rotation=0.0,
+    radial_coeffs=ALCOR_RADIAL_COEFFS,
+    radius=ALCOR_RADIUS,
+    horizon_radius=ALCOR_HORIZON_RADIUS,
+):
+    """
+    Forward lens model: map altitude/azimuth (degrees) to processed-frame
+    pixel coordinates (x=column, y=row).
+
+    The radial mapping is ``r = horizon_radius * (k1*zeta + k2*zeta**2 +
+    k3*zeta**3)`` with ``zeta = (90 - alt)/90``. The idealized coefficients
+    ``(1, 0, 0)`` give the equidistant ARC mapping; higher-order terms encode
+    the lens's non-linear growth with zenith angle. ``rotation`` is the
+    azimuth-frame rotation in degrees; ``xshift``/``yshift`` offset the zenith
+    from the array center.
+    """
+    alt = np.asarray(alt, dtype=float)
+    az = np.asarray(az, dtype=float)
+    k1, k2, k3 = radial_coeffs
+    zeta = (90.0 - alt) / 90.0
+    r = horizon_radius * (k1 * zeta + k2 * zeta**2 + k3 * zeta**3)
+    ang = np.radians(az + rotation)
+    x = radius + xshift - r * np.sin(ang)
+    y = radius + yshift + r * np.cos(ang)
+    return x, y
+
+
 def load_alcor_fits(filename, rotation=0.4, xcen=696, ycen=698, radius=680, horizon_radius=662):
     """
     Load a FITS image from the alcor OMEA 8C all-sky camera and return a

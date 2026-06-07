@@ -89,13 +89,21 @@ New function `fit_alcor_wcs(...)` in `alcor.py`, with a CLI entry point.
 
 ## WCS representation
 
-The returned WCS stays ARC, with refined `crpix` and a `CD` matrix carrying
-`rot`. The radial polynomial is encoded as **SIP distortion** generated from the
-six fitted constants: a one-time least-squares of SIP terms to the radial model
-sampled over a pixel grid. This generation is `@lru_cache`d on the geometry
-parameters, so it runs once per process — never per image. Encoding as SIP keeps
+The returned WCS stays ARC with `crpix` at the array center. The radial
+polynomial is encoded as **SIP distortion** generated from the fitted constants:
+a one-time fit of SIP terms (via `fit_wcs_from_points` over a synthetic grid of
+the forward model). This generation is `@lru_cache`d on the geometry parameters,
+so it runs once per process — never per image. Encoding as SIP keeps
 `world_to_pixel_values()` and `to_header()` working unchanged, which is what the
 downstream consumers rely on.
+
+The fitted center offset and rotation are applied in the image itself rather
+than the WCS: `load_alcor_fits` rotates by the refined `rotation` and recenters
+the zenith onto the array center with a `scipy.ndimage` shift (`xshift`/`yshift`).
+Keeping the zenith at the array center preserves the assumptions that the keogram
+center column is the zenith meridian and that the plot's horizon circle is
+centered — while the WCS `crpix` stays at the center and only the radial
+distortion lives in SIP.
 
 ## Integration into `load_alcor_fits`
 

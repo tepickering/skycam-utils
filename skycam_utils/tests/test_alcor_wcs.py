@@ -32,12 +32,16 @@ from skycam_utils.alcor import (
 
 
 def test_predict_pixels_idealized_reproduces_zenith_and_horizon():
+    # Pass the idealized geometry explicitly: the module defaults are now the
+    # fitted (non-zero) calibration constants, so we override them here to test
+    # the equidistant mapping itself.
+    ideal = dict(xshift=0.0, yshift=0.0, rotation=0.0, radial_coeffs=(1.0, 0.0, 0.0))
     cen = ALCOR_RADIUS - 0.5
-    x, y = _predict_pixels(90.0, 0.0)
+    x, y = _predict_pixels(90.0, 0.0, **ideal)
     np.testing.assert_allclose([x, y], [cen, cen], atol=1e-9)
 
     az = np.array([0.0, 90.0, 180.0, 270.0])
-    x, y = _predict_pixels(np.zeros_like(az), az)
+    x, y = _predict_pixels(np.zeros_like(az), az, **ideal)
     radii = np.hypot(x - cen, y - cen)
     np.testing.assert_allclose(radii, ALCOR_HORIZON_RADIUS, atol=1e-9)
     np.testing.assert_allclose(x, cen - ALCOR_HORIZON_RADIUS * np.sin(np.radians(az)), atol=1e-9)
@@ -57,8 +61,10 @@ def test_predict_pixels_radial_term_changes_radius():
     assert bent_r < base_r
 
 
-def test_predict_pixels_default_coeffs_are_idealized():
-    assert ALCOR_RADIAL_COEFFS == (1.0, 0.0, 0.0)
+def test_predict_pixels_default_coeffs_are_baked_calibration():
+    # The module defaults carry the full-night fitted calibration (k1=1 by
+    # construction, fitted odd-power k3, k5 unused).
+    assert ALCOR_RADIAL_COEFFS == (1.0, 0.01383, 0.0)
 
 
 def test_sun_altitude_night_vs_day():
@@ -109,7 +115,12 @@ def test_build_alcor_wcs_with_radial_term_reproduces_forward_model():
     alt = np.array([80.0, 60.0, 40.0, 20.0, 5.0])
     az = np.array([10.0, 100.0, 190.0, 280.0, 350.0])
     assert list(wcs.wcs.ctype) == ["RA---ARC-SIP", "DEC--ARC-SIP"]
-    model_x, model_y = _predict_pixels(alt, az, radial_coeffs=coeffs)
+    # build_alcor_wcs encodes only the radial plate solution about the array
+    # center; compare against the forward model with no shift/rotation so the
+    # geometries match (the module defaults now carry non-zero shifts).
+    model_x, model_y = _predict_pixels(
+        alt, az, xshift=0.0, yshift=0.0, rotation=0.0, radial_coeffs=coeffs
+    )
     wcs_x, wcs_y = wcs.world_to_pixel_values(az, alt)
     # The plate-solution radial model maps the detector to the sky as an
     # odd-power polynomial in the detector pixel radius (k1*rho + k3*rho**3 +
@@ -276,3 +287,14 @@ def test_save_alcor_residual_plot_writes_output(tmp_path):
     out = save_alcor_residual_plot(alt, az, x, y, params, tmp_path / "resid.png")
     assert out.exists()
     assert out.stat().st_size > 0
+
+
+def test_load_alcor_fits_world_pixel_round_trip():
+    test_fits = Path(__file__).with_name("test.fits.bz2")
+    _, wcs = load_alcor_fits(test_fits)
+    az = np.array([10.0, 100.0, 200.0, 300.0])
+    alt = np.array([15.0, 35.0, 55.0, 75.0])
+    px, py = wcs.world_to_pixel_values(az, alt)
+    az2, alt2 = wcs.pixel_to_world_values(px, py)
+    np.testing.assert_allclose(az2 % 360.0, az % 360.0, atol=0.02)
+    np.testing.assert_allclose(alt2, alt, atol=0.02)

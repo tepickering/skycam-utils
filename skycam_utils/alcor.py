@@ -723,10 +723,10 @@ def alcor_reference_altaz(time, vmag_limit=3.0, min_alt=5.0, refraction=True,
     return cat
 
 
-def load_alcor_fits(filename, rotation=ALCOR_ROTATION, xcen=696, ycen=698,
+def load_alcor_fits(filename, rotation=None, xcen=696, ycen=698,
                     radius=ALCOR_RADIUS, horizon_radius=ALCOR_HORIZON_RADIUS,
-                    xshift=ALCOR_XSHIFT, yshift=ALCOR_YSHIFT,
-                    radial_coeffs=ALCOR_RADIAL_COEFFS, sip_degree=5):
+                    xshift=None, yshift=None,
+                    radial_coeffs=None, sip_degree=5):
     """
     Load a FITS image from the alcor OMEA 8C all-sky camera and return a
     zenith-centered, north-up RGB image along with a WCS that maps pixel
@@ -746,9 +746,9 @@ def load_alcor_fits(filename, rotation=ALCOR_ROTATION, xcen=696, ycen=698,
     ----------
     filename : str
         FITS filename. Compressed (.gz, .bz2) inputs are supported.
-    rotation : float (default=ALCOR_ROTATION)
-        Camera rotation w.r.t. true north, in degrees. Default is the fitted
-        calibration value stored in ALCOR_ROTATION.
+    rotation : float or None (default=None)
+        Camera rotation w.r.t. true north, in degrees. When None, resolved from
+        the calibration epoch nearest the frame's time (see alcor_calibration).
     xcen : int (default=696)
         X center of illuminated region in original image coordinates.
     ycen : int (default=698)
@@ -757,24 +757,15 @@ def load_alcor_fits(filename, rotation=ALCOR_ROTATION, xcen=696, ycen=698,
         Half-width of the trimmed square around (xcen, ycen).
     horizon_radius : float (default=662)
         Pixel radius from zenith at which altitude=0.
-    xshift : float (default=ALCOR_XSHIFT)
-        Zenith offset from the array center in the x (column) direction, in
-        pixels. Default is the fitted calibration value stored in ALCOR_XSHIFT.
-        A non-zero value shifts the image via ``scipy.ndimage.shift`` so that
-        the zenith falls on the geometric center of the output array.
-    yshift : float (default=ALCOR_YSHIFT)
-        Zenith offset from the array center in the y (row) direction, in
-        pixels. Default is the fitted calibration value stored in ALCOR_YSHIFT.
-        Applied together with ``xshift`` in a single ``scipy.ndimage.shift``
-        call.
-    radial_coeffs : tuple of float (default=ALCOR_RADIAL_COEFFS)
-        The ``(k1, k3, k5)`` odd-power plate-solution coefficients describing
-        the lens distortion via ``z = 90*(k1*rho + k3*rho**3 + k5*rho**5)``,
-        where ``rho = r / horizon_radius`` is the normalized detector radius
-        and ``z = 90 - alt`` is the zenith angle in degrees. Default is the
-        fitted calibration value stored in ALCOR_RADIAL_COEFFS. Any iterable
-        is accepted and coerced to a tuple. The idealized equidistant mapping
-        corresponds to ``(1.0, 0.0, 0.0)``.
+    xshift : float or None (default=None)
+        Zenith offset from the array center in x (pixels). When None, resolved
+        from the nearest calibration epoch. Applied via scipy.ndimage.shift.
+    yshift : float or None (default=None)
+        Zenith offset from the array center in y (pixels). When None, resolved
+        from the nearest calibration epoch.
+    radial_coeffs : tuple of float or None (default=None)
+        The (k1, k3, k5) plate-solution coefficients. When None, resolved from
+        the nearest calibration epoch. The idealized mapping is (1.0, 0.0, 0.0).
     sip_degree : int (default=5)
         Degree of the SIP polynomial used to encode lens distortion in the
         WCS. A degree of 5 is required to represent the ``k5`` term exactly;
@@ -787,6 +778,17 @@ def load_alcor_fits(filename, rotation=ALCOR_ROTATION, xcen=696, ycen=698,
     wcs : `astropy.wcs.WCS`
         ARC-projection WCS mapping pixel (x, y) ↔ (azimuth, altitude).
     """
+    if rotation is None or xshift is None or yshift is None or radial_coeffs is None:
+        cal = _alcor_frame_calibration(filename)
+        if rotation is None:
+            rotation = cal["rotation"]
+        if xshift is None:
+            xshift = cal["xshift"]
+        if yshift is None:
+            yshift = cal["yshift"]
+        if radial_coeffs is None:
+            radial_coeffs = cal["radial_coeffs"]
+
     with fits.open(filename) as hdul:
         data = hdul[0].data
     im = np.transpose(data, axes=(1, 2, 0)) - 2000  # 2000 is a bit above the normal bias level of the camera.

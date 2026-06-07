@@ -538,6 +538,34 @@ def test_alcor_calibration_nearest_in_time(monkeypatch):
     assert table[0]["xshift"] == -4.5
 
 
+def test_load_alcor_fits_resolves_and_overrides(monkeypatch):
+    import skycam_utils.alcor as alcor_mod
+    test_fits = Path(__file__).with_name("test.fits.bz2")
+
+    calls = {"n": 0}
+    real = alcor_mod._alcor_frame_calibration
+
+    def spy(filename):
+        calls["n"] += 1
+        return real(filename)
+
+    monkeypatch.setattr(alcor_mod, "_alcor_frame_calibration", spy)
+
+    # defaults -> resolver is consulted
+    _, wcs = alcor_mod.load_alcor_fits(test_fits)
+    assert calls["n"] == 1
+    assert "ARC" in wcs.wcs.ctype[0]
+
+    # all calibration kwargs explicit -> resolver NOT consulted, and an
+    # idealized radial term yields a plain ARC WCS (no SIP).
+    calls["n"] = 0
+    _, wcs = alcor_mod.load_alcor_fits(
+        test_fits, rotation=0.0, xshift=0.0, yshift=0.0,
+        radial_coeffs=(1.0, 0.0, 0.0))
+    assert calls["n"] == 0
+    assert wcs.sip is None
+
+
 def test_alcor_frame_calibration_uses_filename_then_header(monkeypatch, tmp_path):
     import skycam_utils.alcor as alcor_mod
     from astropy.io import fits

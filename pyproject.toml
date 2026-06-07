@@ -49,6 +49,7 @@ alcor_proc_fits = "skycam_utils.alcor:alcor_proc_fits_cli"
 alcor_keogram = "skycam_utils.alcor:alcor_keogram_cli"
 plot_alcor_keogram_fits = "skycam_utils.alcor:plot_alcor_keogram_fits_cli"
 plot_alcor_fits = "skycam_utils.alcor:plot_alcor_fits_cli"
+fit_alcor_wcs = "skycam_utils.alcor:fit_alcor_wcs_cli"
 
 [tool.setuptools.packages.find]
 include = ["skycam_utils*"]

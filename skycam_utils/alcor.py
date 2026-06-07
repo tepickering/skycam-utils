@@ -281,6 +281,41 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=3.0, sun_alt_max=-
     }
 
 
+def save_alcor_residual_plot(alt, az, obs_x, obs_y, params, output_file,
+                             radius=ALCOR_RADIUS, horizon_radius=ALCOR_HORIZON_RADIUS,
+                             figsize=(10, 5), dpi=150):
+    """
+    Plot pixel-residual magnitude versus zenith angle for matched stars, before
+    (idealized equidistant) and after (fitted) the refinement. Returns the
+    output path.
+    """
+    alt = np.asarray(alt, dtype=float)
+    z = 90.0 - alt
+    obs_x = np.asarray(obs_x, dtype=float)
+    obs_y = np.asarray(obs_y, dtype=float)
+
+    ix, iy = _predict_pixels(alt, az, xshift=0.0, yshift=0.0, rotation=0.0,
+                             radial_coeffs=(1.0, 0.0, 0.0), radius=radius,
+                             horizon_radius=horizon_radius)
+    fx, fy = _predict_pixels(alt, az, xshift=params["xshift"], yshift=params["yshift"],
+                             rotation=params["rotation"],
+                             radial_coeffs=tuple(params["radial_coeffs"]),
+                             radius=radius, horizon_radius=horizon_radius)
+    before = np.hypot(ix - obs_x, iy - obs_y)
+    after = np.hypot(fx - obs_x, fy - obs_y)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.scatter(z, before, s=8, alpha=0.5, label="idealized")
+    ax.scatter(z, after, s=8, alpha=0.5, label="refined")
+    ax.set_xlabel("zenith angle (deg)")
+    ax.set_ylabel("pixel residual")
+    ax.legend()
+    output_file = Path(output_file)
+    fig.savefig(output_file, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    return output_file
+
+
 def _sun_altitude(time, location=MMT_LOCATION):
     """Return the Sun's altitude in degrees at ``time`` and ``location``.
 
@@ -1229,3 +1264,40 @@ def plot_alcor_fits_cli():
         figsize=args.figsize,
     )
     print(outfig)
+
+
+def fit_alcor_wcs_cli():
+    """
+    CLI entry point for ``fit_alcor_wcs``. Aggregates bright-star matches across
+    the dark-sky frames of a night and prints the refined geometry constants
+    ready to paste into the module defaults.
+    """
+    parser = argparse.ArgumentParser(
+        description="Calibrate the alcor lens WCS from bright stars across a night."
+    )
+    parser.add_argument("input_dir", help="Directory containing alcor FITS images.")
+    parser.add_argument("--pattern", default="*.fits.bz2", help="Glob pattern for input files.")
+    parser.add_argument("--vmag-limit", type=float, default=3.0, help="Faintest Vmag to use.")
+    parser.add_argument("--sun-alt-max", type=float, default=-18.0,
+                        help="Use frames with Sun altitude below this (deg).")
+    parser.add_argument("--min-alt", type=float, default=10.0, help="Minimum star altitude (deg).")
+    parser.add_argument("--tolerance", type=float, default=12.0, help="Match tolerance (pixels).")
+    parser.add_argument("--max-frames", type=int, default=None, help="Cap number of frames used.")
+    parser.add_argument("--residual-plot", default=None, help="Optional residual-vs-zenith PNG path.")
+    args = parser.parse_args()
+
+    result = fit_alcor_wcs(
+        args.input_dir, pattern=args.pattern, vmag_limit=args.vmag_limit,
+        sun_alt_max=args.sun_alt_max, min_alt=args.min_alt, tolerance=args.tolerance,
+        max_frames=args.max_frames,
+    )
+    print(f"# matched stars: {result['n_matched']}")
+    print(f"# residual RMS (pix): {result['residual_rms']:.3f}")
+    print(f"ALCOR_XSHIFT = {result['xshift']!r}")
+    print(f"ALCOR_YSHIFT = {result['yshift']!r}")
+    print(f"ALCOR_ROTATION = {ALCOR_ROTATION + result['rotation']!r}")
+    print(f"ALCOR_RADIAL_COEFFS = {tuple(result['radial_coeffs'])!r}")
+    if args.residual_plot is not None:
+        out = save_alcor_residual_plot(result["alt"], result["az"], result["x"],
+                                       result["y"], result, args.residual_plot)
+        print(out)

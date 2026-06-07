@@ -27,6 +27,7 @@ from skycam_utils.alcor import (
     fit_alcor_wcs,
     load_alcor_fits,
     match_alcor_stars,
+    save_alcor_residual_plot,
     select_dark_frames,
 )
 
@@ -262,3 +263,17 @@ def test_fit_alcor_wcs_aggregates_synthetic_frames(monkeypatch, tmp_path):
     np.testing.assert_allclose(result["radial_coeffs"], (1.0, 0.04, 0.06), atol=2e-3)
     assert result["n_matched"] >= 40
     assert result["residual_rms"] < 0.1
+
+
+def test_save_alcor_residual_plot_writes_output(tmp_path):
+    rng = np.random.default_rng(3)
+    alt = rng.uniform(5.0, 88.0, 100)
+    az = rng.uniform(0.0, 360.0, 100)
+    params = dict(xshift=2.0, yshift=-1.0, rotation=0.3, radial_coeffs=(1.0, 0.02, 0.03))
+    x, y = _predict_pixels(alt, az, **params)
+    x = x + rng.normal(0, 0.2, x.shape)
+    y = y + rng.normal(0, 0.2, y.shape)
+
+    out = save_alcor_residual_plot(alt, az, x, y, params, tmp_path / "resid.png")
+    assert out.exists()
+    assert out.stat().st_size > 0

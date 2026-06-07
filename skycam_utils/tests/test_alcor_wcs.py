@@ -12,7 +12,6 @@ os.environ.setdefault("MPLCONFIGDIR", str(_MPLCONFIGDIR))
 
 from astropy.table import Table as _Table
 from astropy.time import Time
-from astropy.time import Time as _Time
 
 from skycam_utils.alcor import (
     ALCOR_HORIZON_RADIUS,
@@ -248,7 +247,7 @@ def test_fit_alcor_wcs_aggregates_synthetic_frames(monkeypatch, tmp_path):
         return Table({"xcentroid": x, "ycentroid": y, "flux": np.linspace(1e3, 1e2, 30)})
 
     def fake_frame_time(path):
-        return _Time("2024-09-05T07:00:00", format="isot", scale="utc")
+        return Time("2024-09-05T07:00:00", format="isot", scale="utc")
 
     monkeypatch.setattr(alcor_mod, "select_dark_frames", fake_select_dark_frames)
     monkeypatch.setattr(alcor_mod, "load_alcor_fits", fake_load_alcor_fits)

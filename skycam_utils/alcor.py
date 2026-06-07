@@ -2,6 +2,7 @@ import argparse
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from functools import lru_cache
+from importlib.resources import files
 from pathlib import Path
 
 import numpy as np
@@ -200,8 +201,10 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=3.0, sun_alt_max=-
     Frames are selected with :func:`select_dark_frames` (Sun below ``sun_alt_max``).
     For each, stars (``Vmag <= vmag_limit``) are projected with the current
     geometry, matched via :func:`match_alcor_stars`, and the matched
-    (Alt, Az, x, y) tuples are pooled. A single global least-squares fit over the
-    pooled set yields the refined (xshift, yshift, rotation, radial_coeffs).
+    (Alt, Az, x, y) tuples are pooled. Matches are pooled and fit globally, then
+    frames are re-matched with the refined geometry and refit, and a final fit is
+    performed after 3*MAD outlier rejection. Returns the refined
+    (xshift, yshift, rotation, radial_coeffs).
 
     Returns a dict with the fitted parameters plus ``n_matched``,
     ``residual_rms``, and per-match arrays (``alt``, ``az``, ``x``, ``y``) for
@@ -290,6 +293,7 @@ def save_alcor_residual_plot(alt, az, obs_x, obs_y, params, output_file,
     output path.
     """
     alt = np.asarray(alt, dtype=float)
+    az = np.asarray(az, dtype=float)
     z = 90.0 - alt
     obs_x = np.asarray(obs_x, dtype=float)
     obs_y = np.asarray(obs_y, dtype=float)
@@ -307,6 +311,7 @@ def save_alcor_residual_plot(alt, az, obs_x, obs_y, params, output_file,
     fig, ax = plt.subplots(figsize=figsize)
     ax.scatter(z, before, s=8, alpha=0.5, label="idealized")
     ax.scatter(z, after, s=8, alpha=0.5, label="refined")
+    ax.set_title("Alcor WCS residuals")
     ax.set_xlabel("zenith angle (deg)")
     ax.set_ylabel("pixel residual")
     ax.legend()
@@ -530,9 +535,7 @@ def alcor_reference_altaz(time, vmag_limit=3.0, min_alt=5.0, refraction=True,
         Catalog rows with added ``Alt`` and ``Az`` columns (degrees), filtered to
         ``Vmag <= vmag_limit`` and ``Alt >= min_alt``.
     """
-    from importlib.resources import files
-
-    catpath = files("skycam_utils") / "data" / "bright_star_sloan.fits"
+    catpath = files(__package__) / "data" / "bright_star_sloan.fits"
     cat = Table.read(str(catpath))
     cat = cat[cat["Vmag"] <= vmag_limit]
 

@@ -1475,6 +1475,16 @@ def plot_alcor_fits_cli():
     print(outfig)
 
 
+def _format_calibration_entry(result):
+    """Format a calibration result as a paste-ready ALCOR_CALIBRATIONS entry."""
+    rc = tuple(float(c) for c in result["radial_coeffs"])
+    return (f'    {{"epoch": "{result["epoch"]}", '
+            f'"xshift": {result["xshift"]:.3f}, '
+            f'"yshift": {result["yshift"]:.3f}, '
+            f'"rotation": {result["rotation"]:.4f}, '
+            f'"radial_coeffs": {rc!r}}},')
+
+
 def fit_alcor_wcs_cli():
     """
     CLI entry point for ``fit_alcor_wcs``. Aggregates bright-star matches across
@@ -1509,13 +1519,8 @@ def fit_alcor_wcs_cli():
     )
     print(f"# matched stars: {result['n_matched']}")
     print(f"# residual RMS (pix): {result['residual_rms']:.3f}")
-    # xshift/yshift/rotation are residuals on top of the values load_alcor_fits already applied to the image,
-    # so compose with the current constants; radial_coeffs is re-derived in full (distortion is applied only
-    # in the WCS, not the image).
-    print(f"ALCOR_XSHIFT = {ALCOR_XSHIFT + result['xshift']!r}")
-    print(f"ALCOR_YSHIFT = {ALCOR_YSHIFT + result['yshift']!r}")
-    print(f"ALCOR_ROTATION = {ALCOR_ROTATION + result['rotation']!r}")
-    print(f"ALCOR_RADIAL_COEFFS = {tuple(result['radial_coeffs'])!r}")
+    print("# add this entry to ALCOR_CALIBRATIONS in alcor.py:")
+    print(_format_calibration_entry(result))
     if args.residual_plot is not None:
         out = save_alcor_residual_plot(result["alt"], result["az"], result["x"],
                                        result["y"], result, args.residual_plot)

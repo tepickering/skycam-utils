@@ -602,3 +602,16 @@ def test_alcor_frame_calibration_uses_filename_then_header(monkeypatch, tmp_path
     hdu.header["DATE"] = "2026-05-19T10:37:18"
     hdu.writeto(path)
     assert alcor_mod._alcor_frame_calibration(path)["epoch"] == "2026-05-19"
+
+
+def test_format_calibration_entry_is_parseable():
+    import ast
+    from skycam_utils.alcor import _format_calibration_entry
+
+    line = _format_calibration_entry(dict(
+        epoch="2026-05-19", xshift=-12.0, yshift=9.9, rotation=0.3013,
+        radial_coeffs=(1.0, 0.084, 0.0)))
+    parsed = ast.literal_eval(line.strip().rstrip(","))
+    assert parsed["epoch"] == "2026-05-19"
+    assert parsed["radial_coeffs"] == (1.0, 0.084, 0.0)
+    assert abs(parsed["xshift"] + 12.0) < 1e-9

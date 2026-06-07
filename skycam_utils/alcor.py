@@ -12,7 +12,11 @@ from astropy.io import fits
 from astropy.time import Time
 from astropy.wcs import WCS
 
+import astropy.units as u
 import astropy.visualization as viz
+from astropy.coordinates import SkyCoord, AltAz, get_sun
+
+from .astrometry import MMT_LOCATION
 
 
 ALCOR_RADIUS = 680
@@ -60,6 +64,28 @@ def _predict_pixels(
     x = radius + xshift - r * np.sin(ang)
     y = radius + yshift + r * np.cos(ang)
     return x, y
+
+
+def _sun_altitude(time, location=MMT_LOCATION):
+    """Return the Sun's altitude in degrees at ``time`` and ``location``."""
+    altaz = get_sun(time).transform_to(AltAz(obstime=time, location=location))
+    return float(altaz.alt.deg)
+
+
+def select_dark_frames(files, sun_alt_max=-18.0, location=MMT_LOCATION):
+    """
+    Return the subset of ``files`` whose DATE-OBS corresponds to a Sun
+    altitude below ``sun_alt_max`` (default -18 deg, astronomical twilight).
+    """
+    files = [Path(f) for f in files]
+    times = []
+    for f in files:
+        with fits.open(f) as hdul:
+            times.append(hdul[0].header["DATE-OBS"])
+    times = Time(times, format="isot", scale="utc")
+    altaz = get_sun(times).transform_to(AltAz(obstime=times, location=location))
+    keep = altaz.alt.deg < sun_alt_max
+    return [f for f, k in zip(files, keep) if k]
 
 
 def load_alcor_fits(filename, rotation=0.4, xcen=696, ycen=698, radius=680, horizon_radius=662):

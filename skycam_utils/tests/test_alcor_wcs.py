@@ -44,3 +44,35 @@ def test_predict_pixels_radial_term_pushes_stars_outward():
 
 def test_predict_pixels_default_coeffs_are_idealized():
     assert ALCOR_RADIAL_COEFFS == (1.0, 0.0, 0.0)
+
+
+from astropy.time import Time
+
+from skycam_utils.alcor import _sun_altitude, select_dark_frames
+
+
+def test_sun_altitude_night_vs_day():
+    # 2024-09-05 07:00 UT at MMT is local ~midnight -> Sun well below horizon.
+    night = _sun_altitude(Time("2024-09-05T07:00:00", format="isot", scale="utc"))
+    # 2024-09-05 20:00 UT is local ~13:00 -> Sun high.
+    day = _sun_altitude(Time("2024-09-05T20:00:00", format="isot", scale="utc"))
+    assert night < -18.0
+    assert day > 18.0
+
+
+def test_select_dark_frames_filters_by_sun_altitude(tmp_path):
+    from astropy.io import fits
+
+    def write(name, date_obs):
+        hdu = fits.PrimaryHDU(data=np.zeros((3, 4, 4), dtype=np.int16))
+        hdu.header["DATE-OBS"] = date_obs
+        path = tmp_path / name
+        hdu.writeto(path)
+        return path
+
+    dark = write("dark.fits", "2024-09-05T07:00:00")
+    twilight = write("twi.fits", "2024-09-05T02:30:00")  # near sunset, Sun above -18
+    day = write("day.fits", "2024-09-05T20:00:00")
+
+    selected = select_dark_frames([day, dark, twilight], sun_alt_max=-18.0)
+    assert selected == [dark]

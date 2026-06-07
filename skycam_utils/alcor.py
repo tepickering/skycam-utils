@@ -37,12 +37,19 @@ def _predict_pixels(
     Forward lens model: map altitude/azimuth (degrees) to processed-frame
     pixel coordinates (x=column, y=row).
 
+    Pixel y increases upward (FITS/WCS convention), matching the coordinate
+    system of the WCS returned by ``load_alcor_fits``; it is not a direct numpy
+    row index.
+
     The radial mapping is ``r = horizon_radius * (k1*zeta + k2*zeta**2 +
     k3*zeta**3)`` with ``zeta = (90 - alt)/90``. The idealized coefficients
     ``(1, 0, 0)`` give the equidistant ARC mapping; higher-order terms encode
-    the lens's non-linear growth with zenith angle. ``rotation`` is the
-    azimuth-frame rotation in degrees; ``xshift``/``yshift`` offset the zenith
-    from the array center.
+    the lens's non-linear growth with zenith angle. ``xshift``/``yshift`` offset
+    the zenith from the array center.
+
+    ``rotation`` is a residual azimuth-frame rotation (degrees) applied on top of
+    the image rotation that ``load_alcor_fits`` already applies; it defaults to
+    0.0 because the idealized/centered frame has no residual rotation.
     """
     alt = np.asarray(alt, dtype=float)
     az = np.asarray(az, dtype=float)

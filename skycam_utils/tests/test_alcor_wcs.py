@@ -5,8 +5,6 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
-import pytest
-
 os.environ.setdefault("MPLBACKEND", "Agg")
 _MPLCONFIGDIR = Path(tempfile.gettempdir()) / "skycam-utils-matplotlib"
 _MPLCONFIGDIR.mkdir(exist_ok=True)

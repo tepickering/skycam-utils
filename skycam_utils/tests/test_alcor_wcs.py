@@ -615,3 +615,39 @@ def test_format_calibration_entry_is_parseable():
     assert parsed["epoch"] == "2026-05-19"
     assert parsed["radial_coeffs"] == (1.0, 0.084, 0.0)
     assert abs(parsed["xshift"] + 12.0) < 1e-9
+
+
+def test_plot_alcor_fits_defaults_rotation_to_none():
+    import inspect
+    from skycam_utils.alcor import plot_alcor_fits
+    assert inspect.signature(plot_alcor_fits).parameters["rotation"].default is None
+
+
+def test_cli_rotation_flags_default_to_none(monkeypatch):
+    """Each CLI's --rotation default is None so load_alcor_fits auto-resolves.
+
+    The parsers are constructed inside the *_cli functions, so capture the
+    parsed namespace by patching parse_args and stop before the body runs.
+    """
+    import argparse
+    import skycam_utils.alcor as alcor_mod
+
+    captured = {}
+    orig_parse = argparse.ArgumentParser.parse_args
+
+    def grab(self, *a, **k):
+        ns = orig_parse(self, *a, **k)
+        captured["rotation"] = getattr(ns, "rotation", "MISSING")
+        raise SystemExit  # stop before the CLI does real work
+    monkeypatch.setattr(argparse.ArgumentParser, "parse_args", grab)
+
+    for cli, argv in [
+        (alcor_mod.plot_alcor_fits_cli, ["prog", "in.fits"]),
+        (alcor_mod.alcor_proc_fits_cli, ["prog", "in.fits"]),
+        (alcor_mod.alcor_keogram_cli, ["prog", "in_dir"]),
+    ]:
+        captured.clear()
+        monkeypatch.setattr("sys.argv", argv)
+        with pytest.raises(SystemExit):
+            cli()
+        assert captured["rotation"] is None

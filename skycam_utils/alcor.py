@@ -1181,7 +1181,7 @@ def _parse_timestamps(timestamps):
         return None
 
 
-def plot_alcor_fits(filename, outimage=None, outfig=None, rotation=ALCOR_ROTATION, xcen=696, ycen=698, radius=680,
+def plot_alcor_fits(filename, outimage=None, outfig=None, rotation=None, xcen=696, ycen=698, radius=680,
                     horizon_radius=662, powerstretch=0.75, contrast=0.35, gscale=0.7, bscale=1.7, figsize=12):
     """
     Take a FITS file as produced by the alcor OMEA 8C and create a trimmed, rotated, and annotated figure
@@ -1195,8 +1195,9 @@ def plot_alcor_fits(filename, outimage=None, outfig=None, rotation=ALCOR_ROTATIO
         If not None, write out raw, unannotated image
     outfig : str (default=None)
         If not None, write out annotated image as produced by matplotlib
-    rotation : float (default=0.4)
-        Camera rotation w.r.t. true north. Default is empirically from alcor software.
+    rotation : float or None (default=None)
+        Camera rotation w.r.t. true north (deg). When None, resolved from the
+        calibration epoch nearest the frame date.
     xcen : int (default=696)
         X center of illuminated region in original image coordinates
     ycen : int (default=698)
@@ -1272,7 +1273,9 @@ def alcor_proc_fits_cli():
     parser.add_argument("filename", help="Input alcor FITS file.")
     parser.add_argument("-o", "--output", default=None, help="Output FITS path (default: <input>_proc.fits).")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite output file if it exists.")
-    parser.add_argument("--rotation", type=float, default=ALCOR_ROTATION, help="Camera rotation w.r.t. true north (deg).")
+    parser.add_argument("--rotation", type=float, default=None,
+                        help="Camera rotation w.r.t. true north (deg); "
+                             "default resolves the calibration epoch nearest the frame date.")
     parser.add_argument("--xcen", type=int, default=696, help="X center of illuminated region.")
     parser.add_argument("--ycen", type=int, default=698, help="Y center of illuminated region.")
     parser.add_argument("--radius", type=int, default=680, help="Half-width of trimmed square around (xcen, ycen).")
@@ -1326,7 +1329,9 @@ def alcor_keogram_cli():
         default=None,
         help="Optional text file to write DATE header values, one per line.",
     )
-    parser.add_argument("--rotation", type=float, default=ALCOR_ROTATION, help="Camera rotation w.r.t. true north (deg).")
+    parser.add_argument("--rotation", type=float, default=None,
+                        help="Camera rotation w.r.t. true north (deg); "
+                             "default resolves the calibration epoch nearest the frame date.")
     parser.add_argument("--xcen", type=int, default=696, help="X center of illuminated region.")
     parser.add_argument("--ycen", type=int, default=698, help="Y center of illuminated region.")
     parser.add_argument("--radius", type=int, default=680, help="Half-width of trimmed square around (xcen, ycen).")
@@ -1436,7 +1441,9 @@ def plot_alcor_fits_cli():
         help="Output figure path (default: <input>.pdf). Format inferred from extension."
     )
     parser.add_argument("--outimage", default=None, help="If set, also write the raw stretched image to this path.")
-    parser.add_argument("--rotation", type=float, default=ALCOR_ROTATION, help="Camera rotation w.r.t. true north (deg).")
+    parser.add_argument("--rotation", type=float, default=None,
+                        help="Camera rotation w.r.t. true north (deg); "
+                             "default resolves the calibration epoch nearest the frame date.")
     parser.add_argument("--xcen", type=int, default=696, help="X center of illuminated region.")
     parser.add_argument("--ycen", type=int, default=698, help="Y center of illuminated region.")
     parser.add_argument("--radius", type=int, default=680, help="Half-width of trimmed square around (xcen, ycen).")

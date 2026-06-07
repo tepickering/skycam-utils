@@ -274,6 +274,61 @@ def detect_alcor_stars(im, fwhm=3.0, threshold_sigma=5.0):
     return out
 
 
+ALCOR_PRESSURE = 760 * u.hPa        # ~0.75 atm at the MMT 2600 m elevation
+ALCOR_TEMPERATURE = 10 * u.deg_C
+ALCOR_HUMIDITY = 0.2
+ALCOR_OBSWL = 0.55 * u.micron
+
+
+def alcor_reference_altaz(time, vmag_limit=3.0, min_alt=5.0, refraction=True,
+                           location=MMT_LOCATION):
+    """
+    Load ``bright_star_sloan.fits``, filter to ``Vmag <= vmag_limit``, and compute
+    Alt/Az at ``time`` and ``location``. Stars below ``min_alt`` are dropped.
+
+    When ``refraction`` is True the AltAz frame includes atmospheric refraction
+    using nominal MMT pressure/temperature; this matters most at large zenith
+    angle, where the radial distortion is also largest.
+
+    Parameters
+    ----------
+    time : `~astropy.time.Time`
+        Observation time (scalar).
+    vmag_limit : float (default=3.0)
+        Faintest V magnitude to keep.
+    min_alt : float (default=5.0)
+        Minimum altitude (deg) to keep.
+    refraction : bool (default=True)
+        If True, include atmospheric refraction in the AltAz transform.
+    location : `~astropy.coordinates.EarthLocation` (default=MMT_LOCATION)
+        Observatory location.
+
+    Returns
+    -------
+    cat : `~astropy.table.Table`
+        Catalog rows with added ``Alt`` and ``Az`` columns (degrees), filtered to
+        ``Vmag <= vmag_limit`` and ``Alt >= min_alt``.
+    """
+    from importlib.resources import files
+
+    catpath = files("skycam_utils") / "data" / "bright_star_sloan.fits"
+    cat = Table.read(str(catpath))
+    cat = cat[cat["Vmag"] <= vmag_limit]
+
+    coords = SkyCoord(cat["_RAJ2000"], cat["_DEJ2000"], unit="deg", frame="icrs")
+    if refraction:
+        frame = AltAz(obstime=time, location=location, pressure=ALCOR_PRESSURE,
+                      temperature=ALCOR_TEMPERATURE, relative_humidity=ALCOR_HUMIDITY,
+                      obswl=ALCOR_OBSWL)
+    else:
+        frame = AltAz(obstime=time, location=location)
+    altaz = coords.transform_to(frame)
+    cat["Alt"] = altaz.alt.deg
+    cat["Az"] = altaz.az.deg
+    cat = cat[cat["Alt"] >= min_alt]
+    return cat
+
+
 def load_alcor_fits(filename, rotation=ALCOR_ROTATION, xcen=696, ycen=698,
                     radius=ALCOR_RADIUS, horizon_radius=ALCOR_HORIZON_RADIUS,
                     xshift=ALCOR_XSHIFT, yshift=ALCOR_YSHIFT,

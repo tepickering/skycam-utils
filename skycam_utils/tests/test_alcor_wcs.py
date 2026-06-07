@@ -18,6 +18,7 @@ from skycam_utils.alcor import (
     ALCOR_RADIAL_COEFFS,
     _predict_pixels,
     _sun_altitude,
+    alcor_reference_altaz,
     build_alcor_wcs,
     detect_alcor_stars,
     load_alcor_fits,
@@ -146,3 +147,21 @@ def test_detect_alcor_stars_on_real_fixture():
     im, _ = load_alcor_fits(test_fits)
     sources = detect_alcor_stars(im)
     assert len(sources) > 10
+
+
+def test_alcor_reference_altaz_filters_and_refracts():
+    time = Time("2024-09-05T07:00:00", format="isot", scale="utc")
+    cat = alcor_reference_altaz(time, vmag_limit=3.0, min_alt=5.0)
+
+    assert {"Alt", "Az", "Vmag"}.issubset(cat.colnames)
+    assert len(cat) > 0
+    assert (cat["Vmag"] <= 3.0).all()
+    assert (cat["Alt"] >= 5.0).all()
+
+    # Refraction lifts stars: with refraction, altitudes are >= the airless value.
+    no_refr = alcor_reference_altaz(time, vmag_limit=3.0, min_alt=5.0, refraction=False)
+    common = set(cat["HD"]) & set(no_refr["HD"])
+    hd = sorted(common)[0]
+    a_refr = float(cat["Alt"][list(cat["HD"]).index(hd)])
+    a_none = float(no_refr["Alt"][list(no_refr["HD"]).index(hd)])
+    assert a_refr >= a_none - 1e-6

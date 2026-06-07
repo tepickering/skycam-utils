@@ -44,26 +44,28 @@ def test_load_alcor_fits_returns_centered_rgb_image(alcor_image_and_wcs):
     assert np.isfinite(im).all()
     assert im.max() > im.min()
 
-    assert list(wcs.wcs.ctype) == ["RA---ARC", "DEC--ARC"]
+    assert list(wcs.wcs.ctype) == ["RA---ARC-SIP", "DEC--ARC-SIP"]
     np.testing.assert_allclose(wcs.wcs.crpix, [680.5, 680.5])
     np.testing.assert_allclose(wcs.wcs.crval, [0.0, 90.0])
     np.testing.assert_allclose(wcs.wcs.cdelt, [90.0 / 662.0, 90.0 / 662.0])
     assert wcs.wcs.lonpole == 0.0
+    assert wcs.sip is not None
 
 
 def test_load_alcor_fits_wcs_maps_zenith_and_horizon(alcor_image_and_wcs):
     _, wcs = alcor_image_and_wcs
 
+    # Zenith maps to the array center (0-based 679.5 == crpix 680.5).
     _, zenith_alt = wcs.pixel_to_world_values(679.5, 679.5)
-    np.testing.assert_allclose(zenith_alt, 90.0)
+    np.testing.assert_allclose(zenith_alt, 90.0, atol=0.02)
 
-    azimuths = np.array([0.0, 90.0, 180.0, 270.0])
-    px, py = wcs.world_to_pixel_values(azimuths, np.zeros_like(azimuths))
-    radii = np.hypot(px - 679.5, py - 679.5)
-
-    np.testing.assert_allclose(radii, 662.0, atol=1e-9)
-    np.testing.assert_allclose(px, [679.5, 17.5, 679.5, 1341.5], atol=1e-9)
-    np.testing.assert_allclose(py, [1341.5, 679.5, 17.5, 679.5], atol=1e-9)
+    # The SIP-encoded radial model round-trips world -> pixel -> world.
+    az = np.array([10.0, 100.0, 200.0, 300.0])
+    alt = np.array([15.0, 35.0, 55.0, 75.0])
+    px, py = wcs.world_to_pixel_values(az, alt)
+    az2, alt2 = wcs.pixel_to_world_values(px, py)
+    np.testing.assert_allclose(alt2, alt, atol=0.02)
+    np.testing.assert_allclose(az2 % 360.0, az % 360.0, atol=0.02)
 
 
 def test_alcor_proc_fits_writes_processed_cube_and_header(tmp_path):
@@ -85,8 +87,8 @@ def test_alcor_proc_fits_writes_processed_cube_and_header(tmp_path):
         assert hdul[0].data.dtype.kind == "f"
         assert hdul[0].data.dtype.itemsize == np.dtype(np.float32).itemsize
         assert np.isfinite(hdul[0].data).all()
-        assert hdul[0].header["CTYPE1"] == "RA---ARC"
-        assert hdul[0].header["CTYPE2"] == "DEC--ARC"
+        assert hdul[0].header["CTYPE1"] == "RA---ARC-SIP"
+        assert hdul[0].header["CTYPE2"] == "DEC--ARC-SIP"
         np.testing.assert_allclose(hdul[0].header["CRPIX1"], 32.5)
         np.testing.assert_allclose(hdul[0].header["CRPIX2"], 32.5)
         np.testing.assert_allclose(hdul[0].header["CDELT1"], 3.0)

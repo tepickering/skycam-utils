@@ -128,9 +128,10 @@ def _predict_pixels(
     behavior with zenith angle. ``xshift``/``yshift`` offset the zenith from the
     array center.
 
-    ``rotation`` is a residual azimuth-frame rotation (degrees) applied on top of
-    the image rotation that ``load_alcor_fits`` already applies; it defaults to
-    0.0 because the idealized/centered frame has no residual rotation.
+    ``rotation`` is the camera's absolute azimuth-frame rotation (degrees).
+    ``fit_alcor_wcs`` fits against a neutral (un-rotated, un-shifted) frame, so the
+    recovered value is absolute; ``load_alcor_fits`` then applies exactly this
+    rotation to the image. It defaults to 0.0, the idealized/centered frame.
 
     The zenith maps to the array geometric center (radius-0.5, radius-0.5),
     consistent with crpix=radius+0.5.

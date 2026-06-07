@@ -19,6 +19,7 @@ from skycam_utils.alcor import (
     _predict_pixels,
     _sun_altitude,
     build_alcor_wcs,
+    detect_alcor_stars,
     load_alcor_fits,
     select_dark_frames,
 )
@@ -119,3 +120,29 @@ def test_load_alcor_fits_idealized_defaults_unchanged():
     assert im.shape == (1360, 1360, 3)
     np.testing.assert_allclose(wcs.wcs.crpix, [680.5, 680.5])
     np.testing.assert_allclose(wcs.wcs.cdelt, [90.0 / 662.0, 90.0 / 662.0])
+
+
+def test_detect_alcor_stars_on_synthetic_image():
+    rng = np.random.default_rng(0)
+    im = np.zeros((200, 200, 3), dtype=float)
+    im += rng.normal(0.0, 1.0, im.shape)
+    truth = [(50.0, 60.0), (120.0, 140.0), (160.0, 30.0)]
+    yy, xx = np.mgrid[0:200, 0:200]
+    for cx, cy in truth:
+        g = 500.0 * np.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2 * 2.0**2))
+        im += g[:, :, None]
+
+    sources = detect_alcor_stars(im, fwhm=2.5, threshold_sigma=5.0)
+    assert len(sources) >= 3
+    assert {"xcentroid", "ycentroid", "flux"}.issubset(sources.colnames)
+    sources.sort("flux", reverse=True)
+    bx, by = sources["xcentroid"][0], sources["ycentroid"][0]
+    dists = [np.hypot(bx - cx, by - cy) for cx, cy in truth]
+    assert min(dists) < 2.0
+
+
+def test_detect_alcor_stars_on_real_fixture():
+    test_fits = Path(__file__).with_name("test.fits.bz2")
+    im, _ = load_alcor_fits(test_fits)
+    sources = detect_alcor_stars(im)
+    assert len(sources) > 10

@@ -11,8 +11,11 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
 import matplotlib.dates as mdates
 from astropy.io import fits
+from astropy.stats import sigma_clipped_stats
+from astropy.table import Table
 from astropy.time import Time
 from astropy.wcs import WCS, Sip
+from photutils.detection import DAOStarFinder
 
 import astropy.units as u
 import astropy.visualization as viz
@@ -224,6 +227,47 @@ def _build_alcor_wcs_cached(radius, horizon_radius, radial_coeffs, sip_degree):
     wcs.wcs.ctype = ["RA---ARC-SIP", "DEC--ARC-SIP"]
     wcs.sip = Sip(a, b, ap, bp, [radius + 0.5, radius + 0.5])
     return wcs
+
+
+def detect_alcor_stars(im, fwhm=3.0, threshold_sigma=5.0):
+    """
+    Detect point sources in a processed alcor RGB image.
+
+    The three channels are summed into a luminance image, the background level is
+    estimated with a sigma-clipped median, and `~photutils.detection.DAOStarFinder`
+    extracts sources above ``threshold_sigma`` times the background noise.
+
+    Parameters
+    ----------
+    im : ndarray
+        Processed RGB image of shape (ny, nx, 3), as returned by ``load_alcor_fits``.
+    fwhm : float (default=3.0)
+        FWHM (pixels) of the Gaussian kernel used by the star finder.
+    threshold_sigma : float (default=5.0)
+        Detection threshold in multiples of the background noise.
+
+    Returns
+    -------
+    sources : `~astropy.table.Table`
+        Detected sources with at least ``xcentroid``, ``ycentroid``, ``flux``
+        columns. Empty (with those columns) if nothing is found.
+    """
+    lum = np.asarray(im, dtype=float).sum(axis=2)
+    mean, median, std = sigma_clipped_stats(lum, sigma=3.0)
+    finder = DAOStarFinder(fwhm=fwhm, threshold=threshold_sigma * std)
+    sources = finder(lum - median)
+    if sources is None:
+        return Table(names=["xcentroid", "ycentroid", "flux"])
+    # photutils 3.x returns a DeprecatedColumnQTable using x_centroid/y_centroid.
+    # Convert to a plain Table with the stable xcentroid/ycentroid column names.
+    xcol = "x_centroid" if "x_centroid" in sources.colnames else "xcentroid"
+    ycol = "y_centroid" if "y_centroid" in sources.colnames else "ycentroid"
+    out = Table(sources)
+    if xcol != "xcentroid":
+        out.rename_column(xcol, "xcentroid")
+    if ycol != "ycentroid":
+        out.rename_column(ycol, "ycentroid")
+    return out
 
 
 def load_alcor_fits(filename, rotation=ALCOR_ROTATION, xcen=696, ycen=698,

@@ -48,8 +48,9 @@ def _predict_pixels(
     system of the WCS returned by ``load_alcor_fits``; it is not a direct numpy
     row index.
 
-    The radial mapping is ``r = horizon_radius * (k1*zeta + k2*zeta**2 +
-    k3*zeta**3)`` with ``zeta = (90 - alt)/90``. The idealized coefficients
+    The radial mapping is ``r = horizon_radius * (k1*zeta + k3*zeta**3 +
+    k5*zeta**5)`` with ``zeta = (90 - alt)/90``, an odd-power polynomial in
+    zenith angle (standard symmetric-fisheye form). The idealized coefficients
     ``(1, 0, 0)`` give the equidistant ARC mapping; higher-order terms encode
     the lens's non-linear growth with zenith angle. ``xshift``/``yshift`` offset
     the zenith from the array center.
@@ -60,9 +61,9 @@ def _predict_pixels(
     """
     alt = np.asarray(alt, dtype=float)
     az = np.asarray(az, dtype=float)
-    k1, k2, k3 = radial_coeffs
+    k1, k3, k5 = radial_coeffs
     zeta = (90.0 - alt) / 90.0
-    r = horizon_radius * (k1 * zeta + k2 * zeta**2 + k3 * zeta**3)
+    r = horizon_radius * (k1 * zeta + k3 * zeta**3 + k5 * zeta**5)
     ang = np.radians(az + rotation)
     x = radius + xshift - r * np.sin(ang)
     y = radius + yshift + r * np.cos(ang)
@@ -136,15 +137,17 @@ def build_alcor_wcs(radius=ALCOR_RADIUS, horizon_radius=ALCOR_HORIZON_RADIUS,
     grid of the forward model, so ``world_to_pixel``/``to_header`` reproduce the
     lens distortion. Cached because the geometry is fixed across images.
 
-    Note: the quadratic radial term (``k2``) produces a displacement field that
-    scales as ``rho * (u, v)`` (an odd radial power, i.e. involving
-    ``sqrt(u**2 + v**2)``), which a finite-degree SIP polynomial cannot
-    represent exactly; for the calibration-scale coefficients used here the SIP
-    reproduces the forward model to a few tenths of a pixel over the full FOV.
+    Note: the radial model uses only odd powers of zenith angle (``k1*zeta +
+    k3*zeta**3 + k5*zeta**5``, the standard symmetric-fisheye form). The odd
+    radial powers express the distortion as a polynomial in the undistorted
+    pixel radius (the ``k5`` term needs degree 5, hence ``sip_degree=5``); since
+    SIP applies its forward polynomial to the observed/distorted pixels the fit
+    is not exact, but it reproduces the forward model to a few tenths of a pixel
+    near the horizon and well below 0.1 px over most of the FOV.
     """
     radial_coeffs = tuple(float(c) for c in radial_coeffs)
-    k1, k2, k3 = radial_coeffs
-    if abs(k2) < 1e-12 and abs(k3) < 1e-12:
+    k1, k3, k5 = radial_coeffs
+    if abs(k3) < 1e-12 and abs(k5) < 1e-12:
         return _base_arc_wcs(radius, horizon_radius, k1)
 
     template = _arc_fit_template(radius, horizon_radius, k1)

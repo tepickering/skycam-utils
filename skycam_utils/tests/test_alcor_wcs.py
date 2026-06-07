@@ -10,11 +10,15 @@ _MPLCONFIGDIR = Path(tempfile.gettempdir()) / "skycam-utils-matplotlib"
 _MPLCONFIGDIR.mkdir(exist_ok=True)
 os.environ.setdefault("MPLCONFIGDIR", str(_MPLCONFIGDIR))
 
+from astropy.time import Time
+
 from skycam_utils.alcor import (
     ALCOR_HORIZON_RADIUS,
     ALCOR_RADIUS,
     ALCOR_RADIAL_COEFFS,
     _predict_pixels,
+    _sun_altitude,
+    select_dark_frames,
 )
 
 
@@ -44,11 +48,6 @@ def test_predict_pixels_radial_term_pushes_stars_outward():
 
 def test_predict_pixels_default_coeffs_are_idealized():
     assert ALCOR_RADIAL_COEFFS == (1.0, 0.0, 0.0)
-
-
-from astropy.time import Time
-
-from skycam_utils.alcor import _sun_altitude, select_dark_frames
 
 
 def test_sun_altitude_night_vs_day():

@@ -67,7 +67,11 @@ def _predict_pixels(
 
 
 def _sun_altitude(time, location=MMT_LOCATION):
-    """Return the Sun's altitude in degrees at ``time`` and ``location``."""
+    """Return the Sun's altitude in degrees at ``time`` and ``location``.
+
+    ``time`` must be a scalar `~astropy.time.Time` (the result is returned as a
+    Python float). Use :func:`select_dark_frames` for batched filtering.
+    """
     altaz = get_sun(time).transform_to(AltAz(obstime=time, location=location))
     return float(altaz.alt.deg)
 

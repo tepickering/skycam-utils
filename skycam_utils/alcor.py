@@ -37,10 +37,49 @@ from .astrometry import MMT_LOCATION
 # that grows to ~5 px near the horizon.
 ALCOR_RADIUS = 680
 ALCOR_HORIZON_RADIUS = 662
-ALCOR_ROTATION = 0.3886
-ALCOR_XSHIFT = -4.570
-ALCOR_YSHIFT = 4.413
-ALCOR_RADIAL_COEFFS = (1.0, 0.01383, 0.0)
+
+# Time-indexed lens calibrations. Each epoch holds only the fitted geometry
+# (xshift, yshift, rotation, radial_coeffs); the trim/scale geometry
+# (ALCOR_RADIUS / ALCOR_HORIZON_RADIUS / xcen / ycen) is fixed. The camera
+# geometry drifts over time (mount/focus), so the epoch nearest in time to an
+# image is used (see alcor_calibration). Add a new epoch by pasting the dict
+# that fit_alcor_wcs prints. `epoch` is the calibration night at day precision.
+ALCOR_CALIBRATIONS = [
+    {"epoch": "2024-09-04", "xshift": -4.570, "yshift": 4.413,
+     "rotation": 0.3886, "radial_coeffs": (1.0, 0.01383, 0.0)},
+]
+
+
+def _calibration_epochs():
+    """Return [(Time, calibration_dict), ...] for the configured epochs."""
+    return [(Time(c["epoch"], scale="utc"), c) for c in ALCOR_CALIBRATIONS]
+
+
+def alcor_calibration(time=None):
+    """
+    Return the calibration dict whose epoch is nearest in time to ``time``.
+
+    ``time`` is an astropy ``Time``. An exact tie resolves to the more recent
+    epoch. ``time=None`` returns the most recent epoch (the default for
+    time-agnostic calls). The returned dict is a copy and may be mutated freely.
+    """
+    epochs = _calibration_epochs()
+    if time is None:
+        return dict(max(epochs, key=lambda e: e[0].jd)[1])
+    jds = np.array([e[0].jd for e in epochs])
+    dt = np.abs(jds - Time(time).jd)
+    # primary: smallest |dt|; tie-break: largest jd (more recent)
+    order = np.lexsort((-jds, dt))
+    return dict(epochs[order[0]][1])
+
+
+# Module-level defaults track the most-recent epoch so existing default-argument
+# references (in _predict_pixels, build_alcor_wcs, etc.) keep working unchanged.
+_LATEST_CALIBRATION = alcor_calibration()
+ALCOR_ROTATION = _LATEST_CALIBRATION["rotation"]
+ALCOR_XSHIFT = _LATEST_CALIBRATION["xshift"]
+ALCOR_YSHIFT = _LATEST_CALIBRATION["yshift"]
+ALCOR_RADIAL_COEFFS = _LATEST_CALIBRATION["radial_coeffs"]
 
 
 def _invert_radial(z_deg, radial_coeffs, n_iter=8):

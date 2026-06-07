@@ -21,6 +21,7 @@ from skycam_utils.alcor import (
     _fit_params,
     _predict_pixels,
     _sun_altitude,
+    alcor_calibration,
     alcor_reference_altaz,
     build_alcor_wcs,
     detect_alcor_stars,
@@ -500,3 +501,38 @@ def test_load_alcor_fits_world_pixel_round_trip():
     az2, alt2 = wcs.pixel_to_world_values(px, py)
     np.testing.assert_allclose(az2 % 360.0, az % 360.0, atol=0.02)
     np.testing.assert_allclose(alt2, alt, atol=0.02)
+
+
+def test_alcor_calibration_nearest_in_time(monkeypatch):
+    import skycam_utils.alcor as alcor_mod
+    table = [
+        {"epoch": "2024-09-04", "xshift": -4.5, "yshift": 4.4,
+         "rotation": 0.39, "radial_coeffs": (1.0, 0.014, 0.0)},
+        {"epoch": "2026-05-19", "xshift": -12.0, "yshift": 9.9,
+         "rotation": 0.31, "radial_coeffs": (1.0, 0.084, 0.0)},
+    ]
+    monkeypatch.setattr(alcor_mod, "ALCOR_CALIBRATIONS", table)
+
+    # well inside the 2024 side
+    c = alcor_mod.alcor_calibration(Time("2024-10-01T00:00:00"))
+    assert c["epoch"] == "2024-09-04"
+    # well inside the 2026 side
+    c = alcor_mod.alcor_calibration(Time("2026-04-01T00:00:00"))
+    assert c["epoch"] == "2026-05-19"
+    # before the first epoch -> first
+    c = alcor_mod.alcor_calibration(Time("2020-01-01T00:00:00"))
+    assert c["epoch"] == "2024-09-04"
+    # after the last epoch -> last
+    c = alcor_mod.alcor_calibration(Time("2030-01-01T00:00:00"))
+    assert c["epoch"] == "2026-05-19"
+    # time=None -> most recent
+    assert alcor_mod.alcor_calibration()["epoch"] == "2026-05-19"
+
+    # exact midpoint -> tie breaks to the more recent epoch
+    midpoint = Time((Time("2024-09-04").jd + Time("2026-05-19").jd) / 2.0, format="jd")
+    assert alcor_mod.alcor_calibration(midpoint)["epoch"] == "2026-05-19"
+
+    # returns a copy, not the stored dict
+    c = alcor_mod.alcor_calibration(Time("2024-10-01T00:00:00"))
+    c["xshift"] = 999.0
+    assert table[0]["xshift"] == -4.5

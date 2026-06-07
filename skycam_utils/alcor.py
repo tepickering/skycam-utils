@@ -425,11 +425,21 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=3.0, sun_alt_max=-
 
 def save_alcor_residual_plot(alt, az, obs_x, obs_y, params, output_file,
                              radius=ALCOR_RADIUS, horizon_radius=ALCOR_HORIZON_RADIUS,
-                             figsize=(10, 5), dpi=150):
+                             figsize=(18, 5.5), dpi=150, quiver_scale=25.0):
     """
-    Plot pixel-residual magnitude versus zenith angle for matched stars, before
-    (idealized equidistant) and after (fitted) the refinement. Returns the
-    output path.
+    Diagnostic plot of the fitted WCS residuals for matched stars, as three
+    panels, and return the output path:
+
+    1. Residual magnitude versus zenith angle, before (idealized equidistant)
+       and after (fitted) the refinement -- shows whether the radial model order
+       is adequate.
+    2. Refined residual magnitude versus azimuth, colored by zenith angle -- a
+       residual that varies with azimuth at fixed zenith indicates azimuthal
+       asymmetry (lens/sensor decenter or tilt) that the azimuthally-symmetric
+       radial model cannot capture.
+    3. The refined residual vector field over the detector, arrows magnified by
+       ``quiver_scale`` -- the spatial pattern (coherent radial / swirl /
+       elliptical vs. incoherent) classifies the structure at a glance.
     """
     alt = np.asarray(alt, dtype=float)
     az = np.asarray(az, dtype=float)
@@ -445,15 +455,38 @@ def save_alcor_residual_plot(alt, az, obs_x, obs_y, params, output_file,
                              radial_coeffs=tuple(params["radial_coeffs"]),
                              radius=radius, horizon_radius=horizon_radius)
     before = np.hypot(ix - obs_x, iy - obs_y)
-    after = np.hypot(fx - obs_x, fy - obs_y)
+    dx, dy = fx - obs_x, fy - obs_y
+    after = np.hypot(dx, dy)
 
-    fig, ax = plt.subplots(figsize=figsize)
-    ax.scatter(z, before, s=8, alpha=0.5, label="idealized")
-    ax.scatter(z, after, s=8, alpha=0.5, label="refined")
-    ax.set_title("Alcor WCS residuals")
-    ax.set_xlabel("zenith angle (deg)")
-    ax.set_ylabel("pixel residual")
-    ax.legend()
+    fig, (ax_z, ax_a, ax_v) = plt.subplots(1, 3, figsize=figsize)
+
+    ax_z.scatter(z, before, s=8, alpha=0.5, label="idealized")
+    ax_z.scatter(z, after, s=8, alpha=0.5, label="refined")
+    rms = float(np.sqrt(np.mean(after ** 2))) if after.size else float("nan")
+    ax_z.set_title(f"residual vs zenith  (RMS={rms:.2f} px, N={after.size})")
+    ax_z.set_xlabel("zenith angle (deg)")
+    ax_z.set_ylabel("pixel residual")
+    ax_z.legend()
+
+    sc = ax_a.scatter(az, after, s=8, alpha=0.6, c=z, cmap="plasma")
+    ax_a.set_title("refined residual vs azimuth")
+    ax_a.set_xlabel("azimuth (deg)")
+    ax_a.set_ylabel("pixel residual")
+    fig.colorbar(sc, ax=ax_a, label="zenith angle (deg)")
+
+    cen = radius - 0.5
+    q = ax_v.quiver(obs_x, obs_y, dx, dy, after, angles="xy",
+                    scale_units="xy", scale=1.0 / quiver_scale,
+                    cmap="viridis", width=0.003)
+    ax_v.plot(cen, cen, "r+", ms=14, label="zenith (array center)")
+    ax_v.set_aspect("equal")
+    ax_v.set_title(f"refined residual vector field (x{quiver_scale:g})")
+    ax_v.set_xlabel("x (pix)")
+    ax_v.set_ylabel("y (pix)")
+    ax_v.legend(loc="upper right")
+    fig.colorbar(q, ax=ax_v, label="pixel residual")
+
+    fig.suptitle("Alcor WCS residuals")
     output_file = Path(output_file)
     fig.savefig(output_file, dpi=dpi, bbox_inches="tight")
     plt.close(fig)

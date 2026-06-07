@@ -109,10 +109,17 @@ def _predict_pixels(
 def _fit_params(alt, az, obs_x, obs_y, init_params, radius=ALCOR_RADIUS,
                 horizon_radius=ALCOR_HORIZON_RADIUS):
     """
-    Least-squares fit of (xshift, yshift, rotation, k3, k5) to matched stars.
-    k1 is held at 1.0 (the zenith plate scale is set by horizon_radius); k3, k5
-    are the odd-power radial distortion coefficients. Returns an updated params
-    dict with keys xshift, yshift, rotation, radial_coeffs=(1.0, k3, k5).
+    Robust least-squares fit of (xshift, yshift, rotation, k3) to matched stars.
+
+    The lens nonlinearity is modeled by the single odd cubic term k3; k1 is held
+    at 1.0 (the zenith plate scale is set by horizon_radius) and k5 at 0.0. k3 and
+    k5 are nearly collinear in rho over [0, 1], so fitting both is ill-conditioned
+    and on a large pooled dataset runs away to large cancelling values (e.g.
+    k3=-0.58, k5=3.6) that are unphysical despite a tolerable RMS; k3 alone
+    captures the distortion (this is the model the shipped 2024 constants used). A
+    ``soft_l1`` loss downweights mismatched/noise detections, which are common in
+    this sparse bright-star field. Returns an updated params dict with
+    radial_coeffs=(1.0, k3, 0.0).
     """
     alt = np.asarray(alt, dtype=float)
     az = np.asarray(az, dtype=float)
@@ -120,20 +127,20 @@ def _fit_params(alt, az, obs_x, obs_y, init_params, radius=ALCOR_RADIUS,
     obs_y = np.asarray(obs_y, dtype=float)
     p0 = np.array([
         init_params["xshift"], init_params["yshift"], init_params["rotation"],
-        init_params["radial_coeffs"][1], init_params["radial_coeffs"][2],
+        init_params["radial_coeffs"][1],
     ], dtype=float)
 
     def residuals(p):
-        xshift, yshift, rot, k3, k5 = p
+        xshift, yshift, rot, k3 = p
         x, y = _predict_pixels(alt, az, xshift=xshift, yshift=yshift, rotation=rot,
-                               radial_coeffs=(1.0, k3, k5), radius=radius,
+                               radial_coeffs=(1.0, k3, 0.0), radius=radius,
                                horizon_radius=horizon_radius)
         return np.concatenate([x - obs_x, y - obs_y])
 
-    result = least_squares(residuals, p0)
-    xshift, yshift, rot, k3, k5 = result.x
+    result = least_squares(residuals, p0, loss="soft_l1", f_scale=3.0)
+    xshift, yshift, rot, k3 = result.x
     return dict(xshift=float(xshift), yshift=float(yshift), rotation=float(rot),
-                radial_coeffs=(1.0, float(k3), float(k5)))
+                radial_coeffs=(1.0, float(k3), 0.0))
 
 
 def match_alcor_stars(cat, detections, init_params,

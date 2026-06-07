@@ -248,7 +248,8 @@ def test_fit_params_recovers_known_geometry():
     rng = np.random.default_rng(1)
     alt = rng.uniform(5.0, 88.0, 200)
     az = rng.uniform(0.0, 360.0, 200)
-    true = dict(xshift=5.0, yshift=-4.0, rotation=0.7, radial_coeffs=(1.0, 0.03, 0.05))
+    # The fitter is k3-only (k5 held at 0), so generate the truth with k5=0.
+    true = dict(xshift=5.0, yshift=-4.0, rotation=0.7, radial_coeffs=(1.0, 0.03, 0.0))
     x, y = _predict_pixels(alt, az, **true)
 
     fit = _fit_params(alt, az, x, y,
@@ -257,14 +258,40 @@ def test_fit_params_recovers_known_geometry():
     assert abs(fit["xshift"] - 5.0) < 1e-3
     assert abs(fit["yshift"] + 4.0) < 1e-3
     assert abs(fit["rotation"] - 0.7) < 1e-3
-    np.testing.assert_allclose(fit["radial_coeffs"], (1.0, 0.03, 0.05), atol=1e-4)
+    np.testing.assert_allclose(fit["radial_coeffs"], (1.0, 0.03, 0.0), atol=1e-4)
+
+
+def test_fit_params_stays_physical_with_mismatches():
+    """k3-only + robust loss must not run away on data polluted by mismatches.
+
+    Fitting the collinear k3 and k5 with a plain loss produced unphysical
+    cancelling coefficients (e.g. k3=-0.58, k5=3.6) on real pooled data; this
+    guards the regression.
+    """
+    rng = np.random.default_rng(7)
+    alt = rng.uniform(5.0, 88.0, 200)
+    az = rng.uniform(0.0, 360.0, 200)
+    true = dict(xshift=5.0, yshift=-4.0, rotation=0.7, radial_coeffs=(1.0, 0.08, 0.0))
+    x, y = _predict_pixels(alt, az, **true)
+    # 15% of the points are gross mismatches to other detections.
+    bad = rng.choice(len(x), size=30, replace=False)
+    x[bad] += 45.0
+    y[bad] -= 45.0
+
+    fit = _fit_params(alt, az, x, y,
+                      init_params=dict(xshift=0.0, yshift=0.0, rotation=0.0,
+                                       radial_coeffs=(1.0, 0.0, 0.0)))
+    assert fit["radial_coeffs"][2] == 0.0           # k5 held at zero, no runaway
+    assert abs(fit["radial_coeffs"][1] - 0.08) < 0.03
+    assert abs(fit["xshift"] - 5.0) < 3.0
+    assert abs(fit["yshift"] + 4.0) < 3.0
 
 
 def test_fit_alcor_wcs_aggregates_synthetic_frames(monkeypatch, tmp_path):
     import skycam_utils.alcor as alcor_mod
     from astropy.table import Table
 
-    true = dict(xshift=6.0, yshift=-5.0, rotation=0.8, radial_coeffs=(1.0, 0.04, 0.06))
+    true = dict(xshift=6.0, yshift=-5.0, rotation=0.8, radial_coeffs=(1.0, 0.04, 0.0))
     rng = np.random.default_rng(2)
 
     frame_alt = [rng.uniform(10.0, 88.0, 30), rng.uniform(10.0, 88.0, 30)]
@@ -305,7 +332,7 @@ def test_fit_alcor_wcs_aggregates_synthetic_frames(monkeypatch, tmp_path):
     assert abs(result["xshift"] - 6.0) < 0.05
     assert abs(result["yshift"] + 5.0) < 0.05
     assert abs(result["rotation"] - 0.8) < 0.05
-    np.testing.assert_allclose(result["radial_coeffs"], (1.0, 0.04, 0.06), atol=2e-3)
+    np.testing.assert_allclose(result["radial_coeffs"], (1.0, 0.04, 0.0), atol=2e-3)
     assert result["n_matched"] >= 40
     assert result["residual_rms"] < 0.1
 
@@ -320,7 +347,7 @@ def test_fit_alcor_wcs_parallel_matches_serial(monkeypatch, tmp_path):
     import skycam_utils.alcor as alcor_mod
     from astropy.table import Table
 
-    true = dict(xshift=6.0, yshift=-5.0, rotation=0.8, radial_coeffs=(1.0, 0.04, 0.06))
+    true = dict(xshift=6.0, yshift=-5.0, rotation=0.8, radial_coeffs=(1.0, 0.04, 0.0))
     rng = np.random.default_rng(2)
 
     frame_alt = [rng.uniform(10.0, 88.0, 30), rng.uniform(10.0, 88.0, 30)]
@@ -387,7 +414,7 @@ def test_fit_alcor_wcs_parallel_matches_serial(monkeypatch, tmp_path):
     assert abs(result["xshift"] - 6.0) < 0.05
     assert abs(result["yshift"] + 5.0) < 0.05
     assert abs(result["rotation"] - 0.8) < 0.05
-    np.testing.assert_allclose(result["radial_coeffs"], (1.0, 0.04, 0.06), atol=2e-3)
+    np.testing.assert_allclose(result["radial_coeffs"], (1.0, 0.04, 0.0), atol=2e-3)
     assert result["n_matched"] >= 40
 
 

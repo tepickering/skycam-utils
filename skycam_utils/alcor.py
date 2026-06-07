@@ -1082,7 +1082,8 @@ def alcor_proc_fits_cli():
     the alt/az WCS encoded in the header.
     """
     parser = argparse.ArgumentParser(
-        description="Process an alcor OMEA 8C FITS image into a zenith-centered, north-up FITS file with alt/az WCS."
+        description="Process an alcor OMEA 8C FITS image into a zenith-centered, north-up FITS file with alt/az WCS.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("filename", help="Input alcor FITS file.")
     parser.add_argument("-o", "--output", default=None, help="Output FITS path (default: <input>_proc.fits).")
@@ -1113,7 +1114,8 @@ def alcor_keogram_cli():
     figure and, optionally, the DATE header values used for the x-axis.
     """
     parser = argparse.ArgumentParser(
-        description="Build a keogram from the center columns of alcor OMEA 8C FITS images."
+        description="Build a keogram from the center columns of alcor OMEA 8C FITS images.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("input_dir", help="Directory containing alcor FITS images.")
     parser.add_argument(
@@ -1204,7 +1206,8 @@ def plot_alcor_keogram_fits_cli():
     alcor keogram FITS file.
     """
     parser = argparse.ArgumentParser(
-        description="Render a timestamp-labeled keogram plot from an alcor keogram FITS file."
+        description="Render a timestamp-labeled keogram plot from an alcor keogram FITS file.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("filename", help="Input alcor keogram FITS file.")
     parser.add_argument(
@@ -1240,7 +1243,8 @@ def plot_alcor_fits_cli():
     default, named after the input file with `.fits` replaced by `.pdf`.
     """
     parser = argparse.ArgumentParser(
-        description="Render an annotated all-sky figure from an alcor OMEA 8C FITS image."
+        description="Render an annotated all-sky figure from an alcor OMEA 8C FITS image.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("filename", help="Input alcor FITS file.")
     parser.add_argument(
@@ -1294,7 +1298,8 @@ def fit_alcor_wcs_cli():
     ready to paste into the module defaults.
     """
     parser = argparse.ArgumentParser(
-        description="Calibrate the alcor lens WCS from bright stars across a night."
+        description="Calibrate the alcor lens WCS from bright stars across a night.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("input_dir", help="Directory containing alcor FITS images.")
     parser.add_argument("--pattern", default="*.fits.bz2", help="Glob pattern for input files.")

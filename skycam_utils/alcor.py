@@ -186,9 +186,13 @@ def match_alcor_stars(cat, detections, init_params,
 
 
 def _frame_time(path):
-    """Return the observation Time from a FITS file's DATE-OBS header."""
+    """Return the observation Time (UT) from a FITS file's DATE (creation) header.
+
+    For these alcor cameras DATE is the true UT timestamp; the DATE-OBS keyword
+    is local time despite its 'UT' label.
+    """
     with fits.open(path) as hdul:
-        return Time(hdul[0].header["DATE-OBS"], format="isot", scale="utc")
+        return Time(hdul[0].header["DATE"], format="isot", scale="utc")
 
 
 def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=3.0, sun_alt_max=-18.0,
@@ -333,14 +337,17 @@ def _sun_altitude(time, location=MMT_LOCATION):
 
 def select_dark_frames(files, sun_alt_max=-18.0, location=MMT_LOCATION):
     """
-    Return the subset of ``files`` whose DATE-OBS corresponds to a Sun
-    altitude below ``sun_alt_max`` (default -18 deg, astronomical twilight).
+    Return the subset of ``files`` whose DATE (creation) header corresponds to a
+    Sun altitude below ``sun_alt_max`` (default -18 deg, astronomical twilight).
+
+    The DATE header is used because it is the true UT timestamp for these alcor
+    cameras; the DATE-OBS keyword is local time despite its label.
     """
     files = [Path(f) for f in files]
     times = []
     for f in files:
         with fits.open(f) as hdul:
-            times.append(hdul[0].header["DATE-OBS"])
+            times.append(hdul[0].header["DATE"])
     times = Time(times, format="isot", scale="utc")
     altaz = get_sun(times).transform_to(AltAz(obstime=times, location=location))
     keep = altaz.alt.deg < sun_alt_max

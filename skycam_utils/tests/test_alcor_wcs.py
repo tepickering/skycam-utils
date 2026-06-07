@@ -75,7 +75,7 @@ def test_select_dark_frames_filters_by_sun_altitude(tmp_path):
 
     def write(name, date_obs):
         hdu = fits.PrimaryHDU(data=np.zeros((3, 4, 4), dtype=np.int16))
-        hdu.header["DATE-OBS"] = date_obs
+        hdu.header["DATE"] = date_obs
         path = tmp_path / name
         hdu.writeto(path)
         return path

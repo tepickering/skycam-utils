@@ -536,3 +536,29 @@ def test_alcor_calibration_nearest_in_time(monkeypatch):
     c = alcor_mod.alcor_calibration(Time("2024-10-01T00:00:00"))
     c["xshift"] = 999.0
     assert table[0]["xshift"] == -4.5
+
+
+def test_alcor_frame_calibration_uses_filename_then_header(monkeypatch, tmp_path):
+    import skycam_utils.alcor as alcor_mod
+    from astropy.io import fits
+
+    table = [
+        {"epoch": "2024-09-04", "xshift": -4.5, "yshift": 4.4,
+         "rotation": 0.39, "radial_coeffs": (1.0, 0.014, 0.0)},
+        {"epoch": "2026-05-19", "xshift": -12.0, "yshift": 9.9,
+         "rotation": 0.31, "radial_coeffs": (1.0, 0.084, 0.0)},
+    ]
+    monkeypatch.setattr(alcor_mod, "ALCOR_CALIBRATIONS", table)
+
+    # filename parses -> no file access needed, resolves by filename time
+    assert alcor_mod._alcor_frame_calibration(
+        "2026_05_19__03_37_18.fits.bz2")["epoch"] == "2026-05-19"
+    assert alcor_mod._alcor_frame_calibration(
+        "2024_09_04__22_00_00.fits.bz2")["epoch"] == "2024-09-04"
+
+    # filename does not parse -> fall back to the DATE header
+    path = tmp_path / "master.fits"
+    hdu = fits.PrimaryHDU(data=np.zeros((3, 4, 4), dtype=np.int16))
+    hdu.header["DATE"] = "2026-05-19T10:37:18"
+    hdu.writeto(path)
+    assert alcor_mod._alcor_frame_calibration(path)["epoch"] == "2026-05-19"

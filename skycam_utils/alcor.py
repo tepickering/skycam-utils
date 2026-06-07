@@ -468,6 +468,22 @@ def _read_frame_date(filename):
     return fits.getheader(filename)["DATE"]
 
 
+def _alcor_frame_calibration(filename):
+    """
+    Resolve the calibration epoch nearest in time to a frame.
+
+    The frame time is parsed from its YYYY_MM_DD__HH_MM_SS filename first (no
+    file access); if the name does not parse, the DATE header is read instead.
+    Returns the calibration dict from :func:`alcor_calibration`.
+    """
+    dt = _filename_ut_datetime(filename)
+    if dt is None:
+        time = Time(_read_frame_date(filename), format="isot", scale="utc")
+    else:
+        time = Time(dt)
+    return alcor_calibration(time)
+
+
 def select_dark_frames(files, sun_alt_max=-18.0, location=MMT_LOCATION, log=None):
     """
     Return the subset of ``files`` whose timestamp corresponds to a Sun altitude

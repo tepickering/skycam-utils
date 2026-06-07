@@ -135,10 +135,10 @@ def test_detect_alcor_stars_on_synthetic_image():
     sources = detect_alcor_stars(im, fwhm=2.5, threshold_sigma=5.0)
     assert len(sources) >= 3
     assert {"xcentroid", "ycentroid", "flux"}.issubset(sources.colnames)
-    sources.sort("flux", reverse=True)
-    bx, by = sources["xcentroid"][0], sources["ycentroid"][0]
-    dists = [np.hypot(bx - cx, by - cy) for cx, cy in truth]
-    assert min(dists) < 2.0
+    for cx, cy in truth:
+        d = np.hypot(np.asarray(sources["xcentroid"]) - cx,
+                     np.asarray(sources["ycentroid"]) - cy)
+        assert d.min() < 2.0
 
 
 def test_detect_alcor_stars_on_real_fixture():

@@ -253,13 +253,17 @@ def detect_alcor_stars(im, fwhm=3.0, threshold_sigma=5.0):
         columns. Empty (with those columns) if nothing is found.
     """
     lum = np.asarray(im, dtype=float).sum(axis=2)
-    mean, median, std = sigma_clipped_stats(lum, sigma=3.0)
+    _, median, std = sigma_clipped_stats(lum, sigma=3.0)
     finder = DAOStarFinder(fwhm=fwhm, threshold=threshold_sigma * std)
     sources = finder(lum - median)
     if sources is None:
-        return Table(names=["xcentroid", "ycentroid", "flux"])
-    # photutils 3.x returns a DeprecatedColumnQTable using x_centroid/y_centroid.
-    # Convert to a plain Table with the stable xcentroid/ycentroid column names.
+        return Table(names=["xcentroid", "ycentroid", "flux"],
+                     dtype=[float, float, float])
+    # photutils 3.x uses x_centroid/y_centroid as the primary column names;
+    # xcentroid/ycentroid are deprecated aliases scheduled for removal in 4.0.
+    # Copy to a plain Table (which strips the deprecation-alias machinery) and
+    # rename x_centroid/y_centroid to xcentroid/ycentroid — the names this
+    # function's API exposes — so callers always see a consistent column set.
     xcol = "x_centroid" if "x_centroid" in sources.colnames else "xcentroid"
     ycol = "y_centroid" if "y_centroid" in sources.colnames else "ycentroid"
     out = Table(sources)

@@ -26,6 +26,13 @@ from astropy.coordinates import SkyCoord, AltAz, get_sun
 from .astrometry import MMT_LOCATION
 
 
+# Geometry constants for load_alcor_fits, calibrated by fit_alcor_wcs against
+# bright_star_sloan.fits (Vmag<=3) over a full night of dark-sky frames.
+# XSHIFT/YSHIFT are absolute pixel offsets valid at the calibrated RADIUS/
+# HORIZON_RADIUS; RADIAL_COEFFS=(k1,k3,k5) is the odd-power detector->sky plate
+# solution. The per-star residual floor is ~4 px (centroid noise), which
+# averages out for the fixed WCS; the fitted radial term removes a systematic
+# that grows to ~5 px near the horizon.
 ALCOR_RADIUS = 680
 ALCOR_HORIZON_RADIUS = 662
 ALCOR_ROTATION = 0.3886
@@ -220,7 +227,7 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=3.0, sun_alt_max=-
     if max_frames is not None:
         dark = dark[:max_frames]
 
-    init = dict(xshift=ALCOR_XSHIFT, yshift=ALCOR_YSHIFT, rotation=0.0,
+    init = dict(xshift=0.0, yshift=0.0, rotation=0.0,
                 radial_coeffs=(1.0, 0.0, 0.0))
     frames = []  # (cat, detections) for each usable frame, for re-matching
 
@@ -583,8 +590,9 @@ def load_alcor_fits(filename, rotation=ALCOR_ROTATION, xcen=696, ycen=698,
     ----------
     filename : str
         FITS filename. Compressed (.gz, .bz2) inputs are supported.
-    rotation : float (default=0.4)
-        Camera rotation w.r.t. true north, in degrees.
+    rotation : float (default=ALCOR_ROTATION)
+        Camera rotation w.r.t. true north, in degrees. Default is the fitted
+        calibration value stored in ALCOR_ROTATION.
     xcen : int (default=696)
         X center of illuminated region in original image coordinates.
     ycen : int (default=698)
@@ -593,20 +601,23 @@ def load_alcor_fits(filename, rotation=ALCOR_ROTATION, xcen=696, ycen=698,
         Half-width of the trimmed square around (xcen, ycen).
     horizon_radius : float (default=662)
         Pixel radius from zenith at which altitude=0.
-    xshift : float (default=0.0)
+    xshift : float (default=ALCOR_XSHIFT)
         Zenith offset from the array center in the x (column) direction, in
-        pixels. A non-zero value shifts the image via ``scipy.ndimage.shift``
-        so that the zenith falls on the geometric center of the output array.
-    yshift : float (default=0.0)
+        pixels. Default is the fitted calibration value stored in ALCOR_XSHIFT.
+        A non-zero value shifts the image via ``scipy.ndimage.shift`` so that
+        the zenith falls on the geometric center of the output array.
+    yshift : float (default=ALCOR_YSHIFT)
         Zenith offset from the array center in the y (row) direction, in
-        pixels. Applied together with ``xshift`` in a single
-        ``scipy.ndimage.shift`` call.
-    radial_coeffs : tuple of float (default=(1.0, 0.0, 0.0))
+        pixels. Default is the fitted calibration value stored in ALCOR_YSHIFT.
+        Applied together with ``xshift`` in a single ``scipy.ndimage.shift``
+        call.
+    radial_coeffs : tuple of float (default=ALCOR_RADIAL_COEFFS)
         The ``(k1, k3, k5)`` odd-power plate-solution coefficients describing
         the lens distortion via ``z = 90*(k1*rho + k3*rho**3 + k5*rho**5)``,
         where ``rho = r / horizon_radius`` is the normalized detector radius
-        and ``z = 90 - alt`` is the zenith angle in degrees. Any iterable is
-        accepted and coerced to a tuple. The idealized equidistant mapping
+        and ``z = 90 - alt`` is the zenith angle in degrees. Default is the
+        fitted calibration value stored in ALCOR_RADIAL_COEFFS. Any iterable
+        is accepted and coerced to a tuple. The idealized equidistant mapping
         corresponds to ``(1.0, 0.0, 0.0)``.
     sip_degree : int (default=5)
         Degree of the SIP polynomial used to encode lens distortion in the
@@ -986,7 +997,7 @@ def _parse_timestamps(timestamps):
         return None
 
 
-def plot_alcor_fits(filename, outimage=None, outfig=None, rotation=0.4, xcen=696, ycen=698, radius=680,
+def plot_alcor_fits(filename, outimage=None, outfig=None, rotation=ALCOR_ROTATION, xcen=696, ycen=698, radius=680,
                     horizon_radius=662, powerstretch=0.75, contrast=0.35, gscale=0.7, bscale=1.7, figsize=12):
     """
     Take a FITS file as produced by the alcor OMEA 8C and create a trimmed, rotated, and annotated figure
@@ -1076,7 +1087,7 @@ def alcor_proc_fits_cli():
     parser.add_argument("filename", help="Input alcor FITS file.")
     parser.add_argument("-o", "--output", default=None, help="Output FITS path (default: <input>_proc.fits).")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite output file if it exists.")
-    parser.add_argument("--rotation", type=float, default=0.4, help="Camera rotation w.r.t. true north (deg).")
+    parser.add_argument("--rotation", type=float, default=ALCOR_ROTATION, help="Camera rotation w.r.t. true north (deg).")
     parser.add_argument("--xcen", type=int, default=696, help="X center of illuminated region.")
     parser.add_argument("--ycen", type=int, default=698, help="Y center of illuminated region.")
     parser.add_argument("--radius", type=int, default=680, help="Half-width of trimmed square around (xcen, ycen).")
@@ -1129,7 +1140,7 @@ def alcor_keogram_cli():
         default=None,
         help="Optional text file to write DATE header values, one per line.",
     )
-    parser.add_argument("--rotation", type=float, default=0.4, help="Camera rotation w.r.t. true north (deg).")
+    parser.add_argument("--rotation", type=float, default=ALCOR_ROTATION, help="Camera rotation w.r.t. true north (deg).")
     parser.add_argument("--xcen", type=int, default=696, help="X center of illuminated region.")
     parser.add_argument("--ycen", type=int, default=698, help="Y center of illuminated region.")
     parser.add_argument("--radius", type=int, default=680, help="Half-width of trimmed square around (xcen, ycen).")
@@ -1237,7 +1248,7 @@ def plot_alcor_fits_cli():
         help="Output figure path (default: <input>.pdf). Format inferred from extension."
     )
     parser.add_argument("--outimage", default=None, help="If set, also write the raw stretched image to this path.")
-    parser.add_argument("--rotation", type=float, default=0.4, help="Camera rotation w.r.t. true north (deg).")
+    parser.add_argument("--rotation", type=float, default=ALCOR_ROTATION, help="Camera rotation w.r.t. true north (deg).")
     parser.add_argument("--xcen", type=int, default=696, help="X center of illuminated region.")
     parser.add_argument("--ycen", type=int, default=698, help="Y center of illuminated region.")
     parser.add_argument("--radius", type=int, default=680, help="Half-width of trimmed square around (xcen, ycen).")
@@ -1303,8 +1314,11 @@ def fit_alcor_wcs_cli():
     )
     print(f"# matched stars: {result['n_matched']}")
     print(f"# residual RMS (pix): {result['residual_rms']:.3f}")
-    print(f"ALCOR_XSHIFT = {result['xshift']!r}")
-    print(f"ALCOR_YSHIFT = {result['yshift']!r}")
+    # xshift/yshift/rotation are residuals on top of the values load_alcor_fits already applied to the image,
+    # so compose with the current constants; radial_coeffs is re-derived in full (distortion is applied only
+    # in the WCS, not the image).
+    print(f"ALCOR_XSHIFT = {ALCOR_XSHIFT + result['xshift']!r}")
+    print(f"ALCOR_YSHIFT = {ALCOR_YSHIFT + result['yshift']!r}")
     print(f"ALCOR_ROTATION = {ALCOR_ROTATION + result['rotation']!r}")
     print(f"ALCOR_RADIAL_COEFFS = {tuple(result['radial_coeffs'])!r}")
     if args.residual_plot is not None:

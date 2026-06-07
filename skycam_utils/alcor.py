@@ -12,8 +12,7 @@ from matplotlib.patches import Circle
 import matplotlib.dates as mdates
 from astropy.io import fits
 from astropy.time import Time
-from astropy.wcs import WCS
-from astropy.wcs.utils import fit_wcs_from_points
+from astropy.wcs import WCS, Sip
 
 import astropy.units as u
 import astropy.visualization as viz
@@ -30,6 +29,23 @@ ALCOR_YSHIFT = 0.0
 ALCOR_RADIAL_COEFFS = (1.0, 0.0, 0.0)
 
 
+def _invert_radial(z_deg, radial_coeffs, n_iter=8):
+    """
+    Invert ``z = 90*(k1*rho + k3*rho**3 + k5*rho**5)`` for the normalized
+    detector radius ``rho`` using Newton's method. ``z_deg`` is the zenith angle
+    in degrees. Assumes the polynomial is monotonic over the field of view
+    (true for physical near-equidistant coefficients).
+    """
+    k1, k3, k5 = radial_coeffs
+    t = np.asarray(z_deg, dtype=float) / 90.0
+    rho = t / k1  # equidistant first guess
+    for _ in range(n_iter):
+        g = k1 * rho + k3 * rho**3 + k5 * rho**5
+        gp = k1 + 3.0 * k3 * rho**2 + 5.0 * k5 * rho**4
+        rho = rho - (g - t) / gp
+    return rho
+
+
 def _predict_pixels(
     alt,
     az,
@@ -41,32 +57,36 @@ def _predict_pixels(
     horizon_radius=ALCOR_HORIZON_RADIUS,
 ):
     """
-    Forward lens model: map altitude/azimuth (degrees) to processed-frame
-    pixel coordinates (x=column, y=row).
+    Forward lens model: map altitude/azimuth (degrees) to processed-frame pixel
+    coordinates (x=column, y=row).
 
     Pixel y increases upward (FITS/WCS convention), matching the coordinate
     system of the WCS returned by ``load_alcor_fits``; it is not a direct numpy
     row index.
 
-    The radial mapping is ``r = horizon_radius * (k1*zeta + k3*zeta**3 +
-    k5*zeta**5)`` with ``zeta = (90 - alt)/90``, an odd-power polynomial in
-    zenith angle (standard symmetric-fisheye form). The idealized coefficients
-    ``(1, 0, 0)`` give the equidistant ARC mapping; higher-order terms encode
-    the lens's non-linear growth with zenith angle. ``xshift``/``yshift`` offset
-    the zenith from the array center.
+    The lens is described by the plate solution ``z = 90*(k1*rho + k3*rho**3 +
+    k5*rho**5)`` with ``rho = r / horizon_radius`` the normalized detector radius
+    and ``z = 90 - alt`` the zenith angle (an odd-power, symmetric-fisheye
+    polynomial in detector radius). Mapping alt/az to a pixel inverts this for
+    ``rho`` via Newton's method. The idealized coefficients ``(1, 0, 0)`` give the
+    equidistant ARC mapping; higher-order terms encode the lens's non-linear
+    behavior with zenith angle. ``xshift``/``yshift`` offset the zenith from the
+    array center.
 
     ``rotation`` is a residual azimuth-frame rotation (degrees) applied on top of
     the image rotation that ``load_alcor_fits`` already applies; it defaults to
     0.0 because the idealized/centered frame has no residual rotation.
+
+    The zenith maps to the array geometric center (radius-0.5, radius-0.5),
+    consistent with crpix=radius+0.5.
     """
     alt = np.asarray(alt, dtype=float)
     az = np.asarray(az, dtype=float)
-    k1, k3, k5 = radial_coeffs
-    zeta = (90.0 - alt) / 90.0
-    r = horizon_radius * (k1 * zeta + k3 * zeta**3 + k5 * zeta**5)
+    rho = _invert_radial(90.0 - alt, tuple(float(c) for c in radial_coeffs))
+    r = horizon_radius * rho
     ang = np.radians(az + rotation)
-    x = radius + xshift - r * np.sin(ang)
-    y = radius + yshift + r * np.cos(ang)
+    x = (radius - 0.5) + xshift - r * np.sin(ang)
+    y = (radius - 0.5) + yshift + r * np.cos(ang)
     return x, y
 
 
@@ -98,7 +118,7 @@ def select_dark_frames(files, sun_alt_max=-18.0, location=MMT_LOCATION):
 
 def _base_arc_wcs(radius, horizon_radius, k1):
     """Construct the linear ARC WCS (no SIP) for the given geometry."""
-    cdelt = 90.0 / (horizon_radius * k1)
+    cdelt = 90.0 * k1 / horizon_radius
     wcs = WCS(naxis=2)
     wcs.wcs.ctype = ["RA---ARC", "DEC--ARC"]
     wcs.wcs.crpix = [radius + 0.5, radius + 0.5]
@@ -108,23 +128,43 @@ def _base_arc_wcs(radius, horizon_radius, k1):
     return wcs
 
 
-def _arc_fit_template(radius, horizon_radius, k1):
-    """ARC template carrying the plate scale in the CD matrix.
+def _sip_poly_eval(coef, u, v):
+    """Evaluate a SIP coefficient matrix (coef[p, q] * u**p * v**q) at (u, v)."""
+    out = np.zeros_like(u, dtype=float)
+    n = coef.shape[0]
+    for p in range(n):
+        for q in range(n):
+            c = coef[p, q]
+            if c != 0.0:
+                out = out + c * u**p * v**q
+    return out
 
-    ``fit_wcs_from_points`` forces ``cdelt=(1, 1)`` and fits the CD matrix, so
-    the linear plate scale must be encoded in CD rather than CDELT. Without it
-    the identity-CD initial guess maps the synthetic grid >180 deg from the
-    zenith pole, where the ARC projection is undefined and the least-squares
-    seed becomes non-finite.
+
+def _fit_sip_inverse(a, b, radius, sip_degree):
     """
-    cdelt = 90.0 / (horizon_radius * k1)
-    wcs = WCS(naxis=2)
-    wcs.wcs.ctype = ["RA---ARC", "DEC--ARC"]
-    wcs.wcs.crpix = [radius + 0.5, radius + 0.5]
-    wcs.wcs.crval = [0.0, 90.0]
-    wcs.wcs.cd = [[cdelt, 0.0], [0.0, cdelt]]
-    wcs.wcs.lonpole = 0.0
-    return wcs
+    Fit the approximate inverse SIP coefficients (AP, BP) for forward
+    coefficients (A, B) over a pixel grid. The inverse of a radial polynomial is
+    not itself polynomial, so AP/BP are a least-squares approximation (used by
+    external tools and as the initial guess for astropy's iterative
+    world->pixel solve, which refines to machine precision using A/B).
+    """
+    g = np.linspace(-radius, radius, 50)
+    uu, vv = np.meshgrid(g, g)
+    u = uu.ravel()
+    v = vv.ravel()
+    fu = u + _sip_poly_eval(a, u, v)
+    fv = v + _sip_poly_eval(b, u, v)
+    terms = [(p, q) for p in range(sip_degree + 1) for q in range(sip_degree + 1)
+             if 1 <= p + q <= sip_degree]
+    design = np.column_stack([fu**p * fv**q for (p, q) in terms])
+    coef_u, _, _, _ = np.linalg.lstsq(design, u - fu, rcond=None)
+    coef_v, _, _, _ = np.linalg.lstsq(design, v - fv, rcond=None)
+    ap = np.zeros((sip_degree + 1, sip_degree + 1))
+    bp = np.zeros((sip_degree + 1, sip_degree + 1))
+    for (p, q), cu, cv in zip(terms, coef_u, coef_v):
+        ap[p, q] = cu
+        bp[p, q] = cv
+    return ap, bp
 
 
 @lru_cache(maxsize=32)
@@ -133,43 +173,43 @@ def build_alcor_wcs(radius=ALCOR_RADIUS, horizon_radius=ALCOR_HORIZON_RADIUS,
     """
     Build an ARC-projection WCS for the processed alcor frame. When the radial
     model has non-trivial higher-order terms, the deviation from the linear
-    (equidistant) mapping is encoded as SIP distortion fitted from a synthetic
-    grid of the forward model, so ``world_to_pixel``/``to_header`` reproduce the
-    lens distortion. Cached because the geometry is fixed across images.
+    (equidistant) mapping is encoded as an exact analytic SIP distortion, so
+    ``world_to_pixel``/``to_header`` reproduce the lens distortion. Cached
+    because the geometry is fixed across images.
 
-    Note: the radial model uses only odd powers of zenith angle (``k1*zeta +
-    k3*zeta**3 + k5*zeta**5``, the standard symmetric-fisheye form). The odd
-    radial powers express the distortion as a polynomial in the undistorted
-    pixel radius (the ``k5`` term needs degree 5, hence ``sip_degree=5``); since
-    SIP applies its forward polynomial to the observed/distorted pixels the fit
-    is not exact, but it reproduces the forward model to a few tenths of a pixel
-    near the horizon and well below 0.1 px over most of the FOV.
+    The lens is parametrized as a plate solution that maps the detector directly
+    to the sky: ``z = 90*(k1*rho + k3*rho**3 + k5*rho**5)`` with ``rho =
+    r / horizon_radius`` the normalized detector radius and ``z = 90 - alt`` the
+    zenith angle (an odd-power, symmetric-fisheye polynomial in detector radius;
+    the ``k5`` term needs degree 5, hence ``sip_degree=5``). The Cartesian
+    displacement of this radial map is an exact degree-5 polynomial in the
+    detector pixel offsets, so the SIP coefficients are constructed analytically
+    (not fitted) and reproduce the plate solution to numerical precision over
+    the whole FOV.
     """
     radial_coeffs = tuple(float(c) for c in radial_coeffs)
     k1, k3, k5 = radial_coeffs
+    base = _base_arc_wcs(radius, horizon_radius, k1)
     if abs(k3) < 1e-12 and abs(k5) < 1e-12:
-        return _base_arc_wcs(radius, horizon_radius, k1)
+        return base
 
-    template = _arc_fit_template(radius, horizon_radius, k1)
+    # Analytic SIP for the radial plate solution. The Cartesian displacement of
+    # z = 90*(k1*rho + k3*rho**3 + k5*rho**5) is A_u = u*(k3*rho**2 + k5*rho**4)/k1
+    # with rho = sqrt(u**2 + v**2)/horizon_radius -- an exact degree-5 polynomial.
+    H = float(horizon_radius)
+    c3 = k3 / (k1 * H**2)
+    c5 = k5 / (k1 * H**4)
+    a = np.zeros((sip_degree + 1, sip_degree + 1))
+    b = np.zeros((sip_degree + 1, sip_degree + 1))
+    a[3, 0] = c3; a[1, 2] = c3
+    a[5, 0] = c5; a[3, 2] = 2 * c5; a[1, 4] = c5
+    b[0, 3] = c3; b[2, 1] = c3
+    b[0, 5] = c5; b[2, 3] = 2 * c5; b[4, 1] = c5
+    ap, bp = _fit_sip_inverse(a, b, radius, sip_degree)
 
-    # Synthetic grid spanning the FOV (avoid the alt=90 pole singularity).
-    alt_grid = np.linspace(2.0, 89.5, 40)
-    az_grid = np.linspace(0.0, 350.0, 36)
-    alt_mesh, az_mesh = np.meshgrid(alt_grid, az_grid)
-    alt_flat = alt_mesh.ravel()
-    az_flat = az_mesh.ravel()
-    x, y = _predict_pixels(
-        alt_flat, az_flat,
-        xshift=0.0, yshift=0.0, rotation=0.0,
-        radial_coeffs=radial_coeffs, radius=radius, horizon_radius=horizon_radius,
-    )
-    world = SkyCoord(az_flat * u.deg, alt_flat * u.deg)
-    wcs = fit_wcs_from_points(
-        (x, y), world,
-        projection=template,
-        proj_point=SkyCoord(0 * u.deg, 90 * u.deg),
-        sip_degree=sip_degree,
-    )
+    wcs = base.deepcopy()
+    wcs.wcs.ctype = ["RA---ARC-SIP", "DEC--ARC-SIP"]
+    wcs.sip = Sip(a, b, ap, bp, [radius + 0.5, radius + 0.5])
     return wcs
 
 

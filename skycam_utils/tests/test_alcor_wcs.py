@@ -25,27 +25,29 @@ from skycam_utils.alcor import (
 
 
 def test_predict_pixels_idealized_reproduces_zenith_and_horizon():
-    # Zenith maps to the array center.
+    cen = ALCOR_RADIUS - 0.5
     x, y = _predict_pixels(90.0, 0.0)
-    np.testing.assert_allclose([x, y], [ALCOR_RADIUS, ALCOR_RADIUS], atol=1e-9)
+    np.testing.assert_allclose([x, y], [cen, cen], atol=1e-9)
 
-    # alt=0 maps to a circle of horizon_radius, with the existing azimuth layout:
-    # az=0 -> +y (top), az=90 -> -x (left), az=180 -> -y, az=270 -> +x.
     az = np.array([0.0, 90.0, 180.0, 270.0])
     x, y = _predict_pixels(np.zeros_like(az), az)
-    radii = np.hypot(x - ALCOR_RADIUS, y - ALCOR_RADIUS)
+    radii = np.hypot(x - cen, y - cen)
     np.testing.assert_allclose(radii, ALCOR_HORIZON_RADIUS, atol=1e-9)
-    np.testing.assert_allclose(x, ALCOR_RADIUS - ALCOR_HORIZON_RADIUS * np.sin(np.radians(az)), atol=1e-9)
-    np.testing.assert_allclose(y, ALCOR_RADIUS + ALCOR_HORIZON_RADIUS * np.cos(np.radians(az)), atol=1e-9)
+    np.testing.assert_allclose(x, cen - ALCOR_HORIZON_RADIUS * np.sin(np.radians(az)), atol=1e-9)
+    np.testing.assert_allclose(y, cen + ALCOR_HORIZON_RADIUS * np.cos(np.radians(az)), atol=1e-9)
 
 
-def test_predict_pixels_radial_term_pushes_stars_outward():
-    # A positive higher-order (quintic) term increases pixel radius at large zenith angle.
+def test_predict_pixels_radial_term_changes_radius():
+    # Under the plate-solution parametrization z = 90*(k1*rho + ... + k5*rho**5),
+    # a positive rho**5 coefficient makes z grow faster with rho, so a star at a
+    # fixed altitude (fixed z) is reached at a SMALLER detector radius: it is
+    # pulled inward relative to the equidistant mapping.
+    cen = ALCOR_RADIUS - 0.5
     base_x, base_y = _predict_pixels(10.0, 45.0)
     bent_x, bent_y = _predict_pixels(10.0, 45.0, radial_coeffs=(1.0, 0.0, 0.1))
-    base_r = np.hypot(base_x - ALCOR_RADIUS, base_y - ALCOR_RADIUS)
-    bent_r = np.hypot(bent_x - ALCOR_RADIUS, bent_y - ALCOR_RADIUS)
-    assert bent_r > base_r
+    base_r = np.hypot(base_x - cen, base_y - cen)
+    bent_r = np.hypot(bent_x - cen, bent_y - cen)
+    assert bent_r < base_r
 
 
 def test_predict_pixels_default_coeffs_are_idealized():
@@ -99,18 +101,16 @@ def test_build_alcor_wcs_with_radial_term_reproduces_forward_model():
 
     alt = np.array([80.0, 60.0, 40.0, 20.0, 5.0])
     az = np.array([10.0, 100.0, 190.0, 280.0, 350.0])
+    assert list(wcs.wcs.ctype) == ["RA---ARC-SIP", "DEC--ARC-SIP"]
     model_x, model_y = _predict_pixels(alt, az, radial_coeffs=coeffs)
     wcs_x, wcs_y = wcs.world_to_pixel_values(az, alt)
-    # The odd-power radial model (k3*zeta**3 + k5*zeta**5) defines the
-    # distortion as a polynomial in the *undistorted* pixel radius, whereas SIP
-    # applies its forward polynomial to the *observed* (distorted) pixels; the
-    # inverse of an odd polynomial is not itself a polynomial, so a finite SIP
-    # fit cannot reproduce it exactly. With degree-5 SIP the residual is
-    # dominated by the near-horizon point (~0.30 px at alt=5 deg); it falls well
-    # below 0.1 px above alt~20 deg. So we require reproduction to better than
-    # 0.31 px across the FOV.
-    np.testing.assert_allclose(wcs_x, model_x, atol=0.31)
-    np.testing.assert_allclose(wcs_y, model_y, atol=0.31)
+    # The plate-solution radial model maps the detector to the sky as an
+    # odd-power polynomial in the detector pixel radius (k1*rho + k3*rho**3 +
+    # k5*rho**5). Its Cartesian displacement is an exact degree-5 polynomial, so
+    # the analytic SIP reproduces the plate solution to numerical precision in
+    # both directions (world->pixel via astropy's iterative refinement of A/B).
+    np.testing.assert_allclose(wcs_x, model_x, atol=1e-3)
+    np.testing.assert_allclose(wcs_y, model_y, atol=1e-3)
 
 
 def test_load_alcor_fits_idealized_defaults_unchanged():

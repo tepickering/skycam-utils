@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+import pytest
 os.environ.setdefault("MPLBACKEND", "Agg")
 _MPLCONFIGDIR = Path(tempfile.gettempdir()) / "skycam-utils-matplotlib"
 _MPLCONFIGDIR.mkdir(exist_ok=True)
@@ -273,6 +274,93 @@ def test_fit_alcor_wcs_aggregates_synthetic_frames(monkeypatch, tmp_path):
     np.testing.assert_allclose(result["radial_coeffs"], (1.0, 0.04, 0.06), atol=2e-3)
     assert result["n_matched"] >= 40
     assert result["residual_rms"] < 0.1
+
+
+def test_fit_alcor_wcs_parallel_matches_serial(monkeypatch, tmp_path):
+    """The workers>1 path must recover the same geometry as the serial path.
+
+    Real subprocesses can't see monkeypatched module functions, so the
+    ProcessPoolExecutor is replaced with a synchronous stand-in that still
+    drives the parallel dispatch/collection code (futures dict + as_completed).
+    """
+    import skycam_utils.alcor as alcor_mod
+    from astropy.table import Table
+
+    true = dict(xshift=6.0, yshift=-5.0, rotation=0.8, radial_coeffs=(1.0, 0.04, 0.06))
+    rng = np.random.default_rng(2)
+
+    frame_alt = [rng.uniform(10.0, 88.0, 30), rng.uniform(10.0, 88.0, 30)]
+    frame_az = [rng.uniform(0.0, 360.0, 30), rng.uniform(0.0, 360.0, 30)]
+    files = [tmp_path / "f0.fits", tmp_path / "f1.fits"]
+    for f in files:
+        f.write_bytes(b"stub")
+
+    def fake_select_dark_frames(fs, **kw):
+        return list(files)
+
+    def fake_load_alcor_fits(path, **kw):
+        return np.zeros((2 * ALCOR_RADIUS, 2 * ALCOR_RADIUS, 3)), None
+
+    # _detect_alcor_frame processes one frame's calls atomically, so a shared
+    # "active frame index" keyed off the filename keeps reference/detect in sync
+    # regardless of which order the frames are dispatched in.
+    index_by_name = {f.name: i for i, f in enumerate(files)}
+    state = {"i": 0}
+
+    def fake_frame_time(path):
+        state["i"] = index_by_name[Path(path).name]
+        return Time("2024-09-05T07:00:00", format="isot", scale="utc")
+
+    def fake_reference_altaz(time, **kw):
+        i = state["i"]
+        return Table({"Alt": frame_alt[i], "Az": frame_az[i],
+                      "Vmag": rng.uniform(0.5, 3.0, 30), "HD": np.arange(30)})
+
+    def fake_detect(im, **kw):
+        i = state["i"]
+        x, y = _predict_pixels(frame_alt[i], frame_az[i], **true)
+        return Table({"xcentroid": x, "ycentroid": y, "flux": np.linspace(1e3, 1e2, 30)})
+
+    class _SyncFuture:
+        def __init__(self, value):
+            self._value = value
+
+        def result(self):
+            return self._value
+
+    class _SyncExecutor:
+        def __init__(self, max_workers=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def submit(self, fn, task):
+            return _SyncFuture(fn(task))
+
+    monkeypatch.setattr(alcor_mod, "select_dark_frames", fake_select_dark_frames)
+    monkeypatch.setattr(alcor_mod, "load_alcor_fits", fake_load_alcor_fits)
+    monkeypatch.setattr(alcor_mod, "alcor_reference_altaz", fake_reference_altaz)
+    monkeypatch.setattr(alcor_mod, "detect_alcor_stars", fake_detect)
+    monkeypatch.setattr(alcor_mod, "_frame_time", fake_frame_time)
+    monkeypatch.setattr(alcor_mod, "ProcessPoolExecutor", _SyncExecutor)
+    monkeypatch.setattr(alcor_mod, "as_completed", lambda futures: list(futures))
+
+    result = fit_alcor_wcs(tmp_path, pattern="*.fits", workers=2)
+    assert abs(result["xshift"] - 6.0) < 0.05
+    assert abs(result["yshift"] + 5.0) < 0.05
+    assert abs(result["rotation"] - 0.8) < 0.05
+    np.testing.assert_allclose(result["radial_coeffs"], (1.0, 0.04, 0.06), atol=2e-3)
+    assert result["n_matched"] >= 40
+
+
+def test_fit_alcor_wcs_rejects_invalid_workers(tmp_path):
+    (tmp_path / "f0.fits").write_bytes(b"stub")
+    with pytest.raises(ValueError, match="workers"):
+        fit_alcor_wcs(tmp_path, pattern="*.fits", workers=0)
 
 
 def test_save_alcor_residual_plot_writes_output(tmp_path):

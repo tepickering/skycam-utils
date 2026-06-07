@@ -44,9 +44,10 @@ plot_alcor_fits <input.fits> [-o OUT.pdf] [--outimage RAW] [--gscale ...] ...
 #   Renders an annotated all-sky figure. Default output: <input>.pdf
 #   (extension drives the matplotlib backend).
 
-fit_alcor_wcs <night-dir> [--pattern ...] [--vmag-limit 3] [--residual-plot OUT.png] [--max-frames N]
+fit_alcor_wcs <night-dir> [--pattern ...] [--vmag-limit 3] [--residual-plot OUT.png] [--max-frames N] [--workers N] [--no-progress]
 #   Aggregates bright-star matches across Sun<-18deg frames across a night and prints
 #   refined ALCOR_* geometry constants (center, rotation, radial k3) to bake into alcor.py.
+#   Per-frame load/detect is parallelized across processes (default: one per core).
 ```
 
 The test directory is essentially empty (template skeleton only). Don't assume test coverage exists for code you change.

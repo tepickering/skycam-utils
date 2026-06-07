@@ -15,12 +15,23 @@
 - **Processed frame:** `load_alcor_fits` produces a `(2*radius, 2*radius, 3)` image, zenith near the array center, north up. Axis 0 = row = `y`, axis 1 = column = `x`.
 - **Forward model** (validated against the existing `test_load_alcor_fits_wcs_maps_zenith_and_horizon` numbers):
   ```
-  zeta = (90 - alt) / 90                       # 0 at zenith, 1 at the nominal horizon
-  r    = horizon_radius * (k1*zeta + k2*zeta**2 + k3*zeta**3)
-  x    = radius + xshift - r*sin(radians(az + rotation))
-  y    = radius + yshift + r*cos(radians(az + rotation))
+  rho = r / horizon_radius                     # normalized detector radius, 0 at zenith
+  z   = 90 * (k1*rho + k3*rho**3 + k5*rho**5)   # zenith angle from detector radius (plate solution)
+  # _predict_pixels (alt/az -> pixel, used for matching) inverts the above for
+  # rho via a few vectorized Newton steps, then:
+  x   = radius + xshift - r*sin(radians(az + rotation))
+  y   = radius + yshift + r*cos(radians(az + rotation))
   ```
-  Idealized coefficients `(k1, k2, k3) = (1.0, 0.0, 0.0)` reproduce the current equidistant mapping exactly (`r = horizon_radius*zeta`, so horizon→`horizon_radius`, zenith→0).
+  The radial polynomial is **odd-power only** and written in SIP's native
+  direction — **detector radius → zenith angle** (the plate solution) — so
+  `radial_coeffs = (k1, k3, k5)` are the coefficients of ρ, ρ³, ρ⁵. Because the
+  map from detector pixels to sky is itself an odd polynomial, SIP reproduces it
+  to numerical precision everywhere (a degree-5 SIP captures the ρ⁵ term exactly;
+  hence `sip_degree=5`). Idealized coefficients `(k1, k3, k5) = (1.0, 0.0, 0.0)`
+  reproduce the current equidistant mapping exactly (`z = 90*rho`, so
+  horizon `r=horizon_radius`→z=90, zenith→0). Note the sign sense: with this
+  parametrization a positive higher-order coefficient maps a star at fixed
+  altitude to a *smaller* pixel radius.
 - **Refinement is delivered as new defaults** on `load_alcor_fits`: `xshift`, `yshift` (recenter zenith to the array center via `scipy.ndimage.shift`), `rotation` (folds the residual rotation into the existing image rotate), and `radial_coeffs` (the cubic). All default to the idealized values so behavior is unchanged until Task 9 bakes the fitted numbers.
 - **Module constants** (added in Task 1) hold the baked values: `ALCOR_RADIUS=680`, `ALCOR_HORIZON_RADIUS=662`, `ALCOR_ROTATION=0.4`, `ALCOR_XSHIFT=0.0`, `ALCOR_YSHIFT=0.0`, `ALCOR_RADIAL_COEFFS=(1.0, 0.0, 0.0)`.
 - **Atmospheric refraction** for the catalog AltAz: nominal MMT pressure `760 * u.hPa` (~0.75 atm), temperature `10 * u.deg_C`, relative humidity `0.2`, `obswl = 0.55 * u.micron`.
@@ -738,9 +749,10 @@ from scipy.optimize import least_squares
 def _fit_params(alt, az, obs_x, obs_y, init_params, radius=ALCOR_RADIUS,
                 horizon_radius=ALCOR_HORIZON_RADIUS):
     """
-    Least-squares fit of (xshift, yshift, rotation, k2, k3) to matched stars.
-    k1 is held at 1.0 (the zenith plate scale is set by horizon_radius/cdelt).
-    Returns an updated params dict.
+    Least-squares fit of (xshift, yshift, rotation, k3, k5) to matched stars.
+    k1 is held at 1.0 (the zenith plate scale is set by horizon_radius/cdelt);
+    k3, k5 are the odd-power radial distortion coefficients. Returns an updated
+    params dict.
     """
     alt = np.asarray(alt, dtype=float)
     az = np.asarray(az, dtype=float)
@@ -752,16 +764,16 @@ def _fit_params(alt, az, obs_x, obs_y, init_params, radius=ALCOR_RADIUS,
     ], dtype=float)
 
     def residuals(p):
-        xshift, yshift, rot, k2, k3 = p
+        xshift, yshift, rot, k3, k5 = p
         x, y = _predict_pixels(alt, az, xshift=xshift, yshift=yshift, rotation=rot,
-                               radial_coeffs=(1.0, k2, k3), radius=radius,
+                               radial_coeffs=(1.0, k3, k5), radius=radius,
                                horizon_radius=horizon_radius)
         return np.concatenate([x - obs_x, y - obs_y])
 
     result = least_squares(residuals, p0)
-    xshift, yshift, rot, k2, k3 = result.x
+    xshift, yshift, rot, k3, k5 = result.x
     return dict(xshift=float(xshift), yshift=float(yshift), rotation=float(rot),
-                radial_coeffs=(1.0, float(k2), float(k3)))
+                radial_coeffs=(1.0, float(k3), float(k5)))
 ```
 
 - [ ] **Step 4: Run to verify pass**
@@ -1138,7 +1150,7 @@ Edit `skycam_utils/alcor.py`, replacing the placeholder constant values with the
 ALCOR_ROTATION = <printed value>
 ALCOR_XSHIFT = <printed value>
 ALCOR_YSHIFT = <printed value>
-ALCOR_RADIAL_COEFFS = (1.0, <printed k2>, <printed k3>)
+ALCOR_RADIAL_COEFFS = (1.0, <printed k3>, <printed k5>)
 ```
 
 - [ ] **Step 3: Update the two existing WCS-value tests**

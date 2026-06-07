@@ -22,15 +22,22 @@ old stellacam system (`astrometry.initial_wcs_fit` → `astrometry.wcs_sip_fit`)
 For a star at zenith angle `z = 90° − alt` and azimuth `A`:
 
 ```
-r_pix = c1·z + c2·z² + c3·z³          # current model is the c1-only special case
-x = crpix1 + r_pix·sin(A + rot)
-y = crpix2 + r_pix·cos(A + rot)
+rho   = r_pix / horizon_radius                # normalized detector radius, 0 at zenith
+z     = 90·(k1·rho + k3·rho³ + k5·rho⁵)        # zenith angle from detector radius (plate solution)
+x = center_x + xshift - r_pix·sin(A + rot)
+y = center_y + yshift + r_pix·cos(A + rot)
 ```
 
-Fit parameters: `crpix1, crpix2, rot, c1, c2, c3`. The polynomial degree is
-chosen empirically from the residuals (start cubic; drop/add a term if the
-residual-vs-zenith trend warrants). These few interpretable numbers are the
-baked-in constants — consistent with the "coefficients in code" delivery choice.
+The radial polynomial is **odd-power only** and written in SIP's native
+direction — **detector radius → zenith angle** (the plate solution):
+`radial_coeffs = (k1, k3, k5)` are the coefficients of ρ, ρ³, ρ⁵. Because the
+detector→sky map is itself an odd polynomial, SIP reproduces it to numerical
+precision everywhere (degree 5 captures the ρ⁵ term exactly). Predicting a
+pixel from a known alt/az (for star matching) inverts the polynomial with a few
+vectorized Newton steps. Fit parameters: `xshift, yshift, rot, k3, k5` (`k1`
+held at 1.0, since the zenith plate scale is carried by `horizon_radius`). These
+few interpretable numbers are the baked-in constants — consistent with the
+"coefficients in code" delivery choice.
 
 Sign/orientation conventions follow the existing north-up, zenith-centered
 processed frame produced by `load_alcor_fits`.

@@ -87,22 +87,46 @@ def test_select_dark_frames_filters_by_sun_altitude(tmp_path):
         hdu.writeto(path)
         return path
 
+    # These names don't match the timestamp pattern, so selection falls back to
+    # the DATE header (the UT values written above).
     dark = write("dark.fits", "2024-09-05T07:00:00")
     twilight = write("twi.fits", "2024-09-05T02:30:00")  # near sunset, Sun above -18
     day = write("day.fits", "2024-09-05T20:00:00")
 
-    selected = select_dark_frames([day, dark, twilight], sun_alt_max=-18.0)
-    assert selected == [dark]
-
-    # Parallel header reads (real subprocesses) must agree with serial, and the
-    # log callback must announce the scan so the phase is not silent.
     messages = []
-    selected_parallel = select_dark_frames(
-        [day, dark, twilight], sun_alt_max=-18.0, workers=2, log=messages.append)
-    assert selected_parallel == [dark]
+    selected = select_dark_frames([day, dark, twilight], sun_alt_max=-18.0,
+                                  log=messages.append)
+    assert selected == [dark]
     joined = "\n".join(messages)
-    assert "scanning 3 files" in joined
+    assert "selecting dark frames from 3 files" in joined
     assert "1 of 3 frames are dark" in joined
+
+
+def test_select_dark_frames_parses_time_from_filename(tmp_path):
+    from astropy.io import fits
+
+    def write(name):
+        # No DATE header: selection must rely on the filename, and would raise
+        # KeyError if it fell back to reading the header.
+        path = tmp_path / name
+        fits.PrimaryHDU(data=np.zeros((3, 4, 4), dtype=np.int16)).writeto(path)
+        return path
+
+    # Local MST: midnight -> UT 07:00 (dark); 13:00 -> UT 20:00 (daylight).
+    night = write("2024_09_05__00_00_36.fits.bz2")
+    day = write("2024_09_04__13_00_00.fits.bz2")
+
+    selected = select_dark_frames([day, night], sun_alt_max=-18.0)
+    assert selected == [night]
+
+
+def test_filename_ut_datetime_applies_mst_offset():
+    from skycam_utils.alcor import _filename_ut_datetime
+
+    ut = _filename_ut_datetime("2024_09_05__00_00_36.fits.bz2")
+    assert (ut.year, ut.month, ut.day, ut.hour, ut.minute, ut.second) == \
+        (2024, 9, 5, 7, 0, 36)
+    assert _filename_ut_datetime("master_flat.fits") is None
 
 
 def test_build_alcor_wcs_idealized_matches_equidistant():

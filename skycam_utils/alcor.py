@@ -1,6 +1,8 @@
 import argparse
+import re
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from datetime import datetime, timedelta
 from functools import lru_cache
 from importlib.resources import files
 from pathlib import Path
@@ -255,7 +257,7 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=3.0, sun_alt_max=-
         raise ValueError("workers must be None or a positive integer")
     input_dir = Path(input_dir)
     files = sorted(input_dir.glob(pattern))
-    dark = select_dark_frames(files, sun_alt_max=sun_alt_max, workers=workers, log=log)
+    dark = select_dark_frames(files, sun_alt_max=sun_alt_max, log=log)
     if log is not None:
         dark_set = set(dark)
         for f in files:
@@ -395,58 +397,57 @@ def _sun_altitude(time, location=MMT_LOCATION):
     return float(altaz.alt.deg)
 
 
+# alcor filenames are YYYY_MM_DD__HH_MM_SS in local (MST) time.
+_FILENAME_TIME_RE = re.compile(r"(\d{4})_(\d{2})_(\d{2})__(\d{2})_(\d{2})_(\d{2})")
+# Arizona observes Mountain Standard Time year-round (no DST): UT = local + 7h.
+_MST_TO_UT = timedelta(hours=7)
+
+
+def _filename_ut_datetime(filename):
+    """Return the UT ``datetime`` parsed from an alcor filename, or ``None``.
+
+    Filenames are ``YYYY_MM_DD__HH_MM_SS`` in local MST; converting to UT only
+    needs the fixed +7h offset, so dark-frame selection can avoid opening (and
+    decompressing) every file just to read its DATE header.
+    """
+    match = _FILENAME_TIME_RE.search(Path(filename).name)
+    if match is None:
+        return None
+    year, month, day, hour, minute, second = (int(g) for g in match.groups())
+    return datetime(year, month, day, hour, minute, second) + _MST_TO_UT
+
+
 def _read_frame_date(filename):
     """Return a FITS file's DATE (UT) header string, for dark-frame selection."""
     return fits.getheader(filename)["DATE"]
 
 
-def select_dark_frames(files, sun_alt_max=-18.0, location=MMT_LOCATION,
-                       workers=1, log=None):
+def select_dark_frames(files, sun_alt_max=-18.0, location=MMT_LOCATION, log=None):
     """
-    Return the subset of ``files`` whose DATE (creation) header corresponds to a
-    Sun altitude below ``sun_alt_max`` (default -18 deg, astronomical twilight).
+    Return the subset of ``files`` whose timestamp corresponds to a Sun altitude
+    below ``sun_alt_max`` (default -18 deg, astronomical twilight).
 
-    The DATE header is used because it is the true UT timestamp for these alcor
-    cameras; the DATE-OBS keyword is local time despite its label.
-
-    Reading the DATE header from each frame is the slow part for a large archive
-    (every compressed file must be opened), so it is parallelized the same way
-    as the detection stage: ``workers=1`` runs serially, any larger value (or
-    ``None`` for the process-pool default) fans the header reads out over a
-    `~concurrent.futures.ProcessPoolExecutor`. Pass a ``log`` callable to report
-    scan progress, since this phase otherwise runs silently before any frame is
-    processed.
+    The UT timestamp is parsed directly from each ``YYYY_MM_DD__HH_MM_SS``
+    filename (local MST, so UT = local + 7h), which avoids opening every file in
+    a large archive just to read a header. Any file whose name does not match
+    that pattern falls back to its DATE header (the true UT for these cameras;
+    DATE-OBS is local time despite its label). Pass a ``log`` callable to report
+    the start and the dark-frame count.
     """
     files = [Path(f) for f in files]
-    if workers is not None and workers < 1:
-        raise ValueError("workers must be None or a positive integer")
     n = len(files)
     if log is not None:
-        log(f"scanning {n} files for dark frames (Sun below {sun_alt_max:g} deg)...")
+        log(f"selecting dark frames from {n} files (Sun below {sun_alt_max:g} deg)...")
 
-    dates = [None] * n
-    step = max(1, n // 20)  # ~20 progress updates over the scan
-    completed = 0
+    dts = []
+    for f in files:
+        dt = _filename_ut_datetime(f)
+        if dt is None:
+            # Oddly-named file: fall back to the authoritative DATE header.
+            dt = Time(_read_frame_date(f), format="isot", scale="utc").to_datetime()
+        dts.append(dt)
 
-    def _note():
-        nonlocal completed
-        completed += 1
-        if log is not None and (completed % step == 0 or completed == n):
-            log(f"  read {completed}/{n} headers")
-
-    if workers == 1:
-        for i, f in enumerate(files):
-            dates[i] = _read_frame_date(f)
-            _note()
-    else:
-        with ProcessPoolExecutor(max_workers=workers) as executor:
-            futures = {executor.submit(_read_frame_date, f): i
-                       for i, f in enumerate(files)}
-            for future in as_completed(futures):
-                dates[futures[future]] = future.result()
-                _note()
-
-    times = Time(dates, format="isot", scale="utc")
+    times = Time(dts, format="datetime", scale="utc")
     altaz = get_sun(times).transform_to(AltAz(obstime=times, location=location))
     keep = altaz.alt.deg < sun_alt_max
     if log is not None:

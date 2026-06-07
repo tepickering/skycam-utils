@@ -363,6 +363,59 @@ def test_fit_alcor_wcs_rejects_invalid_workers(tmp_path):
         fit_alcor_wcs(tmp_path, pattern="*.fits", workers=0)
 
 
+def test_fit_alcor_wcs_log_reports_dispositions(monkeypatch, tmp_path):
+    """The log callback receives one line per file: Sun-rejected, no-stars, used."""
+    import skycam_utils.alcor as alcor_mod
+    from astropy.table import Table
+
+    true = dict(xshift=2.0, yshift=-1.0, rotation=0.3, radial_coeffs=(1.0, 0.0, 0.0))
+    rng = np.random.default_rng(4)
+
+    # f_day is dropped by the Sun filter; f_empty yields no detections; f_good is used.
+    files = [tmp_path / "f_day.fits", tmp_path / "f_empty.fits", tmp_path / "f_good.fits"]
+    for f in files:
+        f.write_bytes(b"stub")
+
+    good_alt = rng.uniform(10.0, 88.0, 30)
+    good_az = rng.uniform(0.0, 360.0, 30)
+
+    def fake_select_dark_frames(fs, **kw):
+        # Sun too high for f_day; the other two are dark.
+        return [tmp_path / "f_empty.fits", tmp_path / "f_good.fits"]
+
+    def fake_load_alcor_fits(path, **kw):
+        return np.zeros((2 * ALCOR_RADIUS, 2 * ALCOR_RADIUS, 3)), None
+
+    def fake_reference_altaz(time, **kw):
+        return Table({"Alt": good_alt, "Az": good_az,
+                      "Vmag": rng.uniform(0.5, 3.0, 30), "HD": np.arange(30)})
+
+    def fake_detect(im, **kw):
+        if fake_detect.empty:
+            return Table({"xcentroid": [], "ycentroid": [], "flux": []})
+        x, y = _predict_pixels(good_alt, good_az, **true)
+        return Table({"xcentroid": x, "ycentroid": y, "flux": np.linspace(1e3, 1e2, 30)})
+    fake_detect.empty = False
+
+    def fake_frame_time(path):
+        fake_detect.empty = Path(path).name == "f_empty.fits"
+        return Time("2024-09-05T07:00:00", format="isot", scale="utc")
+
+    monkeypatch.setattr(alcor_mod, "select_dark_frames", fake_select_dark_frames)
+    monkeypatch.setattr(alcor_mod, "load_alcor_fits", fake_load_alcor_fits)
+    monkeypatch.setattr(alcor_mod, "alcor_reference_altaz", fake_reference_altaz)
+    monkeypatch.setattr(alcor_mod, "detect_alcor_stars", fake_detect)
+    monkeypatch.setattr(alcor_mod, "_frame_time", fake_frame_time)
+
+    messages = []
+    fit_alcor_wcs(tmp_path, pattern="*.fits", log=messages.append)
+
+    joined = "\n".join(messages)
+    assert "f_day.fits: skipped (Sun above" in joined
+    assert "f_empty.fits: skipped (no stars detected" in joined
+    assert "f_good.fits: 30 stars detected" in joined
+
+
 def test_save_alcor_residual_plot_writes_output(tmp_path):
     rng = np.random.default_rng(3)
     alt = rng.uniform(5.0, 88.0, 100)

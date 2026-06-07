@@ -206,8 +206,9 @@ def _detect_alcor_frame(task):
     """
     Per-frame preprocessing for :func:`fit_alcor_wcs`, executed in worker
     processes. Loads a frame, builds its reference catalog and star detections,
-    and returns ``(index, cat, det)``; ``cat``/``det`` are ``None`` when the
-    frame yields fewer than three catalog stars or detections.
+    and returns ``(index, cat, det, reason)``. On success ``reason`` is ``None``;
+    when the frame is unusable ``cat``/``det`` are ``None`` and ``reason`` is a
+    short human-readable string (too few detections or catalog stars).
     """
     index, filename, vmag_limit, min_alt, fwhm, threshold_sigma = task
     filename = Path(filename)
@@ -215,15 +216,17 @@ def _detect_alcor_frame(task):
     im, _ = load_alcor_fits(filename)
     cat = alcor_reference_altaz(time, vmag_limit=vmag_limit, min_alt=min_alt)
     det = detect_alcor_stars(im, fwhm=fwhm, threshold_sigma=threshold_sigma)
-    if len(cat) < 3 or len(det) < 3:
-        return index, None, None
-    return index, cat, det
+    if len(det) < 3:
+        return index, None, None, f"no stars detected ({len(det)} < 3)"
+    if len(cat) < 3:
+        return index, None, None, f"too few catalog stars ({len(cat)} < 3)"
+    return index, cat, det, None
 
 
 def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=3.0, sun_alt_max=-18.0,
                   min_alt=10.0, tolerance=12.0, fwhm=3.0, threshold_sigma=5.0,
                   z_steps=(20.0, 40.0, 60.0, 75.0, 90.0), max_frames=None,
-                  workers=1, progress=False, progress_file=None):
+                  workers=1, log=None):
     """
     Calibrate the alcor lens geometry by aggregating bright-star matches across
     all dark-sky frames in ``input_dir``.
@@ -244,14 +247,20 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=3.0, sun_alt_max=-
     independent across frames, so it is parallelized: ``workers=1`` runs
     serially, any larger value (or ``None`` for the process-pool default)
     distributes the frames over a `~concurrent.futures.ProcessPoolExecutor`.
-    Set ``progress=True`` to write a progress bar to ``progress_file``
-    (stderr by default) as frames complete.
+    Pass a ``log`` callable (e.g. ``print``) to report each file's disposition:
+    frames skipped because the Sun is above ``sun_alt_max``, frames skipped
+    because no stars were detected, and frames used (with detected star count).
     """
     if workers is not None and workers < 1:
         raise ValueError("workers must be None or a positive integer")
     input_dir = Path(input_dir)
     files = sorted(input_dir.glob(pattern))
     dark = select_dark_frames(files, sun_alt_max=sun_alt_max)
+    if log is not None:
+        dark_set = set(dark)
+        for f in files:
+            if f not in dark_set:
+                log(f"{Path(f).name}: skipped (Sun above {sun_alt_max:g} deg)")
     if max_frames is not None:
         dark = dark[:max_frames]
 
@@ -262,31 +271,25 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=3.0, sun_alt_max=-
     detected = [None] * len(dark)
     tasks = [(index, f, vmag_limit, min_alt, fwhm, threshold_sigma)
              for index, f in enumerate(dark)]
-    completed = 0
 
     def _store(result):
-        index, cat, det = result
+        index, cat, det, reason = result
+        name = Path(dark[index]).name
         if cat is not None:
             detected[index] = (cat, det)
+            if log is not None:
+                log(f"{name}: {len(det)} stars detected")
+        elif log is not None:
+            log(f"{name}: skipped ({reason})")
 
     if workers == 1:
         for task in tasks:
             _store(_detect_alcor_frame(task))
-            completed += 1
-            if progress:
-                _print_progress(completed, len(tasks), Path(task[1]).name,
-                                file=progress_file)
     else:
         with ProcessPoolExecutor(max_workers=workers) as executor:
-            futures = {executor.submit(_detect_alcor_frame, task): task
-                       for task in tasks}
+            futures = [executor.submit(_detect_alcor_frame, task) for task in tasks]
             for future in as_completed(futures):
                 _store(future.result())
-                completed += 1
-                if progress:
-                    _print_progress(completed, len(tasks),
-                                    Path(futures[future][1]).name,
-                                    file=progress_file)
 
     frames = [d for d in detected if d is not None]
 
@@ -1362,15 +1365,16 @@ def fit_alcor_wcs_cli():
     parser.add_argument("--workers", type=int, default=None,
                         help="Worker processes for per-frame detection "
                              "(default: one per available core).")
-    parser.add_argument("--no-progress", action="store_true",
-                        help="Do not show progress while detecting stars.")
+    parser.add_argument("--quiet", action="store_true",
+                        help="Do not print per-file processing/rejection messages.")
     parser.add_argument("--residual-plot", default=None, help="Optional residual-vs-zenith PNG path.")
     args = parser.parse_args()
 
+    log = None if args.quiet else (lambda message: print(message, file=sys.stderr))
     result = fit_alcor_wcs(
         args.input_dir, pattern=args.pattern, vmag_limit=args.vmag_limit,
         sun_alt_max=args.sun_alt_max, min_alt=args.min_alt, tolerance=args.tolerance,
-        max_frames=args.max_frames, workers=args.workers, progress=not args.no_progress,
+        max_frames=args.max_frames, workers=args.workers, log=log,
     )
     print(f"# matched stars: {result['n_matched']}")
     print(f"# residual RMS (pix): {result['residual_rms']:.3f}")

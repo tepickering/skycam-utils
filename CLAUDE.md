@@ -47,8 +47,10 @@ plot_alcor_fits <input.fits> [-o OUT.pdf] [--outimage RAW] [--gscale ...] ...
 fit_alcor_wcs <night-dir> [--pattern ...] [--vmag-limit 3] [--residual-plot OUT.png] [--max-frames N] [--workers N] [--quiet]
 #   Aggregates bright-star matches across Sun<-18deg frames across a night and prints
 #   refined ALCOR_* geometry constants (center, rotation, radial k3) to bake into alcor.py.
-#   Per-frame load/detect is parallelized across processes (default: one per core).
-#   Prints each file's disposition to stderr (Sun-rejected / no stars / used + count); --quiet silences it.
+#   Both the dark-frame DATE-header scan and the per-frame load/detect are parallelized
+#   across processes (--workers; default: one per core).
+#   Prints scan progress and each file's disposition to stderr (Sun-rejected / no stars /
+#   used + count); --quiet silences it.
 ```
 
 The test directory is essentially empty (template skeleton only). Don't assume test coverage exists for code you change.

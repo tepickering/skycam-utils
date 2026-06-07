@@ -94,6 +94,16 @@ def test_select_dark_frames_filters_by_sun_altitude(tmp_path):
     selected = select_dark_frames([day, dark, twilight], sun_alt_max=-18.0)
     assert selected == [dark]
 
+    # Parallel header reads (real subprocesses) must agree with serial, and the
+    # log callback must announce the scan so the phase is not silent.
+    messages = []
+    selected_parallel = select_dark_frames(
+        [day, dark, twilight], sun_alt_max=-18.0, workers=2, log=messages.append)
+    assert selected_parallel == [dark]
+    joined = "\n".join(messages)
+    assert "scanning 3 files" in joined
+    assert "1 of 3 frames are dark" in joined
+
 
 def test_build_alcor_wcs_idealized_matches_equidistant():
     wcs = build_alcor_wcs(radius=680, horizon_radius=662, radial_coeffs=(1.0, 0.0, 0.0))

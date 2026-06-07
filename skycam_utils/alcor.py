@@ -255,7 +255,7 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=3.0, sun_alt_max=-
         raise ValueError("workers must be None or a positive integer")
     input_dir = Path(input_dir)
     files = sorted(input_dir.glob(pattern))
-    dark = select_dark_frames(files, sun_alt_max=sun_alt_max)
+    dark = select_dark_frames(files, sun_alt_max=sun_alt_max, workers=workers, log=log)
     if log is not None:
         dark_set = set(dark)
         for f in files:
@@ -395,22 +395,62 @@ def _sun_altitude(time, location=MMT_LOCATION):
     return float(altaz.alt.deg)
 
 
-def select_dark_frames(files, sun_alt_max=-18.0, location=MMT_LOCATION):
+def _read_frame_date(filename):
+    """Return a FITS file's DATE (UT) header string, for dark-frame selection."""
+    return fits.getheader(filename)["DATE"]
+
+
+def select_dark_frames(files, sun_alt_max=-18.0, location=MMT_LOCATION,
+                       workers=1, log=None):
     """
     Return the subset of ``files`` whose DATE (creation) header corresponds to a
     Sun altitude below ``sun_alt_max`` (default -18 deg, astronomical twilight).
 
     The DATE header is used because it is the true UT timestamp for these alcor
     cameras; the DATE-OBS keyword is local time despite its label.
+
+    Reading the DATE header from each frame is the slow part for a large archive
+    (every compressed file must be opened), so it is parallelized the same way
+    as the detection stage: ``workers=1`` runs serially, any larger value (or
+    ``None`` for the process-pool default) fans the header reads out over a
+    `~concurrent.futures.ProcessPoolExecutor`. Pass a ``log`` callable to report
+    scan progress, since this phase otherwise runs silently before any frame is
+    processed.
     """
     files = [Path(f) for f in files]
-    times = []
-    for f in files:
-        with fits.open(f) as hdul:
-            times.append(hdul[0].header["DATE"])
-    times = Time(times, format="isot", scale="utc")
+    if workers is not None and workers < 1:
+        raise ValueError("workers must be None or a positive integer")
+    n = len(files)
+    if log is not None:
+        log(f"scanning {n} files for dark frames (Sun below {sun_alt_max:g} deg)...")
+
+    dates = [None] * n
+    step = max(1, n // 20)  # ~20 progress updates over the scan
+    completed = 0
+
+    def _note():
+        nonlocal completed
+        completed += 1
+        if log is not None and (completed % step == 0 or completed == n):
+            log(f"  read {completed}/{n} headers")
+
+    if workers == 1:
+        for i, f in enumerate(files):
+            dates[i] = _read_frame_date(f)
+            _note()
+    else:
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(_read_frame_date, f): i
+                       for i, f in enumerate(files)}
+            for future in as_completed(futures):
+                dates[futures[future]] = future.result()
+                _note()
+
+    times = Time(dates, format="isot", scale="utc")
     altaz = get_sun(times).transform_to(AltAz(obstime=times, location=location))
     keep = altaz.alt.deg < sun_alt_max
+    if log is not None:
+        log(f"{int(keep.sum())} of {n} frames are dark (Sun below {sun_alt_max:g} deg)")
     return [f for f, k in zip(files, keep) if k]
 
 

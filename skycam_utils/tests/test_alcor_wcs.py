@@ -12,16 +12,19 @@ os.environ.setdefault("MPLCONFIGDIR", str(_MPLCONFIGDIR))
 
 from astropy.table import Table as _Table
 from astropy.time import Time
+from astropy.time import Time as _Time
 
 from skycam_utils.alcor import (
     ALCOR_HORIZON_RADIUS,
     ALCOR_RADIUS,
     ALCOR_RADIAL_COEFFS,
+    _fit_params,
     _predict_pixels,
     _sun_altitude,
     alcor_reference_altaz,
     build_alcor_wcs,
     detect_alcor_stars,
+    fit_alcor_wcs,
     load_alcor_fits,
     match_alcor_stars,
     select_dark_frames,
@@ -193,3 +196,69 @@ def test_match_alcor_stars_recovers_correspondences():
     for row in matched:
         ex, ey = _predict_pixels(row["Alt"], row["Az"], **true_params)
         assert np.hypot(row["xcentroid"] - ex, row["ycentroid"] - ey) < 1e-6
+
+
+def test_fit_params_recovers_known_geometry():
+    rng = np.random.default_rng(1)
+    alt = rng.uniform(5.0, 88.0, 200)
+    az = rng.uniform(0.0, 360.0, 200)
+    true = dict(xshift=5.0, yshift=-4.0, rotation=0.7, radial_coeffs=(1.0, 0.03, 0.05))
+    x, y = _predict_pixels(alt, az, **true)
+
+    fit = _fit_params(alt, az, x, y,
+                      init_params=dict(xshift=0.0, yshift=0.0, rotation=0.0,
+                                       radial_coeffs=(1.0, 0.0, 0.0)))
+    assert abs(fit["xshift"] - 5.0) < 1e-3
+    assert abs(fit["yshift"] + 4.0) < 1e-3
+    assert abs(fit["rotation"] - 0.7) < 1e-3
+    np.testing.assert_allclose(fit["radial_coeffs"], (1.0, 0.03, 0.05), atol=1e-4)
+
+
+def test_fit_alcor_wcs_aggregates_synthetic_frames(monkeypatch, tmp_path):
+    import skycam_utils.alcor as alcor_mod
+    from astropy.table import Table
+
+    true = dict(xshift=6.0, yshift=-5.0, rotation=0.8, radial_coeffs=(1.0, 0.04, 0.06))
+    rng = np.random.default_rng(2)
+
+    frame_alt = [rng.uniform(10.0, 88.0, 30), rng.uniform(10.0, 88.0, 30)]
+    frame_az = [rng.uniform(0.0, 360.0, 30), rng.uniform(0.0, 360.0, 30)]
+    files = [tmp_path / "f0.fits", tmp_path / "f1.fits"]
+    for f in files:
+        f.write_bytes(b"stub")
+
+    def fake_select_dark_frames(fs, **kw):
+        return list(files)
+
+    calls = {"i": 0}
+
+    def fake_load_alcor_fits(path, **kw):
+        return np.zeros((2 * ALCOR_RADIUS, 2 * ALCOR_RADIUS, 3)), None
+
+    def fake_reference_altaz(time, **kw):
+        i = calls["i"]
+        return Table({"Alt": frame_alt[i], "Az": frame_az[i],
+                      "Vmag": rng.uniform(0.5, 3.0, 30), "HD": np.arange(30)})
+
+    def fake_detect(im, **kw):
+        i = calls["i"]
+        calls["i"] += 1
+        x, y = _predict_pixels(frame_alt[i], frame_az[i], **true)
+        return Table({"xcentroid": x, "ycentroid": y, "flux": np.linspace(1e3, 1e2, 30)})
+
+    def fake_frame_time(path):
+        return _Time("2024-09-05T07:00:00", format="isot", scale="utc")
+
+    monkeypatch.setattr(alcor_mod, "select_dark_frames", fake_select_dark_frames)
+    monkeypatch.setattr(alcor_mod, "load_alcor_fits", fake_load_alcor_fits)
+    monkeypatch.setattr(alcor_mod, "alcor_reference_altaz", fake_reference_altaz)
+    monkeypatch.setattr(alcor_mod, "detect_alcor_stars", fake_detect)
+    monkeypatch.setattr(alcor_mod, "_frame_time", fake_frame_time)
+
+    result = fit_alcor_wcs(tmp_path, pattern="*.fits")
+    assert abs(result["xshift"] - 6.0) < 0.05
+    assert abs(result["yshift"] + 5.0) < 0.05
+    assert abs(result["rotation"] - 0.8) < 0.05
+    np.testing.assert_allclose(result["radial_coeffs"], (1.0, 0.04, 0.06), atol=2e-3)
+    assert result["n_matched"] >= 40
+    assert result["residual_rms"] < 0.1

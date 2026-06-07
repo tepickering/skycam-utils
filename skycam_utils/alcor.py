@@ -184,6 +184,102 @@ def match_alcor_stars(cat, detections, init_params,
     return out
 
 
+def _frame_time(path):
+    """Return the observation Time from a FITS file's DATE-OBS header."""
+    with fits.open(path) as hdul:
+        return Time(hdul[0].header["DATE-OBS"], format="isot", scale="utc")
+
+
+def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=3.0, sun_alt_max=-18.0,
+                  min_alt=10.0, tolerance=12.0, fwhm=3.0, threshold_sigma=5.0,
+                  z_steps=(20.0, 40.0, 60.0, 75.0, 90.0), max_frames=None):
+    """
+    Calibrate the alcor lens geometry by aggregating bright-star matches across
+    all dark-sky frames in ``input_dir``.
+
+    Frames are selected with :func:`select_dark_frames` (Sun below ``sun_alt_max``).
+    For each, stars (``Vmag <= vmag_limit``) are projected with the current
+    geometry, matched via :func:`match_alcor_stars`, and the matched
+    (Alt, Az, x, y) tuples are pooled. A single global least-squares fit over the
+    pooled set yields the refined (xshift, yshift, rotation, radial_coeffs).
+
+    Returns a dict with the fitted parameters plus ``n_matched``,
+    ``residual_rms``, and per-match arrays (``alt``, ``az``, ``x``, ``y``) for
+    diagnostics.
+    """
+    input_dir = Path(input_dir)
+    files = sorted(input_dir.glob(pattern))
+    dark = select_dark_frames(files, sun_alt_max=sun_alt_max)
+    if max_frames is not None:
+        dark = dark[:max_frames]
+
+    init = dict(xshift=ALCOR_XSHIFT, yshift=ALCOR_YSHIFT, rotation=0.0,
+                radial_coeffs=(1.0, 0.0, 0.0))
+    frames = []  # (cat, detections) for each usable frame, for re-matching
+
+    for f in dark:
+        time = _frame_time(f)
+        im, _ = load_alcor_fits(f)
+        cat = alcor_reference_altaz(time, vmag_limit=vmag_limit, min_alt=min_alt)
+        det = detect_alcor_stars(im, fwhm=fwhm, threshold_sigma=threshold_sigma)
+        if len(cat) < 3 or len(det) < 3:
+            continue
+        frames.append((cat, det))
+
+    def pool(seed_params):
+        a, z, xs, ys = [], [], [], []
+        for cat, det in frames:
+            matched = match_alcor_stars(cat, det, init_params=seed_params,
+                                        z_steps=z_steps, tolerance=tolerance)
+            if len(matched) == 0:
+                continue
+            a.append(np.asarray(matched["Alt"], dtype=float))
+            z.append(np.asarray(matched["Az"], dtype=float))
+            xs.append(np.asarray(matched["xcentroid"], dtype=float))
+            ys.append(np.asarray(matched["ycentroid"], dtype=float))
+        return a, z, xs, ys
+
+    pooled_alt, pooled_az, pooled_x, pooled_y = pool(init)
+    if not pooled_alt:
+        raise RuntimeError("No matched stars across the selected frames.")
+
+    alt = np.concatenate(pooled_alt)
+    az = np.concatenate(pooled_az)
+    x = np.concatenate(pooled_x)
+    y = np.concatenate(pooled_y)
+    params = _fit_params(alt, az, x, y, init_params=init)
+
+    # Re-match each frame seeded with the refined geometry. Frames whose
+    # zenith-bootstrap stalled from the cold start now converge, recovering
+    # additional matches before the final global fit.
+    pooled_alt, pooled_az, pooled_x, pooled_y = pool(params)
+    alt = np.concatenate(pooled_alt)
+    az = np.concatenate(pooled_az)
+    x = np.concatenate(pooled_x)
+    y = np.concatenate(pooled_y)
+
+    params = _fit_params(alt, az, x, y, init_params=params)
+
+    # Final residuals with outlier rejection at 3*MAD, then refit.
+    px, py = _predict_pixels(alt, az, xshift=params["xshift"], yshift=params["yshift"],
+                             rotation=params["rotation"],
+                             radial_coeffs=tuple(params["radial_coeffs"]))
+    resid = np.hypot(px - x, py - y)
+    mad = np.median(np.abs(resid - np.median(resid))) + 1e-9
+    good = resid < np.median(resid) + 3.0 * 1.4826 * mad
+    params = _fit_params(alt[good], az[good], x[good], y[good], init_params=params)
+    px, py = _predict_pixels(alt[good], az[good], xshift=params["xshift"],
+                             yshift=params["yshift"], rotation=params["rotation"],
+                             radial_coeffs=tuple(params["radial_coeffs"]))
+    rms = float(np.sqrt(np.mean((px - x[good]) ** 2 + (py - y[good]) ** 2)))
+
+    return {
+        **params,
+        "n_matched": int(good.sum()),
+        "residual_rms": rms,
+        "alt": alt[good], "az": az[good], "x": x[good], "y": y[good],
+    }
+
 
 def _sun_altitude(time, location=MMT_LOCATION):
     """Return the Sun's altitude in degrees at ``time`` and ``location``.

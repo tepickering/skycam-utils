@@ -58,9 +58,27 @@ New function `fit_alcor_wcs(...)` in `alcor.py`, with a CLI entry point.
    it is largest at high zenith angle —
    exactly where the radial distortion is largest — so omitting it would
    contaminate the radial term.
-4. **Matching.** Project catalog Alt/Az to pixels with the current WCS as the
-   initial guess and match detected ↔ predicted by nearest neighbour within a
-   pixel tolerance. Iterate match → fit → re-match with outlier rejection.
+4. **Matching (bootstrap from zenith outward).** A fixed pixel tolerance is not
+   safe at large zenith angle: the idealized equidistant model can mispredict
+   positions by tens of pixels there — exactly the stars needed to constrain the
+   non-linear term — so a loose global tolerance would invite mismatches in the
+   sparse Vmag ≤ 3 field (~103 stars over the whole sky).
+
+   Instead, exploit that the model is accurate near zenith and degrades smoothly
+   with `z`:
+   - Match only stars within a small zenith-angle cutoff (e.g. `z < 20°`), where
+     a tight tolerance is safe, and fit the low-order terms.
+   - Expand the `z` cutoff in steps, re-predicting and re-matching with the
+     progressively improved model each round; the match radius grows only as far
+     as the current model's residuals require.
+   - Use detected flux rank vs. catalog Vmag rank as a **brightness tie-break**
+     when more than one candidate falls within tolerance.
+   - Iterate match → fit → re-match with outlier rejection.
+
+   **Fallback.** If residuals show the bootstrap still mismatches at the edge,
+   escalate to local asterism / triangle (distortion-invariant) pattern matching
+   (astrometry.net style). Heavier to implement and less reliable in this sparse
+   field, so only if needed.
 5. **Fit.** `scipy.optimize.least_squares` over the six parameters, minimizing
    pixel residuals over the matched stars.
 6. **Aggregate across the night.** Pool matched stars from all dark-sky frames

@@ -261,7 +261,8 @@ def _detect_alcor_frame(task):
     index, filename, vmag_limit, min_alt, fwhm, threshold_sigma = task
     filename = Path(filename)
     time = _frame_time(filename)
-    im, _ = load_alcor_fits(filename)
+    im, _ = load_alcor_fits(filename, rotation=0.0, xshift=0.0, yshift=0.0,
+                            radial_coeffs=(1.0, 0.0, 0.0))
     cat = alcor_reference_altaz(time, vmag_limit=vmag_limit, min_alt=min_alt)
     det = detect_alcor_stars(im, fwhm=fwhm, threshold_sigma=threshold_sigma)
     if len(det) < 3:
@@ -284,12 +285,18 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=3.0, sun_alt_max=-
     geometry, matched via :func:`match_alcor_stars`, and the matched
     (Alt, Az, x, y) tuples are pooled. Matches are pooled and fit globally, then
     frames are re-matched with the refined geometry and refit, and a final fit is
-    performed after 3*MAD outlier rejection. Returns the refined
-    (xshift, yshift, rotation, radial_coeffs).
+    performed after 3*MAD outlier rejection.
 
-    Returns a dict with the fitted parameters plus ``n_matched``,
-    ``residual_rms``, and per-match arrays (``alt``, ``az``, ``x``, ``y``) for
-    diagnostics.
+    The fit runs on a neutral (uncalibrated) frame -- loaded with no recentering,
+    rotation, or radial distortion -- so the recovered (xshift, yshift, rotation,
+    radial_coeffs) are the ABSOLUTE geometry constants for the night, suitable for
+    baking into ``ALCOR_CALIBRATIONS``. It is warm-started from the nearest
+    existing epoch (via :func:`alcor_calibration` at the night's median time).
+
+    Returns a dict with the fitted absolute parameters plus an ``epoch`` date
+    string (the night's UT date, or the seed epoch when no frame can be timed),
+    ``n_matched``, ``residual_rms``, and per-match arrays (``alt``, ``az``,
+    ``x``, ``y``) for diagnostics.
 
     The per-frame load/detect/catalog work is the expensive part and is
     independent across frames, so it is parallelized: ``workers=1`` runs
@@ -312,8 +319,26 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=3.0, sun_alt_max=-
     if max_frames is not None:
         dark = dark[:max_frames]
 
-    init = dict(xshift=0.0, yshift=0.0, rotation=0.0,
-                radial_coeffs=(1.0, 0.0, 0.0))
+    # Representative night time (median dark-frame time), used both to seed the
+    # fit from the nearest existing calibration and to stamp the new epoch.
+    # Prefer the filename timestamp; fall back to the DATE header, and skip any
+    # frame that can be timed by neither (corrupt/oddly-named) rather than fail.
+    night_dts = []
+    for f in dark:
+        d = _filename_ut_datetime(f)
+        if d is None:
+            try:
+                d = Time(_read_frame_date(f), format="isot", scale="utc").to_datetime()
+            except Exception:
+                continue
+        night_dts.append(d)
+    night_time = Time(sorted(night_dts)[len(night_dts) // 2]) if night_dts else None
+    base = alcor_calibration(night_time)
+    epoch = (night_time.datetime.date().isoformat()
+             if night_time is not None else base["epoch"])
+
+    init = dict(xshift=base["xshift"], yshift=base["yshift"],
+                rotation=base["rotation"], radial_coeffs=base["radial_coeffs"])
     # (cat, detections) per usable frame, kept in frame order for reproducible
     # pooling regardless of worker completion order.
     detected = [None] * len(dark)
@@ -390,6 +415,7 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=3.0, sun_alt_max=-
 
     return {
         **params,
+        "epoch": epoch,
         "n_matched": int(good.sum()),
         "residual_rms": rms,
         "alt": alt[good], "az": az[good], "x": x[good], "y": y[good],

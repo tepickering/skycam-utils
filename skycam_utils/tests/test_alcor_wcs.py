@@ -297,7 +297,8 @@ def test_fit_alcor_wcs_aggregates_synthetic_frames(monkeypatch, tmp_path):
 
     frame_alt = [rng.uniform(10.0, 88.0, 30), rng.uniform(10.0, 88.0, 30)]
     frame_az = [rng.uniform(0.0, 360.0, 30), rng.uniform(0.0, 360.0, 30)]
-    files = [tmp_path / "f0.fits", tmp_path / "f1.fits"]
+    files = [tmp_path / "2024_09_05__00_00_00.fits",
+             tmp_path / "2024_09_05__00_10_00.fits"]
     for f in files:
         f.write_bytes(b"stub")
 
@@ -328,6 +329,10 @@ def test_fit_alcor_wcs_aggregates_synthetic_frames(monkeypatch, tmp_path):
     monkeypatch.setattr(alcor_mod, "alcor_reference_altaz", fake_reference_altaz)
     monkeypatch.setattr(alcor_mod, "detect_alcor_stars", fake_detect)
     monkeypatch.setattr(alcor_mod, "_frame_time", fake_frame_time)
+    monkeypatch.setattr(alcor_mod, "alcor_calibration",
+                        lambda time=None: {"epoch": "2024-09-05", "xshift": 0.0,
+                                           "yshift": 0.0, "rotation": 0.0,
+                                           "radial_coeffs": (1.0, 0.0, 0.0)})
 
     result = fit_alcor_wcs(tmp_path, pattern="*.fits")
     assert abs(result["xshift"] - 6.0) < 0.05
@@ -336,6 +341,7 @@ def test_fit_alcor_wcs_aggregates_synthetic_frames(monkeypatch, tmp_path):
     np.testing.assert_allclose(result["radial_coeffs"], (1.0, 0.04, 0.0), atol=2e-3)
     assert result["n_matched"] >= 40
     assert result["residual_rms"] < 0.1
+    assert result["epoch"] == "2024-09-05"
 
 
 def test_fit_alcor_wcs_parallel_matches_serial(monkeypatch, tmp_path):
@@ -353,7 +359,8 @@ def test_fit_alcor_wcs_parallel_matches_serial(monkeypatch, tmp_path):
 
     frame_alt = [rng.uniform(10.0, 88.0, 30), rng.uniform(10.0, 88.0, 30)]
     frame_az = [rng.uniform(0.0, 360.0, 30), rng.uniform(0.0, 360.0, 30)]
-    files = [tmp_path / "f0.fits", tmp_path / "f1.fits"]
+    files = [tmp_path / "2024_09_05__00_00_00.fits",
+             tmp_path / "2024_09_05__00_10_00.fits"]
     for f in files:
         f.write_bytes(b"stub")
 
@@ -410,6 +417,10 @@ def test_fit_alcor_wcs_parallel_matches_serial(monkeypatch, tmp_path):
     monkeypatch.setattr(alcor_mod, "_frame_time", fake_frame_time)
     monkeypatch.setattr(alcor_mod, "ProcessPoolExecutor", _SyncExecutor)
     monkeypatch.setattr(alcor_mod, "as_completed", lambda futures: list(futures))
+    monkeypatch.setattr(alcor_mod, "alcor_calibration",
+                        lambda time=None: {"epoch": "2024-09-05", "xshift": 0.0,
+                                           "yshift": 0.0, "rotation": 0.0,
+                                           "radial_coeffs": (1.0, 0.0, 0.0)})
 
     result = fit_alcor_wcs(tmp_path, pattern="*.fits", workers=2)
     assert abs(result["xshift"] - 6.0) < 0.05
@@ -417,6 +428,7 @@ def test_fit_alcor_wcs_parallel_matches_serial(monkeypatch, tmp_path):
     assert abs(result["rotation"] - 0.8) < 0.05
     np.testing.assert_allclose(result["radial_coeffs"], (1.0, 0.04, 0.0), atol=2e-3)
     assert result["n_matched"] >= 40
+    assert result["epoch"] == "2024-09-05"
 
 
 def test_fit_alcor_wcs_rejects_invalid_workers(tmp_path):

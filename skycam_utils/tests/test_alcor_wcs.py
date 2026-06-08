@@ -445,12 +445,21 @@ def test_fit_alcor_wcs_survives_injected_mismatches(monkeypatch, tmp_path):
         i = calls["i"]
         calls["i"] += 1
         x, y = _predict_pixels(frame_alt[i], frame_az[i], **true)
+        x = np.asarray(x)
+        y = np.asarray(y)
         # 10 spurious detections scattered across the frame (mismatches)
         sx = rng.uniform(50, 2 * ALCOR_RADIUS - 50, 10)
         sy = rng.uniform(50, 2 * ALCOR_RADIUS - 50, 10)
-        xx = np.append(np.asarray(x), sx)
-        yy = np.append(np.asarray(y), sy)
-        flux = np.append(rng.uniform(500, 2000, 25), rng.uniform(100, 400, 10))
+        # 5 faint near-catalog decoys: offset +5px from real stars so they
+        # contest those stars in the loose early rounds (and must be rejected by
+        # the asterism/brightness logic) but fall outside the final tight gate.
+        dx = x[:5] + 5.0
+        dy = y[:5] + 5.0
+        xx = np.concatenate([x, sx, dx])
+        yy = np.concatenate([y, sy, dy])
+        flux = np.concatenate([rng.uniform(500, 2000, 25),
+                               rng.uniform(100, 400, 10),
+                               rng.uniform(50, 150, 5)])
         return Table({"xcentroid": xx, "ycentroid": yy, "flux": flux})
 
     def fake_frame_time(path):

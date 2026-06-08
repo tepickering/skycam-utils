@@ -284,6 +284,27 @@ def test_assign_alcor_matches_pattern_rejects_decoy():
     assert len(matched) >= 9  # the clean stars still match
 
 
+def test_fit_params_recovers_k5_when_enabled():
+    """With fit_k5=True the quintic radial term is recovered on clean data."""
+    rng = np.random.default_rng(9)
+    alt = rng.uniform(5.0, 88.0, 400)
+    az = rng.uniform(0.0, 360.0, 400)
+    true = dict(xshift=5.0, yshift=-4.0, rotation=0.7, radial_coeffs=(1.0, 0.03, 0.02))
+    x, y = _predict_pixels(alt, az, **true)
+
+    fit = _fit_params(alt, az, x, y,
+                      init_params=dict(xshift=0.0, yshift=0.0, rotation=0.0,
+                                       radial_coeffs=(1.0, 0.0, 0.0)),
+                      fit_k5=True)
+    assert abs(fit["radial_coeffs"][1] - 0.03) < 5e-3
+    assert abs(fit["radial_coeffs"][2] - 0.02) < 5e-3
+    # default (k3-only) still pins k5 at zero
+    k3_only = _fit_params(alt, az, x, y,
+                          init_params=dict(xshift=0.0, yshift=0.0, rotation=0.0,
+                                           radial_coeffs=(1.0, 0.0, 0.0)))
+    assert k3_only["radial_coeffs"][2] == 0.0
+
+
 def test_assign_alcor_matches_brightness_tiebreak():
     # One detection contested by two catalog stars within tolerance.
     # Catalog A is bright (Vmag 1.0) and farther; B is faint (Vmag 4.0) and nearer.

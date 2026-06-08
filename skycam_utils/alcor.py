@@ -148,28 +148,48 @@ def _predict_pixels(
 
 
 def _fit_params(alt, az, obs_x, obs_y, init_params, radius=ALCOR_RADIUS,
-                horizon_radius=ALCOR_HORIZON_RADIUS):
+                horizon_radius=ALCOR_HORIZON_RADIUS, fit_k5=False):
     """
-    Robust least-squares fit of (xshift, yshift, rotation, k3) to matched stars.
+    Robust least-squares fit of the lens geometry to matched stars.
 
-    The lens nonlinearity is modeled by the single odd cubic term k3; k1 is held
-    at 1.0 (the zenith plate scale is set by horizon_radius) and k5 at 0.0. k3 and
-    k5 are nearly collinear in rho over [0, 1], so fitting both is ill-conditioned
-    and on a large pooled dataset runs away to large cancelling values (e.g.
-    k3=-0.58, k5=3.6) that are unphysical despite a tolerable RMS; k3 alone
-    captures the distortion (this is the model the shipped 2024 constants used). A
-    ``soft_l1`` loss downweights mismatched/noise detections, which are common in
-    this sparse bright-star field. Returns an updated params dict with
-    radial_coeffs=(1.0, k3, 0.0).
+    By default fits (xshift, yshift, rotation, k3) with k1 held at 1.0 (the zenith
+    plate scale is set by horizon_radius) and k5 at 0.0. k3 and k5 are nearly
+    collinear in rho over [0, 1], so fitting both is ill-conditioned on *dirty*
+    data and runs away to large cancelling values (e.g. k3=-0.58, k5=3.6) that are
+    unphysical despite a tolerable RMS -- which is why k3 alone is the default
+    (the model the shipped 2024 constants used). With ``fit_k5=True`` the odd
+    quintic term k5 is fit as well: appropriate only on a clean, well-distributed
+    match set (asterism-verified, spanning the full zenith range), where the radial
+    residual that k3 alone leaves near the horizon can be captured. A ``soft_l1``
+    loss downweights mismatched/noise detections, common in this sparse
+    bright-star field. Returns an updated params dict with
+    radial_coeffs=(1.0, k3, k5) (k5=0.0 unless ``fit_k5``).
     """
     alt = np.asarray(alt, dtype=float)
     az = np.asarray(az, dtype=float)
     obs_x = np.asarray(obs_x, dtype=float)
     obs_y = np.asarray(obs_y, dtype=float)
-    p0 = np.array([
-        init_params["xshift"], init_params["yshift"], init_params["rotation"],
-        init_params["radial_coeffs"][1],
-    ], dtype=float)
+    init_k3 = init_params["radial_coeffs"][1]
+    init_k5 = init_params["radial_coeffs"][2]
+
+    if fit_k5:
+        p0 = np.array([init_params["xshift"], init_params["yshift"],
+                       init_params["rotation"], init_k3, init_k5], dtype=float)
+
+        def residuals(p):
+            xshift, yshift, rot, k3, k5 = p
+            x, y = _predict_pixels(alt, az, xshift=xshift, yshift=yshift, rotation=rot,
+                                   radial_coeffs=(1.0, k3, k5), radius=radius,
+                                   horizon_radius=horizon_radius)
+            return np.concatenate([x - obs_x, y - obs_y])
+
+        result = least_squares(residuals, p0, loss="soft_l1", f_scale=3.0)
+        xshift, yshift, rot, k3, k5 = result.x
+        return dict(xshift=float(xshift), yshift=float(yshift), rotation=float(rot),
+                    radial_coeffs=(1.0, float(k3), float(k5)))
+
+    p0 = np.array([init_params["xshift"], init_params["yshift"],
+                   init_params["rotation"], init_k3], dtype=float)
 
     def residuals(p):
         xshift, yshift, rot, k3 = p
@@ -381,8 +401,8 @@ def _detect_alcor_frame(task):
 def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=4.0, sun_alt_max=-18.0,
                   min_alt=10.0, tolerance=3.0, tolerance_start=12.0, match_rounds=4,
                   n_neighbors=5, min_corroborating=2, pattern_tol=3.0,
-                  fwhm=3.0, threshold_sigma=5.0, max_detections=200, max_frames=None,
-                  workers=1, log=None):
+                  fit_k5=False, fwhm=3.0, threshold_sigma=5.0, max_detections=200,
+                  max_frames=None, workers=1, log=None):
     """
     Calibrate the alcor lens geometry by aggregating bright-star matches across
     all dark-sky frames in ``input_dir``.
@@ -509,7 +529,7 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=4.0, sun_alt_max=-
             continue
         alt, az, x, y = pooled
         if len(alt) >= 3:
-            params = _fit_params(alt, az, x, y, init_params=params)
+            params = _fit_params(alt, az, x, y, init_params=params, fit_k5=fit_k5)
 
     # Final pool at the tightest tolerance, then 3*MAD outlier rejection + refit.
     pooled = pool(params, float(tolerance))
@@ -524,7 +544,8 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=4.0, sun_alt_max=-
     mad = np.median(np.abs(resid - np.median(resid))) + 1e-9
     good = resid < np.median(resid) + 3.0 * 1.4826 * mad
     if good.sum() >= 3:
-        params = _fit_params(alt[good], az[good], x[good], y[good], init_params=params)
+        params = _fit_params(alt[good], az[good], x[good], y[good], init_params=params,
+                             fit_k5=fit_k5)
     px, py = _predict_pixels(alt[good], az[good], xshift=params["xshift"],
                              yshift=params["yshift"], rotation=params["rotation"],
                              radial_coeffs=tuple(params["radial_coeffs"]))
@@ -1704,6 +1725,9 @@ def fit_alcor_wcs_cli():
                         help="Minimum neighbors that must corroborate a match's local pattern.")
     parser.add_argument("--n-neighbors", type=int, default=5,
                         help="Nearest catalog neighbors checked in asterism verification.")
+    parser.add_argument("--fit-k5", action="store_true",
+                        help="Also fit the odd quintic radial term k5 (richer radial "
+                             "distortion model; use only on a clean, full-zenith match set).")
     parser.add_argument("--max-detections", type=int, default=200,
                         help="Keep only the brightest N detections per frame.")
     parser.add_argument("--max-frames", type=int, default=None, help="Cap number of frames used.")
@@ -1721,7 +1745,8 @@ def fit_alcor_wcs_cli():
         sun_alt_max=args.sun_alt_max, min_alt=args.min_alt, tolerance=args.tolerance,
         tolerance_start=args.tolerance_start, match_rounds=args.match_rounds,
         n_neighbors=args.n_neighbors, min_corroborating=args.min_corroborating,
-        pattern_tol=args.pattern_tol, max_detections=args.max_detections,
+        pattern_tol=args.pattern_tol, fit_k5=args.fit_k5,
+        max_detections=args.max_detections,
         max_frames=args.max_frames, workers=args.workers, log=log,
     )
     print(f"# matched stars: {result['n_matched']}")

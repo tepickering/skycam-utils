@@ -194,6 +194,26 @@ def test_detect_alcor_stars_on_synthetic_image():
         assert d.min() < 2.0
 
 
+def test_detect_alcor_stars_caps_to_brightest():
+    rng = np.random.default_rng(11)
+    im = np.zeros((200, 200, 3), dtype=float)
+    im += rng.normal(0.0, 1.0, im.shape)
+    yy, xx = np.mgrid[0:200, 0:200]
+    # 8 stars of decreasing brightness at distinct positions
+    centers = [(20, 20), (60, 40), (100, 30), (140, 60),
+               (40, 120), (90, 150), (150, 130), (170, 170)]
+    amps = np.linspace(2000.0, 400.0, len(centers))
+    for (cx, cy), amp in zip(centers, amps):
+        im += amp * np.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2 * 2.0**2))[:, :, None]
+
+    capped = detect_alcor_stars(im, fwhm=2.5, threshold_sigma=5.0, max_detections=3)
+    assert len(capped) == 3
+    # The three kept must be the three brightest detected.
+    full = detect_alcor_stars(im, fwhm=2.5, threshold_sigma=5.0, max_detections=None)
+    top3 = np.sort(np.asarray(full["flux"]))[::-1][:3]
+    np.testing.assert_allclose(np.sort(np.asarray(capped["flux"]))[::-1], top3)
+
+
 def test_detect_alcor_stars_on_real_fixture():
     test_fits = Path(__file__).with_name("test.fits.bz2")
     im, _ = load_alcor_fits(test_fits)

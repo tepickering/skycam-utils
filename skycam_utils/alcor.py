@@ -11,6 +11,7 @@ import numpy as np
 from scipy.ndimage import rotate
 from scipy.optimize import least_squares
 from scipy.ndimage import shift as ndimage_shift
+from scipy.spatial import cKDTree
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
 import matplotlib.dates as mdates
@@ -708,7 +709,7 @@ def _build_alcor_wcs_cached(radius, horizon_radius, radial_coeffs, sip_degree):
     return wcs
 
 
-def detect_alcor_stars(im, fwhm=3.0, threshold_sigma=5.0):
+def detect_alcor_stars(im, fwhm=3.0, threshold_sigma=5.0, max_detections=200):
     """
     Detect point sources in a processed alcor RGB image.
 
@@ -724,6 +725,10 @@ def detect_alcor_stars(im, fwhm=3.0, threshold_sigma=5.0):
         FWHM (pixels) of the Gaussian kernel used by the star finder.
     threshold_sigma : float (default=5.0)
         Detection threshold in multiples of the background noise.
+    max_detections : int or None (default=200)
+        Keep only the brightest ``max_detections`` sources by ``flux``. ``None``
+        keeps all. Bounding the list to the brightest few hundred keeps matching
+        on the well-detected stars regardless of per-frame noise/transparency.
 
     Returns
     -------
@@ -750,6 +755,9 @@ def detect_alcor_stars(im, fwhm=3.0, threshold_sigma=5.0):
         out.rename_column(xcol, "xcentroid")
     if ycol != "ycentroid":
         out.rename_column(ycol, "ycentroid")
+    if max_detections is not None and len(out) > max_detections:
+        order = np.argsort(np.asarray(out["flux"], dtype=float))[::-1]
+        out = out[order[:max_detections]]
     return out
 
 

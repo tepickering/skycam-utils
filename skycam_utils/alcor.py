@@ -563,10 +563,12 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=4.0, sun_alt_max=-
 
 def save_alcor_residual_plot(alt, az, obs_x, obs_y, params, output_file,
                              radius=ALCOR_RADIUS, horizon_radius=ALCOR_HORIZON_RADIUS,
-                             figsize=(18, 5.5), dpi=150, nbins=30, min_per_cell=3):
+                             figsize=(18, 10), dpi=150, nbins=30, min_per_cell=3):
     """
-    Diagnostic plot of the fitted WCS residuals for matched stars, as three
-    panels, and return the output path:
+    Diagnostic plot of the fitted WCS residuals for matched stars, as six panels
+    (two rows), and return the output path.
+
+    Top row:
 
     1. Residual magnitude versus zenith angle, before (idealized equidistant)
        and after (fitted) the refinement -- shows whether the radial model order
@@ -580,6 +582,27 @@ def save_alcor_residual_plot(alt, az, obs_x, obs_y, params, output_file,
        and shown as one mean arrow per cell, auto-scaled. Averaging cancels the
        incoherent scatter from mismatches so the coherent structure (radial /
        swirl / elliptical) stands out; per-star arrows would saturate the panel.
+
+    Bottom row decomposes each residual into a **radial** component (along the
+    zenith->star direction) and a **tangential** component (perpendicular), which
+    discriminates the cause of a leftover residual that the radial model cannot
+    remove:
+
+    4. Radial component versus azimuth, colored by zenith. A sinusoid (one cycle
+       per 360 deg) at fixed zenith is the signature of a sensor/lens decenter or
+       tilt (a 2-D effect); flat scatter about zero is irreducible noise.
+    5. Tangential component versus azimuth, colored by zenith. A nonzero
+       tangential signal indicates a rotational/swirl term (e.g. residual sensor
+       rotation that varies with zenith) the scalar ``rotation`` cannot capture.
+    6. Binned mean radial and tangential component versus zenith. A mean radial
+       curve that grows smoothly with zenith means the azimuthally-symmetric
+       radial basis is itself inadequate (not merely truncated); a mean near zero
+       with large per-azimuth spread (panels 4/5) points to a 2-D or noise term.
+
+    Note: when the match tolerance is tight the residual magnitude (panels 1/2)
+    is clamped below it; run with a loose ``--tolerance`` and a tight
+    ``--pattern-tol`` (the asterism check is offset-invariant) to see the true,
+    unclamped residual structure here.
     """
     alt = np.asarray(alt, dtype=float)
     az = np.asarray(az, dtype=float)
@@ -598,7 +621,8 @@ def save_alcor_residual_plot(alt, az, obs_x, obs_y, params, output_file,
     dx, dy = fx - obs_x, fy - obs_y
     after = np.hypot(dx, dy)
 
-    fig, (ax_z, ax_a, ax_v) = plt.subplots(1, 3, figsize=figsize)
+    fig, ((ax_z, ax_a, ax_v),
+          (ax_rad, ax_tan, ax_prof)) = plt.subplots(2, 3, figsize=figsize)
 
     ax_z.scatter(z, before, s=8, alpha=0.5, label="idealized")
     ax_z.scatter(z, after, s=8, alpha=0.5, label="refined")
@@ -646,6 +670,50 @@ def save_alcor_residual_plot(alt, az, obs_x, obs_y, params, output_file,
     ax_v.set_ylabel("y (pix)")
     ax_v.legend(loc="upper right")
     fig.colorbar(q, ax=ax_v, label="mean |residual| (pix)")
+
+    # Radial/tangential decomposition about the zenith (array center).
+    vx = obs_x - cen
+    vy = obs_y - cen
+    rr = np.hypot(vx, vy)
+    safe = rr > 1e-6
+    denom = np.where(safe, rr, 1.0)
+    rhx = np.where(safe, vx / denom, 0.0)
+    rhy = np.where(safe, vy / denom, 0.0)
+    rad_comp = dx * rhx + dy * rhy            # + = predicted outward of observed
+    tan_comp = dx * (-rhy) + dy * rhx         # + = predicted CCW of observed
+
+    sc_r = ax_rad.scatter(az, rad_comp, s=8, alpha=0.6, c=z, cmap="plasma")
+    ax_rad.axhline(0.0, color="k", lw=0.5)
+    ax_rad.set_title("radial residual component vs azimuth")
+    ax_rad.set_xlabel("azimuth (deg)")
+    ax_rad.set_ylabel("radial residual (pix)")
+    fig.colorbar(sc_r, ax=ax_rad, label="zenith angle (deg)")
+
+    sc_t = ax_tan.scatter(az, tan_comp, s=8, alpha=0.6, c=z, cmap="plasma")
+    ax_tan.axhline(0.0, color="k", lw=0.5)
+    ax_tan.set_title("tangential residual component vs azimuth")
+    ax_tan.set_xlabel("azimuth (deg)")
+    ax_tan.set_ylabel("tangential residual (pix)")
+    fig.colorbar(sc_t, ax=ax_tan, label="zenith angle (deg)")
+
+    # Binned mean radial/tangential component vs zenith (the decisive panel).
+    if z.size:
+        zb = np.linspace(float(z.min()), float(z.max()), 17)
+        idx = np.clip(np.digitize(z, zb) - 1, 0, len(zb) - 2)
+        centers, m_rad, m_tan = [], [], []
+        for b in range(len(zb) - 1):
+            m = idx == b
+            if m.sum() >= min_per_cell:
+                centers.append(0.5 * (zb[b] + zb[b + 1]))
+                m_rad.append(float(rad_comp[m].mean()))
+                m_tan.append(float(tan_comp[m].mean()))
+        ax_prof.plot(centers, m_rad, "-o", ms=4, label="mean radial")
+        ax_prof.plot(centers, m_tan, "-s", ms=4, label="mean tangential")
+    ax_prof.axhline(0.0, color="k", lw=0.5)
+    ax_prof.set_title("binned mean radial/tangential vs zenith")
+    ax_prof.set_xlabel("zenith angle (deg)")
+    ax_prof.set_ylabel("mean component (pix)")
+    ax_prof.legend()
 
     fig.suptitle("Alcor WCS residuals")
     output_file = Path(output_file)

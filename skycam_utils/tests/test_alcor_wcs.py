@@ -23,6 +23,7 @@ from skycam_utils.alcor import (
     _sun_altitude,
     alcor_calibration,
     alcor_reference_altaz,
+    assign_alcor_matches,
     build_alcor_wcs,
     detect_alcor_stars,
     fit_alcor_wcs,
@@ -263,6 +264,82 @@ def test_match_alcor_stars_recovers_correspondences():
     for row in matched:
         ex, ey = _predict_pixels(row["Alt"], row["Az"], **true_params)
         assert np.hypot(row["xcentroid"] - ex, row["ycentroid"] - ey) < 1e-6
+
+
+def _clean_frame(true_params, n=12, seed=0):
+    """A catalog + detection pair with detections exactly at the true pixels."""
+    rng = np.random.default_rng(seed)
+    alt = rng.uniform(15.0, 85.0, n)
+    az = rng.uniform(0.0, 360.0, n)
+    cat = _Table({"Alt": alt, "Az": az, "Vmag": rng.uniform(0.5, 3.5, n)})
+    x, y = _predict_pixels(alt, az, **true_params)
+    det = _Table({"xcentroid": np.asarray(x), "ycentroid": np.asarray(y),
+                  "flux": rng.uniform(200.0, 2000.0, n)})
+    return cat, det, np.asarray(x), np.asarray(y)
+
+
+def test_assign_alcor_matches_recovers_clean_frame():
+    true = dict(xshift=4.0, yshift=-3.0, rotation=0.6, radial_coeffs=(1.0, 0.03, 0.0))
+    cat, det, tx, ty = _clean_frame(true, n=12, seed=1)
+    matched = assign_alcor_matches(cat, det, params=true, tolerance=3.0)
+    assert len(matched) == 12
+    for row in matched:
+        ex, ey = _predict_pixels(row["Alt"], row["Az"], **true)
+        assert np.hypot(row["xcentroid"] - ex, row["ycentroid"] - ey) < 1e-6
+
+
+def test_assign_alcor_matches_pattern_rejects_decoy():
+    true = dict(xshift=4.0, yshift=-3.0, rotation=0.6, radial_coeffs=(1.0, 0.03, 0.0))
+    cat, det, tx, ty = _clean_frame(true, n=12, seed=2)
+    # Plant a decoy detection near catalog star 0's predicted pixel, nearer than
+    # its true detection, but displaced so it breaks the local constellation.
+    decoy_x = tx[0] + 3.5
+    decoy_y = ty[0]
+    det_x = np.asarray(det["xcentroid"], dtype=float)
+    det_y = np.asarray(det["ycentroid"], dtype=float)
+    # remove star 0's true detection so the decoy is the only candidate for it
+    keep = np.ones(len(det), dtype=bool)
+    keep[0] = False
+    det2 = _Table({"xcentroid": np.append(det_x[keep], decoy_x),
+                   "ycentroid": np.append(det_y[keep], decoy_y),
+                   "flux": np.append(np.asarray(det["flux"])[keep], 1500.0)})
+    matched = assign_alcor_matches(cat, det2, params=true, tolerance=4.0)
+    # The decoy must not be matched to catalog star 0; the genuine pairs survive.
+    for row in matched:
+        assert not (abs(row["xcentroid"] - decoy_x) < 1e-6
+                    and abs(row["ycentroid"] - decoy_y) < 1e-6)
+    assert len(matched) >= 9  # the clean stars still match
+
+
+def test_assign_alcor_matches_brightness_tiebreak():
+    # One detection contested by two catalog stars within tolerance.
+    # Catalog A is bright (Vmag 1.0) and farther; B is faint (Vmag 4.0) and nearer.
+    params = dict(xshift=0.0, yshift=0.0, rotation=0.0, radial_coeffs=(1.0, 0.0, 0.0))
+    ax, ay = _predict_pixels(60.0, 10.0, **params)
+    bx, by = _predict_pixels(60.5, 10.0, **params)  # close neighbor
+    cat = _Table({"Alt": [60.0, 60.5], "Az": [10.0, 10.0], "Vmag": [1.0, 4.0]})
+    # detection sits 1px from B's pixel, ~ a few px from A's pixel
+    det = _Table({"xcentroid": [float(bx) + 1.0], "ycentroid": [float(by)],
+                  "flux": [1000.0]})
+
+    bright = assign_alcor_matches(cat, det, params=params, tolerance=20.0,
+                                  brightness=True, min_corroborating=2)
+    assert len(bright) == 1
+    assert float(bright["Vmag"][0]) == 1.0          # bright catalog star A wins
+
+    nearest = assign_alcor_matches(cat, det, params=params, tolerance=20.0,
+                                   brightness=False, min_corroborating=2)
+    assert len(nearest) == 1
+    assert float(nearest["Vmag"][0]) == 4.0         # nearest catalog star B wins
+
+
+def test_assign_alcor_matches_empty_inputs():
+    params = dict(xshift=0.0, yshift=0.0, rotation=0.0, radial_coeffs=(1.0, 0.0, 0.0))
+    cat = _Table({"Alt": [45.0], "Az": [10.0], "Vmag": [2.0]})
+    empty_det = _Table({"xcentroid": [], "ycentroid": [], "flux": []})
+    out = assign_alcor_matches(cat, empty_det, params=params, tolerance=3.0)
+    assert len(out) == 0
+    assert {"Alt", "Az", "xcentroid", "ycentroid"}.issubset(out.colnames)
 
 
 def test_fit_params_recovers_known_geometry():

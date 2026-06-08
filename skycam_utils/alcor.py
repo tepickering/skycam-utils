@@ -184,6 +184,167 @@ def _fit_params(alt, az, obs_x, obs_y, init_params, radius=ALCOR_RADIUS,
                 radial_coeffs=(1.0, float(k3), 0.0))
 
 
+def assign_alcor_matches(cat, det, params, tolerance,
+                         radius=ALCOR_RADIUS, horizon_radius=ALCOR_HORIZON_RADIUS,
+                         n_neighbors=5, min_corroborating=2, pattern_tol=3.0,
+                         brightness=True):
+    """
+    Assign catalog stars to detected sources against a *fixed* geometry.
+
+    Unlike :func:`match_alcor_stars`, this never refits the geometry internally;
+    ``params`` (``xshift``, ``yshift``, ``rotation``, ``radial_coeffs``) are the
+    seed used for the whole frame. The steps are:
+
+    1. Predict each catalog star's pixel ``(px, py)`` with :func:`_predict_pixels`
+       and build a `~scipy.spatial.cKDTree` of detections and of predicted
+       catalog pixels.
+    2. Form candidate edges (catalog i, detection j) with separation
+       <= ``tolerance``, group them into connected components, and resolve each
+       component. An isolated 1:1 candidate is the mutual-nearest case and is
+       accepted directly. A contested cluster (several catalog stars and/or
+       detections within tolerance) is resolved by **relative-brightness rank
+       pairing**: detections sorted by ``flux`` descending are paired with catalog
+       stars sorted by ``Vmag`` ascending, in order (within ``tolerance``). With
+       ``brightness=False`` or missing ``flux``/``Vmag`` columns the cluster is
+       resolved greedily by nearest separation instead. Because brightness is only
+       consulted *within* a contested cluster of nearby stars, spatially or
+       temporally patchy cloud extinction (which dims a local patch in common)
+       never enters a global comparison.
+    3. **Local-pattern (asterism) verification.** For each tentative pair i->j,
+       look at catalog i's ``n_neighbors`` nearest catalog neighbors that also have
+       a tentative pair. The pair is accepted iff at least ``min_corroborating`` of
+       them corroborate the local constellation -- their detection offset matches
+       the predicted offset to within ``pattern_tol``:
+       ``||(det_jn - det_j) - (pred_in - pred_i)|| <= pattern_tol``. Pairs with
+       fewer than ``min_corroborating`` paired neighbors are kept (too little local
+       evidence to reject); crowded-region mispairs, which sit among well-matched
+       neighbors yet break the constellation, are rejected.
+
+    Returns an ``hstack`` of the accepted catalog and detection rows (same column
+    contract as :func:`match_alcor_stars`); an empty table if nothing matches.
+    """
+    px, py = _predict_pixels(
+        cat["Alt"], cat["Az"], xshift=params["xshift"], yshift=params["yshift"],
+        rotation=params["rotation"], radial_coeffs=tuple(params["radial_coeffs"]),
+        radius=radius, horizon_radius=horizon_radius,
+    )
+    px = np.atleast_1d(np.asarray(px, dtype=float))
+    py = np.atleast_1d(np.asarray(py, dtype=float))
+    det_x = np.asarray(det["xcentroid"], dtype=float)
+    det_y = np.asarray(det["ycentroid"], dtype=float)
+
+    n_cat = px.size
+    n_det = det_x.size
+    empty = hstack([Table(cat[[]]), Table(det[[]])])
+    if n_cat == 0 or n_det == 0:
+        return empty
+
+    cat_xy = np.column_stack([px, py])
+    det_xy = np.column_stack([det_x, det_y])
+    det_tree = cKDTree(det_xy)
+    cat_tree = cKDTree(cat_xy)
+
+    has_bright = (brightness and "Vmag" in cat.colnames and "flux" in det.colnames)
+    vmag = np.asarray(cat["Vmag"], dtype=float) if "Vmag" in cat.colnames else None
+    flux = np.asarray(det["flux"], dtype=float) if "flux" in det.colnames else None
+
+    # candidate detections within tolerance of each catalog star
+    cat_cands = det_tree.query_ball_point(cat_xy, tolerance)
+
+    # --- connected components over the bipartite candidate graph ---
+    # nodes 0..n_cat-1 are catalog stars, n_cat..n_cat+n_det-1 are detections.
+    parent = list(range(n_cat + n_det))
+
+    def _find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    def _union(a, b):
+        ra, rb = _find(a), _find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for i, cands in enumerate(cat_cands):
+        for j in cands:
+            _union(i, n_cat + j)
+
+    comp_cat = {}
+    comp_det = {}
+    for i in range(n_cat):
+        if cat_cands[i]:
+            comp_cat.setdefault(_find(i), []).append(i)
+    for j in range(n_det):
+        root = _find(n_cat + j)
+        if root in comp_cat:
+            comp_det.setdefault(root, []).append(j)
+
+    # --- resolve each component into tentative (cat i, det j) pairs ---
+    tentative = {}  # cat i -> det j
+    for root, cis in comp_cat.items():
+        djs = comp_det.get(root, [])
+        if not djs:
+            continue
+        if len(cis) == 1 and len(djs) == 1:
+            tentative[cis[0]] = djs[0]
+            continue
+        cis_arr = np.asarray(cis, dtype=int)
+        djs_arr = np.asarray(djs, dtype=int)
+        if has_bright:
+            ci_order = cis_arr[np.argsort(vmag[cis_arr])]        # brightest catalog first
+            dj_order = djs_arr[np.argsort(-flux[djs_arr])]       # brightest detection first
+            for k in range(min(len(ci_order), len(dj_order))):
+                i, j = int(ci_order[k]), int(dj_order[k])
+                if np.hypot(det_x[j] - px[i], det_y[j] - py[i]) <= tolerance:
+                    tentative[i] = j
+        else:
+            edges = []
+            for i in cis_arr:
+                for j in djs_arr:
+                    d = np.hypot(det_x[j] - px[i], det_y[j] - py[i])
+                    if d <= tolerance:
+                        edges.append((d, int(i), int(j)))
+            edges.sort()
+            used_c, used_d = set(), set()
+            for d, i, j in edges:
+                if i in used_c or j in used_d:
+                    continue
+                tentative[i] = j
+                used_c.add(i)
+                used_d.add(j)
+
+    if not tentative:
+        return empty
+
+    # --- local-pattern (asterism) verification ---
+    k_query = min(n_neighbors + 1, n_cat)
+    accepted_cat, accepted_det = [], []
+    for i, j in tentative.items():
+        _, idxs = cat_tree.query(cat_xy[i], k=k_query)
+        neighbors = [int(n) for n in np.atleast_1d(idxs)
+                     if int(n) != i and int(n) < n_cat]
+        paired = [n for n in neighbors if n in tentative]
+        if len(paired) < min_corroborating:
+            accepted_cat.append(i)
+            accepted_det.append(j)
+            continue
+        corro = 0
+        for n in paired:
+            jn = tentative[n]
+            pred_off = cat_xy[n] - cat_xy[i]
+            det_off = det_xy[jn] - det_xy[j]
+            if np.hypot(*(det_off - pred_off)) <= pattern_tol:
+                corro += 1
+        if corro >= min_corroborating:
+            accepted_cat.append(i)
+            accepted_det.append(j)
+
+    if not accepted_cat:
+        return empty
+    return hstack([Table(cat[accepted_cat]), Table(det[accepted_det])])
+
+
 def match_alcor_stars(cat, detections, init_params,
                       z_steps=(20.0, 40.0, 60.0, 75.0, 90.0), tolerance=12.0,
                       radius=ALCOR_RADIUS, horizon_radius=ALCOR_HORIZON_RADIUS):

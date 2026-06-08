@@ -191,9 +191,9 @@ def assign_alcor_matches(cat, det, params, tolerance,
     """
     Assign catalog stars to detected sources against a *fixed* geometry.
 
-    Unlike :func:`match_alcor_stars`, this never refits the geometry internally;
-    ``params`` (``xshift``, ``yshift``, ``rotation``, ``radial_coeffs``) are the
-    seed used for the whole frame. The steps are:
+    This never refits the geometry internally; ``params`` (``xshift``,
+    ``yshift``, ``rotation``, ``radial_coeffs``) are the fixed geometry used for
+    the whole frame. The steps are:
 
     1. Predict each catalog star's pixel ``(px, py)`` with :func:`_predict_pixels`
        and build a `~scipy.spatial.cKDTree` of detections and of predicted
@@ -220,8 +220,8 @@ def assign_alcor_matches(cat, det, params, tolerance,
        evidence to reject); crowded-region mispairs, which sit among well-matched
        neighbors yet break the constellation, are rejected.
 
-    Returns an ``hstack`` of the accepted catalog and detection rows (same column
-    contract as :func:`match_alcor_stars`); an empty table if nothing matches.
+    Returns an ``hstack`` of the accepted catalog and detection rows (catalog
+    columns then detection columns); an empty table if nothing matches.
     """
     px, py = _predict_pixels(
         cat["Alt"], cat["Az"], xshift=params["xshift"], yshift=params["yshift"],
@@ -345,64 +345,6 @@ def assign_alcor_matches(cat, det, params, tolerance,
     return hstack([Table(cat[accepted_cat]), Table(det[accepted_det])])
 
 
-def match_alcor_stars(cat, detections, init_params,
-                      z_steps=(20.0, 40.0, 60.0, 75.0, 90.0), tolerance=12.0,
-                      radius=ALCOR_RADIUS, horizon_radius=ALCOR_HORIZON_RADIUS):
-    """
-    Match catalog stars (with Alt/Az/Vmag columns) to detected sources by
-    bootstrapping outward from the zenith.
-
-    For each zenith-angle cutoff in ``z_steps`` the catalog stars within that
-    cutoff are projected to pixels with the current geometry parameters and
-    matched to the nearest detection within ``tolerance`` pixels. When multiple
-    catalog stars claim the same detection the brighter one (smaller Vmag) wins.
-    After each step the geometry is refit (:func:`_fit_params`) and the cutoff
-    expands. Returns a table of matched (catalog + detection) rows.
-    """
-    det_x = np.asarray(detections["xcentroid"], dtype=float)
-    det_y = np.asarray(detections["ycentroid"], dtype=float)
-    params = dict(init_params)
-
-    matched_idx = {}  # detection index -> (catalog row index, vmag)
-    cat_z = 90.0 - np.asarray(cat["Alt"], dtype=float)
-    vmag = np.asarray(cat["Vmag"], dtype=float)
-
-    for z_cut in z_steps:
-        within = np.where(cat_z <= z_cut)[0]
-        if within.size == 0:
-            continue
-        px, py = _predict_pixels(
-            cat["Alt"][within], cat["Az"][within],
-            xshift=params["xshift"], yshift=params["yshift"], rotation=params["rotation"],
-            radial_coeffs=tuple(params["radial_coeffs"]), radius=radius, horizon_radius=horizon_radius,
-        )
-        claims = {}  # detection index -> (cat row index, vmag, dist)
-        for cat_i, x, y in zip(within, np.atleast_1d(px), np.atleast_1d(py)):
-            d = np.hypot(det_x - x, det_y - y)
-            j = int(np.argmin(d))
-            if d[j] > tolerance:
-                continue
-            prev = claims.get(j)
-            if prev is None or vmag[cat_i] < prev[1]:
-                claims[j] = (cat_i, vmag[cat_i], d[j])
-        matched_idx = {j: (ci, vm) for j, (ci, vm, _) in claims.items()}
-        if len(matched_idx) >= 3:
-            cat_rows = [ci for ci, _ in matched_idx.values()]
-            det_rows = list(matched_idx.keys())
-            params = _fit_params(
-                cat["Alt"][cat_rows], cat["Az"][cat_rows],
-                det_x[det_rows], det_y[det_rows],
-                init_params=params, radius=radius, horizon_radius=horizon_radius,
-            )
-
-    if not matched_idx:
-        return hstack([Table(cat[[]]), Table(detections[[]])])
-    det_rows = list(matched_idx.keys())
-    cat_rows = [ci for ci, _ in matched_idx.values()]
-    out = hstack([Table(cat[cat_rows]), Table(detections[det_rows])])
-    return out
-
-
 def _frame_time(path):
     """Return the observation Time (UT) from a FITS file's DATE (creation) header.
 
@@ -421,13 +363,14 @@ def _detect_alcor_frame(task):
     when the frame is unusable ``cat``/``det`` are ``None`` and ``reason`` is a
     short human-readable string (too few detections or catalog stars).
     """
-    index, filename, vmag_limit, min_alt, fwhm, threshold_sigma = task
+    index, filename, vmag_limit, min_alt, fwhm, threshold_sigma, max_detections = task
     filename = Path(filename)
     time = _frame_time(filename)
     im, _ = load_alcor_fits(filename, rotation=0.0, xshift=0.0, yshift=0.0,
                             radial_coeffs=(1.0, 0.0, 0.0))
     cat = alcor_reference_altaz(time, vmag_limit=vmag_limit, min_alt=min_alt)
-    det = detect_alcor_stars(im, fwhm=fwhm, threshold_sigma=threshold_sigma)
+    det = detect_alcor_stars(im, fwhm=fwhm, threshold_sigma=threshold_sigma,
+                             max_detections=max_detections)
     if len(det) < 3:
         return index, None, None, f"no stars detected ({len(det)} < 3)"
     if len(cat) < 3:
@@ -435,20 +378,23 @@ def _detect_alcor_frame(task):
     return index, cat, det, None
 
 
-def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=3.0, sun_alt_max=-18.0,
-                  min_alt=10.0, tolerance=12.0, fwhm=3.0, threshold_sigma=5.0,
-                  z_steps=(20.0, 40.0, 60.0, 75.0, 90.0), max_frames=None,
+def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=4.0, sun_alt_max=-18.0,
+                  min_alt=10.0, tolerance=3.0, tolerance_start=12.0, match_rounds=4,
+                  fwhm=3.0, threshold_sigma=5.0, max_detections=200, max_frames=None,
                   workers=1, log=None):
     """
     Calibrate the alcor lens geometry by aggregating bright-star matches across
     all dark-sky frames in ``input_dir``.
 
     Frames are selected with :func:`select_dark_frames` (Sun below ``sun_alt_max``).
-    For each, stars (``Vmag <= vmag_limit``) are projected with the current
-    geometry, matched via :func:`match_alcor_stars`, and the matched
-    (Alt, Az, x, y) tuples are pooled. Matches are pooled and fit globally, then
-    frames are re-matched with the refined geometry and refit, and a final fit is
-    performed after 3*MAD outlier rejection.
+    Each frame's detections are capped to the brightest ``max_detections`` and
+    matched against the current geometry with :func:`assign_alcor_matches` (kd-tree
+    candidates, asterism pattern verification, local brightness tie-break). The
+    matcher never refits per frame; instead the whole night is pooled and fit once
+    per round under a single global geometry. The match tolerance tightens
+    geometrically over ``match_rounds`` rounds from ``tolerance_start`` down to
+    ``tolerance`` so that each round's better seed admits a cleaner pool. A final
+    pool at the tightest tolerance is fit after 3*MAD outlier rejection.
 
     The fit runs on a neutral (uncalibrated) frame -- loaded with no recentering,
     rotation, or radial distortion -- so the recovered (xshift, yshift, rotation,
@@ -458,8 +404,9 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=3.0, sun_alt_max=-
 
     Returns a dict with the fitted absolute parameters plus an ``epoch`` date
     string (the night's UT date, or the seed epoch when no frame can be timed),
-    ``n_matched``, ``residual_rms``, and per-match arrays (``alt``, ``az``,
-    ``x``, ``y``) for diagnostics.
+    ``n_matched``, ``residual_rms``, ``matched_fraction`` (matched stars divided by
+    the available catalog-star-frames, so contamination/coverage is visible), and
+    per-match arrays (``alt``, ``az``, ``x``, ``y``) for diagnostics.
 
     The per-frame load/detect/catalog work is the expensive part and is
     independent across frames, so it is parallelized: ``workers=1`` runs
@@ -505,7 +452,7 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=3.0, sun_alt_max=-
     # (cat, detections) per usable frame, kept in frame order for reproducible
     # pooling regardless of worker completion order.
     detected = [None] * len(dark)
-    tasks = [(index, f, vmag_limit, min_alt, fwhm, threshold_sigma)
+    tasks = [(index, f, vmag_limit, min_alt, fwhm, threshold_sigma, max_detections)
              for index, f in enumerate(dark)]
 
     def _store(result):
@@ -528,49 +475,48 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=3.0, sun_alt_max=-
                 _store(future.result())
 
     frames = [d for d in detected if d is not None]
+    available = sum(len(cat) for cat, _ in frames)
 
-    def pool(seed_params):
+    def pool(seed_params, tol):
         a, z, xs, ys = [], [], [], []
         for cat, det in frames:
-            matched = match_alcor_stars(cat, det, init_params=seed_params,
-                                        z_steps=z_steps, tolerance=tolerance)
+            matched = assign_alcor_matches(cat, det, params=seed_params, tolerance=tol)
             if len(matched) == 0:
                 continue
             a.append(np.asarray(matched["Alt"], dtype=float))
             z.append(np.asarray(matched["Az"], dtype=float))
             xs.append(np.asarray(matched["xcentroid"], dtype=float))
             ys.append(np.asarray(matched["ycentroid"], dtype=float))
-        return a, z, xs, ys
+        if not a:
+            return None
+        return (np.concatenate(a), np.concatenate(z),
+                np.concatenate(xs), np.concatenate(ys))
 
-    pooled_alt, pooled_az, pooled_x, pooled_y = pool(init)
-    if not pooled_alt:
+    # Tightening tolerance schedule: each round re-pools with the refined seed.
+    schedule = np.geomspace(tolerance_start, tolerance, match_rounds)
+    params = dict(init)
+    for tol in schedule:
+        pooled = pool(params, float(tol))
+        if pooled is None:
+            continue
+        alt, az, x, y = pooled
+        if len(alt) >= 3:
+            params = _fit_params(alt, az, x, y, init_params=params)
+
+    # Final pool at the tightest tolerance, then 3*MAD outlier rejection + refit.
+    pooled = pool(params, float(tolerance))
+    if pooled is None:
         raise RuntimeError("No matched stars across the selected frames.")
+    alt, az, x, y = pooled
 
-    alt = np.concatenate(pooled_alt)
-    az = np.concatenate(pooled_az)
-    x = np.concatenate(pooled_x)
-    y = np.concatenate(pooled_y)
-    params = _fit_params(alt, az, x, y, init_params=init)
-
-    # Re-match each frame seeded with the refined geometry. Frames whose
-    # zenith-bootstrap stalled from the cold start now converge, recovering
-    # additional matches before the final global fit.
-    pooled_alt, pooled_az, pooled_x, pooled_y = pool(params)
-    alt = np.concatenate(pooled_alt)
-    az = np.concatenate(pooled_az)
-    x = np.concatenate(pooled_x)
-    y = np.concatenate(pooled_y)
-
-    params = _fit_params(alt, az, x, y, init_params=params)
-
-    # Final residuals with outlier rejection at 3*MAD, then refit.
     px, py = _predict_pixels(alt, az, xshift=params["xshift"], yshift=params["yshift"],
                              rotation=params["rotation"],
                              radial_coeffs=tuple(params["radial_coeffs"]))
     resid = np.hypot(px - x, py - y)
     mad = np.median(np.abs(resid - np.median(resid))) + 1e-9
     good = resid < np.median(resid) + 3.0 * 1.4826 * mad
-    params = _fit_params(alt[good], az[good], x[good], y[good], init_params=params)
+    if good.sum() >= 3:
+        params = _fit_params(alt[good], az[good], x[good], y[good], init_params=params)
     px, py = _predict_pixels(alt[good], az[good], xshift=params["xshift"],
                              yshift=params["yshift"], rotation=params["rotation"],
                              radial_coeffs=tuple(params["radial_coeffs"]))
@@ -581,6 +527,7 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=3.0, sun_alt_max=-
         "epoch": epoch,
         "n_matched": int(good.sum()),
         "residual_rms": rms,
+        "matched_fraction": float(int(good.sum()) / available) if available else 0.0,
         "alt": alt[good], "az": az[good], "x": x[good], "y": y[good],
     }
 

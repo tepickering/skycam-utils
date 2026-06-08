@@ -28,7 +28,6 @@ from skycam_utils.alcor import (
     detect_alcor_stars,
     fit_alcor_wcs,
     load_alcor_fits,
-    match_alcor_stars,
     save_alcor_residual_plot,
     select_dark_frames,
 )
@@ -240,32 +239,6 @@ def test_alcor_reference_altaz_filters_and_refracts():
     assert a_refr >= a_none - 1e-6
 
 
-def _fake_detections(alt, az, params):
-    x, y = _predict_pixels(alt, az, **params)
-    return _Table({"xcentroid": np.asarray(x), "ycentroid": np.asarray(y),
-                   "flux": np.linspace(1000, 100, len(np.atleast_1d(x)))})
-
-
-def test_match_alcor_stars_recovers_correspondences():
-    alt = np.array([85.0, 70.0, 55.0, 40.0, 25.0, 10.0])
-    az = np.array([15.0, 80.0, 150.0, 210.0, 290.0, 340.0])
-    cat = _Table({"Alt": alt, "Az": az, "Vmag": np.linspace(0.5, 3.0, len(alt))})
-
-    true_params = dict(xshift=4.0, yshift=-3.0, rotation=0.6, radial_coeffs=(1.0, 0.03, 0.04))
-    det = _fake_detections(alt, az, true_params)
-
-    matched = match_alcor_stars(
-        cat, det,
-        init_params=dict(xshift=0.0, yshift=0.0, rotation=0.0, radial_coeffs=(1.0, 0.0, 0.0)),
-        z_steps=(20.0, 45.0, 70.0, 90.0), tolerance=12.0,
-    )
-    assert len(matched) >= 5
-    assert {"Alt", "Az", "xcentroid", "ycentroid"}.issubset(matched.colnames)
-    for row in matched:
-        ex, ey = _predict_pixels(row["Alt"], row["Az"], **true_params)
-        assert np.hypot(row["xcentroid"] - ex, row["ycentroid"] - ey) < 1e-6
-
-
 def _clean_frame(true_params, n=12, seed=0):
     """A catalog + detection pair with detections exactly at the true pixels."""
     rng = np.random.default_rng(seed)
@@ -439,6 +412,67 @@ def test_fit_alcor_wcs_aggregates_synthetic_frames(monkeypatch, tmp_path):
     assert result["n_matched"] >= 40
     assert result["residual_rms"] < 0.1
     assert result["epoch"] == "2024-09-05"
+
+
+def test_fit_alcor_wcs_survives_injected_mismatches(monkeypatch, tmp_path):
+    import skycam_utils.alcor as alcor_mod
+    from astropy.table import Table
+
+    true = dict(xshift=6.0, yshift=-5.0, rotation=0.8, radial_coeffs=(1.0, 0.04, 0.0))
+    rng = np.random.default_rng(5)
+
+    frame_alt = [rng.uniform(15.0, 85.0, 25), rng.uniform(15.0, 85.0, 25)]
+    frame_az = [rng.uniform(0.0, 360.0, 25), rng.uniform(0.0, 360.0, 25)]
+    files = [tmp_path / "2024_09_05__00_00_00.fits",
+             tmp_path / "2024_09_05__00_10_00.fits"]
+    for f in files:
+        f.write_bytes(b"stub")
+
+    def fake_select_dark_frames(fs, **kw):
+        return list(files)
+
+    calls = {"i": 0}
+
+    def fake_load_alcor_fits(path, **kw):
+        return np.zeros((2 * ALCOR_RADIUS, 2 * ALCOR_RADIUS, 3)), None
+
+    def fake_reference_altaz(time, **kw):
+        i = calls["i"]
+        return Table({"Alt": frame_alt[i], "Az": frame_az[i],
+                      "Vmag": rng.uniform(0.5, 3.5, 25), "HD": np.arange(25)})
+
+    def fake_detect(im, **kw):
+        i = calls["i"]
+        calls["i"] += 1
+        x, y = _predict_pixels(frame_alt[i], frame_az[i], **true)
+        # 10 spurious detections scattered across the frame (mismatches)
+        sx = rng.uniform(50, 2 * ALCOR_RADIUS - 50, 10)
+        sy = rng.uniform(50, 2 * ALCOR_RADIUS - 50, 10)
+        xx = np.append(np.asarray(x), sx)
+        yy = np.append(np.asarray(y), sy)
+        flux = np.append(rng.uniform(500, 2000, 25), rng.uniform(100, 400, 10))
+        return Table({"xcentroid": xx, "ycentroid": yy, "flux": flux})
+
+    def fake_frame_time(path):
+        return Time("2024-09-05T07:00:00", format="isot", scale="utc")
+
+    monkeypatch.setattr(alcor_mod, "select_dark_frames", fake_select_dark_frames)
+    monkeypatch.setattr(alcor_mod, "load_alcor_fits", fake_load_alcor_fits)
+    monkeypatch.setattr(alcor_mod, "alcor_reference_altaz", fake_reference_altaz)
+    monkeypatch.setattr(alcor_mod, "detect_alcor_stars", fake_detect)
+    monkeypatch.setattr(alcor_mod, "_frame_time", fake_frame_time)
+    monkeypatch.setattr(alcor_mod, "alcor_calibration",
+                        lambda time=None: {"epoch": "2024-09-05", "xshift": 0.0,
+                                           "yshift": 0.0, "rotation": 0.0,
+                                           "radial_coeffs": (1.0, 0.0, 0.0)})
+
+    result = fit_alcor_wcs(tmp_path, pattern="*.fits")
+    assert abs(result["xshift"] - 6.0) < 0.1
+    assert abs(result["yshift"] + 5.0) < 0.1
+    assert abs(result["rotation"] - 0.8) < 0.05
+    np.testing.assert_allclose(result["radial_coeffs"], (1.0, 0.04, 0.0), atol=3e-3)
+    assert result["residual_rms"] < 0.5
+    assert 0.0 < result["matched_fraction"] <= 1.0
 
 
 def test_fit_alcor_wcs_parallel_matches_serial(monkeypatch, tmp_path):

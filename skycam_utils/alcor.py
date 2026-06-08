@@ -24,7 +24,7 @@ from photutils.detection import DAOStarFinder
 
 import astropy.units as u
 import astropy.visualization as viz
-from astropy.coordinates import SkyCoord, AltAz, get_sun
+from astropy.coordinates import SkyCoord, AltAz, get_sun, get_body
 
 from .astrometry import MMT_LOCATION
 
@@ -399,6 +399,7 @@ def _detect_alcor_frame(task):
 
 
 def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=4.0, sun_alt_max=-18.0,
+                  moon_alt_max=-6.0,
                   min_alt=10.0, tolerance=3.0, tolerance_start=12.0, match_rounds=4,
                   n_neighbors=5, min_corroborating=2, pattern_tol=3.0,
                   fit_k5=False, fwhm=3.0, threshold_sigma=5.0, max_detections=200,
@@ -407,7 +408,9 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=4.0, sun_alt_max=-
     Calibrate the alcor lens geometry by aggregating bright-star matches across
     all dark-sky frames in ``input_dir``.
 
-    Frames are selected with :func:`select_dark_frames` (Sun below ``sun_alt_max``).
+    Frames are selected with :func:`select_dark_frames` (Sun below ``sun_alt_max``
+    and Moon below ``moon_alt_max``, since moonlight scatter corrupts source
+    detection).
     Each frame's detections are capped to the brightest ``max_detections`` and
     matched against the current geometry with :func:`assign_alcor_matches` (kd-tree
     candidates, asterism pattern verification, local brightness tie-break). The
@@ -438,19 +441,22 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=4.0, sun_alt_max=-
     serially, any larger value (or ``None`` for the process-pool default)
     distributes the frames over a `~concurrent.futures.ProcessPoolExecutor`.
     Pass a ``log`` callable (e.g. ``print``) to report each file's disposition:
-    frames skipped because the Sun is above ``sun_alt_max``, frames skipped
-    because no stars were detected, and frames used (with detected star count).
+    frames skipped because the Sun is above ``sun_alt_max`` or the Moon is above
+    ``moon_alt_max``, frames skipped because no stars were detected, and frames
+    used (with detected star count).
     """
     if workers is not None and workers < 1:
         raise ValueError("workers must be None or a positive integer")
     input_dir = Path(input_dir)
     files = sorted(input_dir.glob(pattern))
-    dark = select_dark_frames(files, sun_alt_max=sun_alt_max, log=log)
+    dark = select_dark_frames(files, sun_alt_max=sun_alt_max,
+                              moon_alt_max=moon_alt_max, log=log)
     if log is not None:
         dark_set = set(dark)
         for f in files:
             if f not in dark_set:
-                log(f"{Path(f).name}: skipped (Sun above {sun_alt_max:g} deg)")
+                log(f"{Path(f).name}: skipped "
+                    f"(Sun above {sun_alt_max:g} deg or Moon above {moon_alt_max:g} deg)")
     if max_frames is not None:
         dark = dark[:max_frames]
 
@@ -732,6 +738,19 @@ def _sun_altitude(time, location=MMT_LOCATION):
     return float(altaz.alt.deg)
 
 
+def _moon_altitude(time, location=MMT_LOCATION):
+    """Return the Moon's altitude in degrees at ``time`` and ``location``.
+
+    ``time`` must be a scalar `~astropy.time.Time` (the result is returned as a
+    Python float). The Moon's position is computed topocentrically (parallax is
+    ~1 deg, which matters near the rejection threshold). Use
+    :func:`select_dark_frames` for batched filtering.
+    """
+    moon = get_body("moon", time, location)
+    altaz = moon.transform_to(AltAz(obstime=time, location=location))
+    return float(altaz.alt.deg)
+
+
 # alcor filenames are YYYY_MM_DD__HH_MM_SS in local (MST) time.
 _FILENAME_TIME_RE = re.compile(r"(\d{4})_(\d{2})_(\d{2})__(\d{2})_(\d{2})_(\d{2})")
 # Arizona observes Mountain Standard Time year-round (no DST): UT = local + 7h.
@@ -773,10 +792,15 @@ def _alcor_frame_calibration(filename):
     return alcor_calibration(time)
 
 
-def select_dark_frames(files, sun_alt_max=-18.0, location=MMT_LOCATION, log=None):
+def select_dark_frames(files, sun_alt_max=-18.0, moon_alt_max=-6.0,
+                        location=MMT_LOCATION, log=None):
     """
-    Return the subset of ``files`` whose timestamp corresponds to a Sun altitude
-    below ``sun_alt_max`` (default -18 deg, astronomical twilight).
+    Return the subset of ``files`` whose timestamp corresponds to both the Sun
+    below ``sun_alt_max`` (default -18 deg, astronomical twilight) and the Moon
+    below ``moon_alt_max`` (default -6 deg). Moonlight scatter swamps the faint
+    bright-star field and corrupts source detection, so moonlit frames are
+    rejected even when the Sun is down. Pass ``moon_alt_max=90`` to disable the
+    Moon cut.
 
     The UT timestamp is parsed directly from each ``YYYY_MM_DD__HH_MM_SS``
     filename (local MST, so UT = local + 7h), which avoids opening every file in
@@ -788,7 +812,8 @@ def select_dark_frames(files, sun_alt_max=-18.0, location=MMT_LOCATION, log=None
     files = [Path(f) for f in files]
     n = len(files)
     if log is not None:
-        log(f"selecting dark frames from {n} files (Sun below {sun_alt_max:g} deg)...")
+        log(f"selecting dark frames from {n} files "
+            f"(Sun below {sun_alt_max:g} deg, Moon below {moon_alt_max:g} deg)...")
 
     dts = []
     for f in files:
@@ -799,10 +824,13 @@ def select_dark_frames(files, sun_alt_max=-18.0, location=MMT_LOCATION, log=None
         dts.append(dt)
 
     times = Time(dts, format="datetime", scale="utc")
-    altaz = get_sun(times).transform_to(AltAz(obstime=times, location=location))
-    keep = altaz.alt.deg < sun_alt_max
+    frame = AltAz(obstime=times, location=location)
+    sun_alt = get_sun(times).transform_to(frame).alt.deg
+    moon_alt = get_body("moon", times, location).transform_to(frame).alt.deg
+    keep = (sun_alt < sun_alt_max) & (moon_alt < moon_alt_max)
     if log is not None:
-        log(f"{int(keep.sum())} of {n} frames are dark (Sun below {sun_alt_max:g} deg)")
+        log(f"{int(keep.sum())} of {n} frames are dark "
+            f"(Sun below {sun_alt_max:g} deg, Moon below {moon_alt_max:g} deg)")
     return [f for f, k in zip(files, keep) if k]
 
 
@@ -1777,6 +1805,10 @@ def fit_alcor_wcs_cli():
     parser.add_argument("--vmag-limit", type=float, default=4.0, help="Faintest Vmag to use.")
     parser.add_argument("--sun-alt-max", type=float, default=-18.0,
                         help="Use frames with Sun altitude below this (deg).")
+    parser.add_argument("--moon-alt-max", type=float, default=-6.0,
+                        help="Use frames with Moon altitude below this (deg); "
+                             "moonlight scatter corrupts source detection. "
+                             "Pass 90 to disable the Moon cut.")
     parser.add_argument("--min-alt", type=float, default=10.0, help="Minimum star altitude (deg).")
     parser.add_argument("--tolerance", type=float, default=3.0,
                         help="Final (tightest) match tolerance in pixels; the matcher "
@@ -1810,7 +1842,8 @@ def fit_alcor_wcs_cli():
     log = None if args.quiet else (lambda message: print(message, file=sys.stderr))
     result = fit_alcor_wcs(
         args.input_dir, pattern=args.pattern, vmag_limit=args.vmag_limit,
-        sun_alt_max=args.sun_alt_max, min_alt=args.min_alt, tolerance=args.tolerance,
+        sun_alt_max=args.sun_alt_max, moon_alt_max=args.moon_alt_max,
+        min_alt=args.min_alt, tolerance=args.tolerance,
         tolerance_start=args.tolerance_start, match_rounds=args.match_rounds,
         n_neighbors=args.n_neighbors, min_corroborating=args.min_corroborating,
         pattern_tol=args.pattern_tol, fit_k5=args.fit_k5,

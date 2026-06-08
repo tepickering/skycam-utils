@@ -44,8 +44,8 @@ plot_alcor_fits <input.fits> [-o OUT.pdf] [--outimage RAW] [--gscale ...] ...
 #   Renders an annotated all-sky figure. Default output: <input>.pdf
 #   (extension drives the matplotlib backend).
 
-fit_alcor_wcs <night-dir> [--pattern ...] [--vmag-limit 4] [--tolerance 3] [--max-detections 200] [--residual-plot OUT.png] [--max-frames N] [--workers N] [--quiet]
-#   Aggregates bright-star matches across Sun<-18deg frames across a night and prints
+fit_alcor_wcs <night-dir> [--pattern ...] [--vmag-limit 4] [--tolerance 3] [--max-detections 200] [--sun-alt-max -18] [--moon-alt-max -6] [--residual-plot OUT.png] [--max-frames N] [--workers N] [--quiet]
+#   Aggregates bright-star matches across dark frames across a night and prints
 #   a ready-to-paste ALCOR_CALIBRATIONS epoch dict (absolute constants — center,
 #   rotation, radial k3 — stamped with the night date) to add to alcor.py and commit.
 #   Detections are capped to the brightest --max-detections per frame; matching is
@@ -54,8 +54,11 @@ fit_alcor_wcs <night-dir> [--pattern ...] [--vmag-limit 4] [--tolerance 3] [--ma
 #   tie-break for contested detections), with no per-frame geometry refit. The match
 #   tolerance tightens over several rounds from ~12px to --tolerance (~3px). Also
 #   prints the matched fraction so contamination/coverage is visible.
-#   Dark-frame selection parses the UT from each YYYY_MM_DD__HH_MM_SS filename (local
-#   MST = UT-7), so it never opens files; oddly-named files fall back to the DATE header.
+#   Dark-frame selection keeps frames with Sun < --sun-alt-max AND Moon < --moon-alt-max
+#   (-6deg default; moonlight scatter swamps the faint star field and corrupts detection;
+#   pass --moon-alt-max 90 to disable). It parses the UT from each YYYY_MM_DD__HH_MM_SS
+#   filename (local MST = UT-7), so it never opens files; oddly-named files fall back to
+#   the DATE header.
 #   Per-frame load/detect is parallelized across processes (--workers; default: one per core).
 #   Prints each file's disposition to stderr (Sun-rejected / no stars / used + count); --quiet silences it.
 ```

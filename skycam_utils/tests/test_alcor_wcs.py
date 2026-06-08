@@ -19,6 +19,7 @@ from skycam_utils.alcor import (
     ALCOR_RADIUS,
     ALCOR_RADIAL_COEFFS,
     _fit_params,
+    _moon_altitude,
     _predict_pixels,
     _sun_altitude,
     alcor_calibration,
@@ -76,6 +77,36 @@ def test_sun_altitude_night_vs_day():
     day = _sun_altitude(Time("2024-09-05T20:00:00", format="isot", scale="utc"))
     assert night < -18.0
     assert day > 18.0
+
+
+def test_moon_altitude_up_vs_down():
+    # 2026-05-18 04:00 UT at MMT: waning crescent still up (~ -2 deg).
+    up = _moon_altitude(Time("2026-05-18T04:00:00", format="isot", scale="utc"))
+    # one hour later it has set (~ -12 deg).
+    down = _moon_altitude(Time("2026-05-18T05:00:00", format="isot", scale="utc"))
+    assert up > -6.0
+    assert down < -6.0
+
+
+def test_select_dark_frames_rejects_moon_up(tmp_path):
+    from astropy.io import fits
+
+    def write(name, date_obs):
+        hdu = fits.PrimaryHDU(data=np.zeros((3, 4, 4), dtype=np.int16))
+        hdu.header["DATE"] = date_obs
+        path = tmp_path / name
+        hdu.writeto(path)
+        return path
+
+    # Both frames have the Sun well below -18 deg (astronomical night). They
+    # differ only in the Moon: at 04:00 UT it is still up (~ -2 deg), at 05:00 UT
+    # it has set (~ -12 deg), so only the moonless frame should survive.
+    moon_up = write("moonup.fits", "2026-05-18T04:00:00")
+    moonless = write("moonless.fits", "2026-05-18T05:00:00")
+
+    selected = select_dark_frames([moon_up, moonless], sun_alt_max=-18.0,
+                                  moon_alt_max=-6.0)
+    assert selected == [moonless]
 
 
 def test_select_dark_frames_filters_by_sun_altitude(tmp_path):

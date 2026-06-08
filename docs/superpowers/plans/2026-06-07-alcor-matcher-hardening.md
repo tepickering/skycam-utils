@@ -181,10 +181,11 @@ def test_assign_alcor_matches_recovers_clean_frame():
 def test_assign_alcor_matches_pattern_rejects_decoy():
     true = dict(xshift=4.0, yshift=-3.0, rotation=0.6, radial_coeffs=(1.0, 0.03, 0.0))
     cat, det, tx, ty = _clean_frame(true, n=12, seed=2)
-    # Plant a decoy detection near catalog star 0's predicted pixel, nearer than
-    # its true detection, but displaced so it breaks the local constellation.
-    decoy_x = tx[0] + 2.0
-    decoy_y = ty[0] + 2.0
+    # Plant a decoy detection near catalog star 0's predicted pixel: close enough
+    # to be the only candidate within tolerance (4.0 px), but displaced beyond
+    # pattern_tol (3.0 px) so it breaks the local constellation and is rejected.
+    decoy_x = tx[0] + 3.5
+    decoy_y = ty[0]
     det_x = np.asarray(det["xcentroid"], dtype=float)
     det_y = np.asarray(det["ycentroid"], dtype=float)
     # remove star 0's true detection so the decoy is the only candidate for it

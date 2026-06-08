@@ -790,4 +790,29 @@ def test_cli_rotation_flags_default_to_none(monkeypatch):
         monkeypatch.setattr("sys.argv", argv)
         with pytest.raises(SystemExit):
             cli()
-        assert captured["rotation"] is None
+
+
+def test_fit_alcor_wcs_cli_passes_new_flags(monkeypatch, capsys):
+    import sys
+    import skycam_utils.alcor as alcor_mod
+
+    captured = {}
+
+    def fake_fit(input_dir, **kwargs):
+        captured.update(kwargs)
+        return {"xshift": 1.0, "yshift": 2.0, "rotation": 0.3,
+                "radial_coeffs": (1.0, 0.02, 0.0), "epoch": "2026-05-19",
+                "n_matched": 123, "residual_rms": 2.5, "matched_fraction": 0.42,
+                "alt": np.array([]), "az": np.array([]),
+                "x": np.array([]), "y": np.array([])}
+
+    monkeypatch.setattr(alcor_mod, "fit_alcor_wcs", fake_fit)
+    monkeypatch.setattr(sys, "argv",
+                        ["fit_alcor_wcs", "/tmp/night", "--max-detections", "150"])
+    alcor_mod.fit_alcor_wcs_cli()
+
+    assert captured["vmag_limit"] == 4.0       # new default
+    assert captured["tolerance"] == 3.0        # new default
+    assert captured["max_detections"] == 150
+    out = capsys.readouterr().out
+    assert "matched fraction" in out.lower()

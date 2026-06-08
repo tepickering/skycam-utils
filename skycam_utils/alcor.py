@@ -1677,11 +1677,14 @@ def fit_alcor_wcs_cli():
     )
     parser.add_argument("input_dir", help="Directory containing alcor FITS images.")
     parser.add_argument("--pattern", default="*.fits.bz2", help="Glob pattern for input files.")
-    parser.add_argument("--vmag-limit", type=float, default=3.0, help="Faintest Vmag to use.")
+    parser.add_argument("--vmag-limit", type=float, default=4.0, help="Faintest Vmag to use.")
     parser.add_argument("--sun-alt-max", type=float, default=-18.0,
                         help="Use frames with Sun altitude below this (deg).")
     parser.add_argument("--min-alt", type=float, default=10.0, help="Minimum star altitude (deg).")
-    parser.add_argument("--tolerance", type=float, default=12.0, help="Match tolerance (pixels).")
+    parser.add_argument("--tolerance", type=float, default=3.0,
+                        help="Final (tightest) match tolerance (pixels).")
+    parser.add_argument("--max-detections", type=int, default=200,
+                        help="Keep only the brightest N detections per frame.")
     parser.add_argument("--max-frames", type=int, default=None, help="Cap number of frames used.")
     parser.add_argument("--workers", type=int, default=None,
                         help="Worker processes for per-frame detection "
@@ -1695,10 +1698,12 @@ def fit_alcor_wcs_cli():
     result = fit_alcor_wcs(
         args.input_dir, pattern=args.pattern, vmag_limit=args.vmag_limit,
         sun_alt_max=args.sun_alt_max, min_alt=args.min_alt, tolerance=args.tolerance,
-        max_frames=args.max_frames, workers=args.workers, log=log,
+        max_detections=args.max_detections, max_frames=args.max_frames,
+        workers=args.workers, log=log,
     )
     print(f"# matched stars: {result['n_matched']}")
     print(f"# residual RMS (pix): {result['residual_rms']:.3f}")
+    print(f"# matched fraction: {result['matched_fraction']:.3f}")
     print("# add this entry to ALCOR_CALIBRATIONS in alcor.py:")
     print(_format_calibration_entry(result))
     if args.residual_plot is not None:

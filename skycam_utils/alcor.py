@@ -1682,7 +1682,8 @@ def fit_alcor_wcs_cli():
                         help="Use frames with Sun altitude below this (deg).")
     parser.add_argument("--min-alt", type=float, default=10.0, help="Minimum star altitude (deg).")
     parser.add_argument("--tolerance", type=float, default=3.0,
-                        help="Final (tightest) match tolerance (pixels).")
+                        help="Final (tightest) match tolerance in pixels; the matcher "
+                             "tightens to this from ~12px over several rounds.")
     parser.add_argument("--max-detections", type=int, default=200,
                         help="Keep only the brightest N detections per frame.")
     parser.add_argument("--max-frames", type=int, default=None, help="Cap number of frames used.")

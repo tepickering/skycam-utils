@@ -808,11 +808,64 @@ def test_fit_alcor_wcs_cli_passes_new_flags(monkeypatch, capsys):
 
     monkeypatch.setattr(alcor_mod, "fit_alcor_wcs", fake_fit)
     monkeypatch.setattr(sys, "argv",
-                        ["fit_alcor_wcs", "/tmp/night", "--max-detections", "150"])
+                        ["fit_alcor_wcs", "/tmp/night", "--max-detections", "150",
+                         "--pattern-tol", "5", "--min-corroborating", "1",
+                         "--n-neighbors", "8", "--tolerance", "6",
+                         "--tolerance-start", "15", "--match-rounds", "3"])
     alcor_mod.fit_alcor_wcs_cli()
 
     assert captured["vmag_limit"] == 4.0       # new default
-    assert captured["tolerance"] == 3.0        # new default
+    assert captured["tolerance"] == 6.0
     assert captured["max_detections"] == 150
+    assert captured["pattern_tol"] == 5.0
+    assert captured["min_corroborating"] == 1
+    assert captured["n_neighbors"] == 8
+    assert captured["tolerance_start"] == 15.0
+    assert captured["match_rounds"] == 3
     out = capsys.readouterr().out
     assert "matched fraction" in out.lower()
+
+
+def test_fit_alcor_wcs_forwards_matcher_knobs(monkeypatch, tmp_path):
+    """fit_alcor_wcs must thread the asterism knobs into assign_alcor_matches."""
+    import skycam_utils.alcor as alcor_mod
+    from astropy.table import Table, hstack
+
+    files = [tmp_path / "2024_09_05__00_00_00.fits"]
+    files[0].write_bytes(b"stub")
+    alt = np.array([60.0, 50.0, 40.0, 30.0])
+    az = np.array([10.0, 100.0, 200.0, 300.0])
+    x, y = _predict_pixels(alt, az, xshift=0.0, yshift=0.0, rotation=0.0,
+                           radial_coeffs=(1.0, 0.0, 0.0))
+
+    monkeypatch.setattr(alcor_mod, "select_dark_frames", lambda fs, **kw: list(files))
+    monkeypatch.setattr(alcor_mod, "load_alcor_fits",
+                        lambda p, **kw: (np.zeros((2 * ALCOR_RADIUS, 2 * ALCOR_RADIUS, 3)), None))
+    monkeypatch.setattr(alcor_mod, "alcor_reference_altaz",
+                        lambda t, **kw: Table({"Alt": alt, "Az": az,
+                                               "Vmag": [1.0, 2.0, 3.0, 4.0],
+                                               "HD": np.arange(4)}))
+    monkeypatch.setattr(alcor_mod, "detect_alcor_stars",
+                        lambda im, **kw: Table({"xcentroid": np.asarray(x),
+                                                "ycentroid": np.asarray(y),
+                                                "flux": [4.0, 3.0, 2.0, 1.0]}))
+    monkeypatch.setattr(alcor_mod, "_frame_time",
+                        lambda p: Time("2024-09-05T07:00:00", format="isot", scale="utc"))
+    monkeypatch.setattr(alcor_mod, "alcor_calibration",
+                        lambda time=None: {"epoch": "2024-09-05", "xshift": 0.0,
+                                           "yshift": 0.0, "rotation": 0.0,
+                                           "radial_coeffs": (1.0, 0.0, 0.0)})
+
+    seen = {}
+
+    def fake_assign(cat, det, params, tolerance, **kw):
+        seen.update(kw)
+        return hstack([Table(cat), Table(det)])
+
+    monkeypatch.setattr(alcor_mod, "assign_alcor_matches", fake_assign)
+
+    fit_alcor_wcs(tmp_path, pattern="*.fits",
+                  n_neighbors=8, min_corroborating=1, pattern_tol=4.5)
+    assert seen["n_neighbors"] == 8
+    assert seen["min_corroborating"] == 1
+    assert seen["pattern_tol"] == 4.5

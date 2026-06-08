@@ -380,6 +380,7 @@ def _detect_alcor_frame(task):
 
 def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=4.0, sun_alt_max=-18.0,
                   min_alt=10.0, tolerance=3.0, tolerance_start=12.0, match_rounds=4,
+                  n_neighbors=5, min_corroborating=2, pattern_tol=3.0,
                   fwhm=3.0, threshold_sigma=5.0, max_detections=200, max_frames=None,
                   workers=1, log=None):
     """
@@ -394,7 +395,11 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=4.0, sun_alt_max=-
     per round under a single global geometry. The match tolerance tightens
     geometrically over ``match_rounds`` rounds from ``tolerance_start`` down to
     ``tolerance`` so that each round's better seed admits a cleaner pool. A final
-    pool at the tightest tolerance is fit after 3*MAD outlier rejection.
+    pool at the tightest tolerance is fit after 3*MAD outlier rejection. The
+    matcher's asterism knobs (``n_neighbors``, ``min_corroborating``,
+    ``pattern_tol``) are forwarded to :func:`assign_alcor_matches`; loosening
+    ``pattern_tol``/``tolerance`` recovers more (and higher-residual) matches when
+    the seed geometry leaves real distortion unmodeled.
 
     The fit runs on a neutral (uncalibrated) frame -- loaded with no recentering,
     rotation, or radial distortion -- so the recovered (xshift, yshift, rotation,
@@ -480,7 +485,10 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=4.0, sun_alt_max=-
     def pool(seed_params, tol):
         a, z, xs, ys = [], [], [], []
         for cat, det in frames:
-            matched = assign_alcor_matches(cat, det, params=seed_params, tolerance=tol)
+            matched = assign_alcor_matches(cat, det, params=seed_params, tolerance=tol,
+                                           n_neighbors=n_neighbors,
+                                           min_corroborating=min_corroborating,
+                                           pattern_tol=pattern_tol)
             if len(matched) == 0:
                 continue
             a.append(np.asarray(matched["Alt"], dtype=float))
@@ -1683,7 +1691,19 @@ def fit_alcor_wcs_cli():
     parser.add_argument("--min-alt", type=float, default=10.0, help="Minimum star altitude (deg).")
     parser.add_argument("--tolerance", type=float, default=3.0,
                         help="Final (tightest) match tolerance in pixels; the matcher "
-                             "tightens to this from ~12px over several rounds.")
+                             "tightens to this from --tolerance-start over --match-rounds rounds.")
+    parser.add_argument("--tolerance-start", type=float, default=12.0,
+                        help="Initial (loosest) match tolerance in pixels.")
+    parser.add_argument("--match-rounds", type=int, default=4,
+                        help="Number of tightening rounds from --tolerance-start to --tolerance.")
+    parser.add_argument("--pattern-tol", type=float, default=3.0,
+                        help="Asterism corroboration tolerance in pixels: how closely a "
+                             "neighbor's offset must match the local constellation. Loosen "
+                             "to keep matches where real distortion bends the local pattern.")
+    parser.add_argument("--min-corroborating", type=int, default=2,
+                        help="Minimum neighbors that must corroborate a match's local pattern.")
+    parser.add_argument("--n-neighbors", type=int, default=5,
+                        help="Nearest catalog neighbors checked in asterism verification.")
     parser.add_argument("--max-detections", type=int, default=200,
                         help="Keep only the brightest N detections per frame.")
     parser.add_argument("--max-frames", type=int, default=None, help="Cap number of frames used.")
@@ -1699,8 +1719,10 @@ def fit_alcor_wcs_cli():
     result = fit_alcor_wcs(
         args.input_dir, pattern=args.pattern, vmag_limit=args.vmag_limit,
         sun_alt_max=args.sun_alt_max, min_alt=args.min_alt, tolerance=args.tolerance,
-        max_detections=args.max_detections, max_frames=args.max_frames,
-        workers=args.workers, log=log,
+        tolerance_start=args.tolerance_start, match_rounds=args.match_rounds,
+        n_neighbors=args.n_neighbors, min_corroborating=args.min_corroborating,
+        pattern_tol=args.pattern_tol, max_detections=args.max_detections,
+        max_frames=args.max_frames, workers=args.workers, log=log,
     )
     print(f"# matched stars: {result['n_matched']}")
     print(f"# residual RMS (pix): {result['residual_rms']:.3f}")

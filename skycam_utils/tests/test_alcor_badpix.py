@@ -31,3 +31,27 @@ def test_build_badpix_mask_channel_multiplicity():
     assert not mask[:, 12, 12].any()
     # nothing else flagged
     assert mask.sum() == 3
+
+
+def _write_fake_frame(path, cube):
+    fits.PrimaryHDU(data=cube.astype(np.int16)).writeto(path, overwrite=True)
+
+
+def test_build_median_stack_rejects_outliers(tmp_path):
+    from skycam_utils.alcor import build_alcor_median_stack
+    # 5 frames, shape (3, 4, 4); pixel (0,0,0) has an outlier in one frame
+    base = np.full((3, 4, 4), 10, dtype=np.int16)
+    files = []
+    for i, val in enumerate([10, 10, 10, 10, 1000]):
+        frame = base.copy()
+        frame[0, 0, 0] = val
+        p = tmp_path / f"f{i}.fits"
+        _write_fake_frame(p, frame)
+        files.append(p)
+
+    median = build_alcor_median_stack(files, scratch_dir=str(tmp_path))
+
+    assert median.shape == (3, 4, 4)
+    assert median.dtype == np.float32
+    assert median[0, 0, 0] == 10.0          # outlier rejected
+    assert median[1, 2, 3] == 10.0          # unchanged elsewhere

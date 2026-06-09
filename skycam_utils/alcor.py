@@ -1036,6 +1036,65 @@ def build_alcor_badpix_mask(median_cube, ksize=5, z_thresh=25.0):
     return hot & keep[None, :, :]
 
 
+def build_alcor_median_stack(dark_files, max_frames=None, scratch_dir=None,
+                             tile=50, log=None):
+    """
+    Per-pixel median over a set of raw alcor frames, trail-free for hot-pixel
+    detection.
+
+    RAM-bounded: each frame's ``(3, ny, nx)`` uint16 cube is written to a disk
+    memmap (in ``scratch_dir``), then the median is taken in row tiles so peak
+    memory stays small even for ~1000 frames. Frames whose shape differs from the
+    first are skipped. ``max_frames`` strided-subsamples to cap runtime/scratch.
+
+    Returns the median as ``(3, ny, nx)`` float32.
+    """
+    files_ = list(dark_files)
+    if max_frames is not None and len(files_) > max_frames:
+        stride = len(files_) // max_frames
+        files_ = files_[::stride][:max_frames]
+    if not files_:
+        raise ValueError("no frames provided")
+
+    with fits.open(files_[0]) as hdul:
+        shp = np.asarray(hdul[0].data).shape       # (3, ny, nx)
+    nch, ny, nx = shp
+
+    tmp = tempfile.NamedTemporaryFile(
+        prefix="alcor_stack_", suffix=".dat",
+        dir=scratch_dir or tempfile.gettempdir(), delete=False)
+    tmp.close()
+    memmap_path = Path(tmp.name)
+    cube_mm = None
+    try:
+        cube_mm = np.memmap(memmap_path, dtype=np.uint16, mode="w+",
+                            shape=(len(files_), nch, ny, nx))
+        n = 0
+        for f in files_:
+            with fits.open(f) as hdul:
+                data = np.asarray(hdul[0].data)
+            if data.shape != shp:
+                if log:
+                    log(f"skip {Path(f).name}: shape {data.shape}")
+                continue
+            cube_mm[n] = np.clip(data, 0, 65535).astype(np.uint16)
+            n += 1
+        cube_mm.flush()
+        if n == 0:
+            raise ValueError("no frames matched the reference shape")
+
+        median = np.empty((nch, ny, nx), dtype=np.float32)
+        for c in range(nch):
+            for r0 in range(0, ny, tile):
+                r1 = min(r0 + tile, ny)
+                slab = np.asarray(cube_mm[:n, c, r0:r1, :], dtype=np.float32)
+                median[c, r0:r1, :] = np.median(slab, axis=0)
+        return median
+    finally:
+        del cube_mm
+        memmap_path.unlink(missing_ok=True)
+
+
 ALCOR_PRESSURE = 760 * u.hPa        # ~0.75 atm at the MMT 2600 m elevation
 ALCOR_TEMPERATURE = 10 * u.deg_C
 ALCOR_HUMIDITY = 0.2

@@ -55,3 +55,22 @@ def test_build_median_stack_rejects_outliers(tmp_path):
     assert median.dtype == np.float32
     assert median[0, 0, 0] == 10.0          # outlier rejected
     assert median[1, 2, 3] == 10.0          # unchanged elsewhere
+
+
+def test_load_badpix_mask_nearest_date(tmp_path):
+    from skycam_utils.alcor import load_alcor_badpix_mask
+    early = (np.zeros((3, 4, 4), dtype=np.uint8))
+    late = (np.ones((3, 4, 4), dtype=np.uint8))
+    fits.PrimaryHDU(data=early).writeto(tmp_path / "alcor_badpix_2026-05-10.fits.gz")
+    fits.PrimaryHDU(data=late).writeto(tmp_path / "alcor_badpix_2026-05-18.fits.gz")
+
+    mask, mdate = load_alcor_badpix_mask(Time("2026-05-17T00:00:00"), masks_dir=str(tmp_path))
+    assert mdate == date(2026, 5, 18)
+    assert mask.dtype == bool
+    assert mask.all()                          # picked the 'late' (all ones) mask
+
+
+def test_load_badpix_mask_empty_dir(tmp_path):
+    from skycam_utils.alcor import load_alcor_badpix_mask
+    mask, mdate = load_alcor_badpix_mask(Time("2026-05-17T00:00:00"), masks_dir=str(tmp_path))
+    assert mask is None and mdate is None

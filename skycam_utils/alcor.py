@@ -1095,6 +1095,65 @@ def build_alcor_median_stack(dark_files, max_frames=None, scratch_dir=None,
         memmap_path.unlink(missing_ok=True)
 
 
+_BADPIX_DATE_RE = re.compile(r"alcor_badpix_(\d{4})-(\d{2})-(\d{2})\.fits")
+
+
+def _resolve_badpix_dir(masks_dir=None):
+    """Directory holding the date-stamped bad-pixel masks.
+
+    Resolution order: explicit ``masks_dir`` -> ``$ALCOR_BADPIX_DIR`` -> the
+    packaged ``skycam_utils/data/badpix/`` (mirroring :func:`load_wcs`).
+    """
+    if masks_dir is not None:
+        return Path(masks_dir)
+    env = os.environ.get("ALCOR_BADPIX_DIR")
+    if env:
+        return Path(env)
+    return Path(str(files(__package__) / "data" / "badpix"))
+
+
+def _badpix_date_from_dir(day_dir, dark_files):
+    """Mask date: the ``YYYY-MM-DD`` in the day-directory name, else the median
+    dark-frame time's date."""
+    match = re.search(r"(\d{4})-(\d{2})-(\d{2})", Path(day_dir).name)
+    if match:
+        return date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+    dts = sorted(d for d in (_filename_ut_datetime(f) for f in dark_files)
+                 if d is not None)
+    return dts[len(dts) // 2].date()
+
+
+def load_alcor_badpix_mask(time, masks_dir=None):
+    """
+    Return ``(mask, date)`` for the bad-pixel mask nearest in date to ``time``.
+
+    ``mask`` is a ``(3, ny, nx)`` bool array; ``(None, None)`` if no masks are
+    found. ``time`` may be a `~astropy.time.Time`, ``datetime``, or ``date``.
+    """
+    directory = Path(str(_resolve_badpix_dir(masks_dir)))
+    if not directory.is_dir():
+        return None, None
+    candidates = []
+    for p in directory.iterdir():
+        m = _BADPIX_DATE_RE.match(p.name)
+        if m:
+            candidates.append(
+                (date(int(m.group(1)), int(m.group(2)), int(m.group(3))), p))
+    if not candidates:
+        return None, None
+
+    if isinstance(time, Time):
+        target = time.to_datetime().date()
+    elif isinstance(time, datetime):
+        target = time.date()
+    else:
+        target = time
+    best_date, best_path = min(candidates,
+                               key=lambda dp: abs((dp[0] - target).days))
+    mask = np.asarray(fits.getdata(best_path)).astype(bool)
+    return mask, best_date
+
+
 ALCOR_PRESSURE = 760 * u.hPa        # ~0.75 atm at the MMT 2600 m elevation
 ALCOR_TEMPERATURE = 10 * u.deg_C
 ALCOR_HUMIDITY = 0.2

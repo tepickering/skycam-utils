@@ -1,13 +1,16 @@
 import argparse
+import os
 import re
 import sys
+import tempfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import datetime, date, timedelta
 from functools import lru_cache
 from importlib.resources import files
 from pathlib import Path
 
 import numpy as np
+from scipy.ndimage import median_filter
 from scipy.ndimage import rotate
 from scipy.optimize import least_squares
 from scipy.ndimage import shift as ndimage_shift
@@ -992,6 +995,45 @@ def detect_alcor_stars(im, fwhm=3.0, threshold_sigma=5.0, max_detections=200):
         order = np.argsort(np.asarray(out["flux"], dtype=float))[::-1]
         out = out[order[:max_detections]]
     return out
+
+
+def build_alcor_badpix_mask(median_cube, ksize=5, z_thresh=25.0):
+    """
+    Detect per-channel hot pixels in a night-median stack.
+
+    For each channel a small-kernel median high-pass isolates sharp spikes:
+    ``resid = img - median_filter(img, ksize)``; a pixel is hot where its robust
+    z-score ``(resid - median) / (1.4826 * MAD)`` exceeds ``z_thresh``. A spike is
+    a sensor defect only if it fires in AT MOST TWO channels -- one present in all
+    three is a real broadband source and is excluded from every plane.
+
+    Parameters
+    ----------
+    median_cube : ndarray
+        Per-pixel median stack of shape ``(3, ny, nx)`` (see
+        :func:`build_alcor_median_stack`).
+    ksize : int (default=5)
+        Local-background median-filter kernel (pixels).
+    z_thresh : float (default=25.0)
+        Robust-sigma threshold for a hot pixel.
+
+    Returns
+    -------
+    mask : ndarray of bool, shape ``(3, ny, nx)``
+        True where a pixel is a per-channel bad pixel.
+    """
+    cube = np.asarray(median_cube, dtype=float)
+    if cube.ndim != 3 or cube.shape[0] != 3:
+        raise ValueError(f"expected a (3, ny, nx) cube, got {cube.shape}")
+    z = np.empty_like(cube)
+    for c in range(3):
+        resid = cube[c] - median_filter(cube[c], size=ksize)
+        med = np.median(resid)
+        sigma = 1.4826 * np.median(np.abs(resid - med)) + 1e-9
+        z[c] = (resid - med) / sigma
+    hot = z > z_thresh
+    keep = hot.sum(axis=0) <= 2
+    return hot & keep[None, :, :]
 
 
 ALCOR_PRESSURE = 760 * u.hPa        # ~0.75 atm at the MMT 2600 m elevation

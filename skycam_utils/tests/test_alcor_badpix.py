@@ -74,3 +74,17 @@ def test_load_badpix_mask_empty_dir(tmp_path):
     from skycam_utils.alcor import load_alcor_badpix_mask
     mask, mdate = load_alcor_badpix_mask(Time("2026-05-17T00:00:00"), masks_dir=str(tmp_path))
     assert mask is None and mdate is None
+
+
+def test_load_badpix_mask_tie_breaks_to_earlier(tmp_path):
+    from skycam_utils.alcor import load_alcor_badpix_mask
+    # two masks equidistant from the query date -> earlier date wins, deterministically
+    fits.PrimaryHDU(data=np.zeros((3, 4, 4), dtype=np.uint8)).writeto(
+        tmp_path / "alcor_badpix_2026-05-10.fits.gz")
+    fits.PrimaryHDU(data=np.ones((3, 4, 4), dtype=np.uint8)).writeto(
+        tmp_path / "alcor_badpix_2026-05-20.fits.gz")
+    # also drop a non-mask file that must be ignored by the anchored regex
+    (tmp_path / "alcor_badpix_2026-05-10.fits.bak").write_bytes(b"junk")
+    mask, mdate = load_alcor_badpix_mask(Time("2026-05-15T00:00:00"), masks_dir=str(tmp_path))
+    assert mdate == date(2026, 5, 10)      # equidistant tie -> earlier date
+    assert not mask.any()                  # the 'early' all-zeros mask

@@ -1095,7 +1095,7 @@ def build_alcor_median_stack(dark_files, max_frames=None, scratch_dir=None,
         memmap_path.unlink(missing_ok=True)
 
 
-_BADPIX_DATE_RE = re.compile(r"alcor_badpix_(\d{4})-(\d{2})-(\d{2})\.fits")
+_BADPIX_DATE_RE = re.compile(r"alcor_badpix_(\d{4})-(\d{2})-(\d{2})\.fits(\.gz)?$")
 
 
 def _resolve_badpix_dir(masks_dir=None):
@@ -1149,7 +1149,7 @@ def load_alcor_badpix_mask(time, masks_dir=None):
     else:
         target = time
     best_date, best_path = min(candidates,
-                               key=lambda dp: abs((dp[0] - target).days))
+                               key=lambda dp: (abs((dp[0] - target).days), dp[0]))
     mask = np.asarray(fits.getdata(best_path)).astype(bool)
     return mask, best_date
 

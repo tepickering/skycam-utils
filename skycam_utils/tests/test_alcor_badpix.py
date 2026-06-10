@@ -159,3 +159,65 @@ def test_create_badpix_mask_min_frames_gate(tmp_path, monkeypatch):
     out = alcor.create_badpix_mask(day, out_dir=str(tmp_path), min_frames=500)
     assert out is None                          # below the gate: nothing written
     assert not list(tmp_path.glob("alcor_badpix_*.fits.gz"))
+
+
+def test_load_alcor_fits_resolves_epoch_mask(tmp_path):
+    # the production path: default badpix="repair" resolves the nearest-date mask
+    # from masks_dir by the frame's filename timestamp, then repairs.
+    from skycam_utils.alcor import load_alcor_fits
+    ny = nx = 60
+    cube = np.full((3, ny, nx), 2100, dtype=np.int16)
+    cube[0, 30, 30] = 30000                          # hot pixel in R at center
+    raw = tmp_path / "2026_05_18__01_00_00.fits"     # parseable MST timestamp
+    fits.PrimaryHDU(data=cube).writeto(raw)
+
+    masks = tmp_path / "masks"
+    masks.mkdir()
+    mask = np.zeros((3, ny, nx), dtype=np.uint8)
+    mask[0, 30, 30] = 1
+    fits.PrimaryHDU(data=mask).writeto(masks / "alcor_badpix_2026-05-18.fits.gz")
+
+    # default badpix="repair"; resolution by frame time against masks_dir
+    im, wcs = load_alcor_fits(
+        raw, xcen=30, ycen=30, radius=25, horizon_radius=25,
+        rotation=0.0, xshift=0.0, yshift=0.0, radial_coeffs=(1.0, 0.0, 0.0),
+        masks_dir=str(masks))
+    assert im.max() < 1000          # epoch mask was resolved and the spike repaired
+
+
+def test_create_badpix_mask_writes_and_resolves(tmp_path, monkeypatch):
+    from skycam_utils import alcor
+    day = tmp_path / "2026-07-01"
+    day.mkdir()
+    ny = nx = 8
+    frames = []
+    for i in range(4):
+        cube = np.full((3, ny, nx), 100, dtype=np.int16)
+        cube[0, 4, 4] = 10000                         # persistent 1-channel hot pixel
+        p = day / f"2026_07_01__0{i}_00_00.fits.bz2"
+        fits.PrimaryHDU(data=cube).writeto(p)
+        frames.append(p)
+    # bypass ephemeris: treat all frames as dark
+    monkeypatch.setattr(alcor, "select_dark_frames", lambda files, **kw: list(files))
+
+    out = alcor.create_badpix_mask(day, out_dir=str(tmp_path), min_frames=1,
+                                   scratch_dir=str(tmp_path))
+    assert out is not None
+    assert out.name == "alcor_badpix_2026-07-01.fits.gz"
+    hdr = fits.getheader(out)
+    for key in ("NSTACK", "ZTHRESH", "KSIZE", "CHRULE", "NBADR"):
+        assert key in hdr
+    assert hdr["NSTACK"] == 4
+    # round-trip: the written mask resolves and flags the hot pixel in R
+    m, d = alcor.load_alcor_badpix_mask(Time("2026-07-01T12:00:00"), masks_dir=str(tmp_path))
+    assert d == date(2026, 7, 1)
+    assert m[0, 4, 4] and not m[1, 4, 4] and not m[2, 4, 4]
+
+
+def test_badpix_date_from_dir_raises_when_undeterminable(tmp_path):
+    from skycam_utils.alcor import _badpix_date_from_dir
+    # dir name has no YYYY-MM-DD and the "frame" name doesn't parse as a timestamp
+    bad = tmp_path / "nightly"
+    bad.mkdir()
+    with pytest.raises(ValueError, match="cannot determine mask date"):
+        _badpix_date_from_dir(bad, [bad / "not_a_timestamp.fits.bz2"])

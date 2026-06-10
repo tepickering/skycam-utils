@@ -1120,6 +1120,10 @@ def _badpix_date_from_dir(day_dir, dark_files):
         return date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
     dts = sorted(d for d in (_filename_ut_datetime(f) for f in dark_files)
                  if d is not None)
+    if not dts:
+        raise ValueError(
+            f"cannot determine mask date: directory name {Path(day_dir).name!r} "
+            "has no YYYY-MM-DD and no frame timestamps could be parsed")
     return dts[len(dts) // 2].date()
 
 

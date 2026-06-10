@@ -2087,3 +2087,88 @@ def fit_alcor_wcs_cli():
         out = save_alcor_residual_plot(result["alt"], result["az"], result["x"],
                                        result["y"], result, args.residual_plot)
         print(out)
+
+
+def create_badpix_mask(day_dir, out_dir=None, min_frames=500, z_thresh=25.0,
+                        ksize=5, sun_alt_max=-18.0, moon_alt_max=-6.0,
+                        max_frames=None, scratch_dir=None, pattern="*.fits.bz2",
+                        log=None):
+    """
+    Build and write a date-stamped per-channel bad-pixel mask for one night.
+
+    Selects dark frames (Sun < ``sun_alt_max``, Moon < ``moon_alt_max``), and if
+    at least ``min_frames`` are available builds the night-median stack, detects
+    hot pixels, and writes a gzipped ``alcor_badpix_YYYY-MM-DD.fits.gz`` to
+    ``out_dir`` (default: the resolved bad-pixel masks directory). Returns the
+    output `~pathlib.Path`, or ``None`` if there were too few dark frames.
+    """
+    day_dir = Path(day_dir)
+    frames = sorted(day_dir.glob(pattern))
+    dark = select_dark_frames(frames, sun_alt_max=sun_alt_max,
+                              moon_alt_max=moon_alt_max, log=None)
+    if log:
+        log(f"{len(dark)} dark frames of {len(frames)}")
+    if len(dark) < min_frames:
+        if log:
+            log(f"only {len(dark)} dark frames (< {min_frames}); no mask written")
+        return None
+
+    median = build_alcor_median_stack(dark, max_frames=max_frames,
+                                      scratch_dir=scratch_dir, log=log)
+    mask = build_alcor_badpix_mask(median, ksize=ksize, z_thresh=z_thresh)
+    mask_date = _badpix_date_from_dir(day_dir, dark)
+
+    out_dir = Path(str(out_dir)) if out_dir is not None else _resolve_badpix_dir()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"alcor_badpix_{mask_date.isoformat()}.fits.gz"
+
+    hdu = fits.PrimaryHDU(data=mask.astype(np.uint8))
+    hdu.header["NSTACK"] = (len(dark), "dark frames used")
+    hdu.header["ZTHRESH"] = (z_thresh, "robust-sigma threshold")
+    hdu.header["KSIZE"] = (ksize, "high-pass kernel (px)")
+    hdu.header["CHRULE"] = ("1-2 of 3", "channels flagged for a bad pixel")
+    for c, name in enumerate("RGB"):
+        hdu.header[f"NBAD{name}"] = (int(mask[c].sum()), f"{name} bad pixels")
+    hdu.writeto(out_path, overwrite=True)
+    if log:
+        log(f"wrote {out_path}")
+    return out_path
+
+
+def create_badpix_mask_cli():
+    """CLI entry point for :func:`create_badpix_mask` (run daily from cron)."""
+    parser = argparse.ArgumentParser(
+        description="Build a date-stamped alcor bad-pixel mask from a night of frames.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("day_dir", help="Directory of one night's alcor frames.")
+    parser.add_argument("--out-dir", default=None,
+                        help="Output directory (default: $ALCOR_BADPIX_DIR or packaged data/badpix).")
+    parser.add_argument("--min-frames", type=int, default=500,
+                        help="Minimum dark frames required to generate a mask.")
+    parser.add_argument("--z-thresh", type=float, default=25.0,
+                        help="Robust-sigma threshold for a hot pixel.")
+    parser.add_argument("--ksize", type=int, default=5, help="High-pass median kernel (px).")
+    parser.add_argument("--sun-alt-max", type=float, default=-18.0,
+                        help="Use frames with Sun altitude below this (deg).")
+    parser.add_argument("--moon-alt-max", type=float, default=-6.0,
+                        help="Use frames with Moon altitude below this (deg); pass 90 to disable.")
+    parser.add_argument("--max-frames", type=int, default=None,
+                        help="Cap frames used (strided) to bound runtime/scratch.")
+    parser.add_argument("--scratch-dir", default=None,
+                        help="Directory for the temporary memmap (default: system temp).")
+    parser.add_argument("--pattern", default="*.fits.bz2", help="Glob for input frames.")
+    parser.add_argument("--quiet", action="store_true",
+                        help="Do not print per-step progress messages.")
+    args = parser.parse_args()
+
+    log = None if args.quiet else (lambda message: print(message, file=sys.stderr))
+    out = create_badpix_mask(
+        args.day_dir, out_dir=args.out_dir, min_frames=args.min_frames,
+        z_thresh=args.z_thresh, ksize=args.ksize, sun_alt_max=args.sun_alt_max,
+        moon_alt_max=args.moon_alt_max, max_frames=args.max_frames,
+        scratch_dir=args.scratch_dir, pattern=args.pattern, log=log)
+    if out is None:
+        print("# no mask written (insufficient dark frames)")
+    else:
+        print(out)

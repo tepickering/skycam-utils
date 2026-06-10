@@ -144,3 +144,18 @@ def test_load_alcor_fits_default_two_tuple(tmp_path):
         rotation=0.0, xshift=0.0, yshift=0.0, radial_coeffs=(1.0, 0.0, 0.0),
         badpix=None)
     assert len(result) == 2          # (im, wcs) unchanged for default callers
+
+
+def test_create_badpix_mask_min_frames_gate(tmp_path, monkeypatch):
+    from skycam_utils import alcor
+    day = tmp_path / "2026-05-18"
+    day.mkdir()
+    # make select_dark_frames return a tiny set regardless of contents
+    monkeypatch.setattr(alcor, "select_dark_frames",
+                        lambda files, **kw: list(files)[:3])
+    for i in range(3):
+        (day / f"2026_05_18__0{i}_00_00.fits.bz2").write_bytes(b"x")
+
+    out = alcor.create_badpix_mask(day, out_dir=str(tmp_path), min_frames=500)
+    assert out is None                          # below the gate: nothing written
+    assert not list(tmp_path.glob("alcor_badpix_*.fits.gz"))

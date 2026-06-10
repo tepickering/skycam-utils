@@ -88,3 +88,18 @@ def test_load_badpix_mask_tie_breaks_to_earlier(tmp_path):
     mask, mdate = load_alcor_badpix_mask(Time("2026-05-15T00:00:00"), masks_dir=str(tmp_path))
     assert mdate == date(2026, 5, 10)      # equidistant tie -> earlier date
     assert not mask.any()                  # the 'early' all-zeros mask
+
+
+def test_apply_badpix_repair_local_median():
+    from skycam_utils.alcor import _apply_badpix_repair
+    data = np.full((3, 5, 5), 10, dtype=np.int16)
+    data[0, 2, 2] = 1000                       # hot pixel in R
+    mask = np.zeros((3, 5, 5), dtype=bool)
+    mask[0, 2, 2] = True
+
+    out = _apply_badpix_repair(data, mask, ksize=3)
+
+    assert out[0, 2, 2] == 10                   # replaced with local median
+    assert out[0, 1, 1] == 10                   # neighbor untouched
+    assert (out[1] == 10).all() and (out[2] == 10).all()   # other channels untouched
+    assert data[0, 2, 2] == 1000                # input not mutated

@@ -1154,6 +1154,25 @@ def load_alcor_badpix_mask(time, masks_dir=None):
     return mask, best_date
 
 
+def _apply_badpix_repair(data, mask, ksize=5):
+    """
+    Replace masked pixels with their local median, per channel.
+
+    ``data`` and ``mask`` are ``(3, ny, nx)``. Returns a repaired copy; the input
+    is not mutated. The local median (computed over the surrounding ``ksize``
+    window) is robust to the spike itself, so it recovers the underlying sky.
+    """
+    out = np.array(data, copy=True)
+    for c in range(data.shape[0]):
+        if not mask[c].any():
+            continue
+        # filter on a native float copy (FITS data is big-endian int16, which
+        # median_filter can choke on), then cast back to the frame's dtype.
+        local = median_filter(np.asarray(out[c], dtype=np.float32), size=ksize)
+        out[c][mask[c]] = local[mask[c]].astype(out.dtype)
+    return out
+
+
 ALCOR_PRESSURE = 760 * u.hPa        # ~0.75 atm at the MMT 2600 m elevation
 ALCOR_TEMPERATURE = 10 * u.deg_C
 ALCOR_HUMIDITY = 0.2

@@ -135,12 +135,12 @@ def _predict_pixels(
     return x, y
 
 
-def _fit_params(alt, az, obs_x, obs_y, init_params, radius=ALCOR_RADIUS,
+def _fit_params(alt, az, obs_x, obs_y, init_params,
                 horizon_radius=ALCOR_HORIZON_RADIUS, fit_k5=False):
     """
     Robust least-squares fit of the lens geometry to matched stars.
 
-    By default fits (xshift, yshift, rotation, k3) with k1 held at 1.0 (the zenith
+    By default fits (xcen, ycen, rotation, k3) with k1 held at 1.0 (the zenith
     plate scale is set by horizon_radius) and k5 at 0.0. k3 and k5 are nearly
     collinear in rho over [0, 1], so fitting both is ill-conditioned on *dirty*
     data and runs away to large cancelling values (e.g. k3=-0.58, k5=3.6) that are
@@ -161,46 +161,46 @@ def _fit_params(alt, az, obs_x, obs_y, init_params, radius=ALCOR_RADIUS,
     init_k5 = init_params["radial_coeffs"][2]
 
     if fit_k5:
-        p0 = np.array([init_params["xshift"], init_params["yshift"],
+        p0 = np.array([init_params["xcen"], init_params["ycen"],
                        init_params["rotation"], init_k3, init_k5], dtype=float)
 
         def residuals(p):
-            xshift, yshift, rot, k3, k5 = p
-            x, y = _predict_pixels(alt, az, xshift=xshift, yshift=yshift, rotation=rot,
-                                   radial_coeffs=(1.0, k3, k5), radius=radius,
+            xcen, ycen, rot, k3, k5 = p
+            x, y = _predict_pixels(alt, az, xcen=xcen, ycen=ycen, rotation=rot,
+                                   radial_coeffs=(1.0, k3, k5),
                                    horizon_radius=horizon_radius)
             return np.concatenate([x - obs_x, y - obs_y])
 
         result = least_squares(residuals, p0, loss="soft_l1", f_scale=3.0)
-        xshift, yshift, rot, k3, k5 = result.x
-        return dict(xshift=float(xshift), yshift=float(yshift), rotation=float(rot),
+        xcen, ycen, rot, k3, k5 = result.x
+        return dict(xcen=float(xcen), ycen=float(ycen), rotation=float(rot),
                     radial_coeffs=(1.0, float(k3), float(k5)))
 
-    p0 = np.array([init_params["xshift"], init_params["yshift"],
+    p0 = np.array([init_params["xcen"], init_params["ycen"],
                    init_params["rotation"], init_k3], dtype=float)
 
     def residuals(p):
-        xshift, yshift, rot, k3 = p
-        x, y = _predict_pixels(alt, az, xshift=xshift, yshift=yshift, rotation=rot,
-                               radial_coeffs=(1.0, k3, 0.0), radius=radius,
+        xcen, ycen, rot, k3 = p
+        x, y = _predict_pixels(alt, az, xcen=xcen, ycen=ycen, rotation=rot,
+                               radial_coeffs=(1.0, k3, 0.0),
                                horizon_radius=horizon_radius)
         return np.concatenate([x - obs_x, y - obs_y])
 
     result = least_squares(residuals, p0, loss="soft_l1", f_scale=3.0)
-    xshift, yshift, rot, k3 = result.x
-    return dict(xshift=float(xshift), yshift=float(yshift), rotation=float(rot),
+    xcen, ycen, rot, k3 = result.x
+    return dict(xcen=float(xcen), ycen=float(ycen), rotation=float(rot),
                 radial_coeffs=(1.0, float(k3), 0.0))
 
 
 def assign_alcor_matches(cat, det, params, tolerance,
-                         radius=ALCOR_RADIUS, horizon_radius=ALCOR_HORIZON_RADIUS,
+                         horizon_radius=ALCOR_HORIZON_RADIUS,
                          n_neighbors=5, min_corroborating=2, pattern_tol=3.0,
                          brightness=True):
     """
     Assign catalog stars to detected sources against a *fixed* geometry.
 
-    This never refits the geometry internally; ``params`` (``xshift``,
-    ``yshift``, ``rotation``, ``radial_coeffs``) are the fixed geometry used for
+    This never refits the geometry internally; ``params`` (``xcen``,
+    ``ycen``, ``rotation``, ``radial_coeffs``) are the fixed geometry used for
     the whole frame. The steps are:
 
     1. Predict each catalog star's pixel ``(px, py)`` with :func:`_predict_pixels`
@@ -232,9 +232,9 @@ def assign_alcor_matches(cat, det, params, tolerance,
     columns then detection columns); an empty table if nothing matches.
     """
     px, py = _predict_pixels(
-        cat["Alt"], cat["Az"], xshift=params["xshift"], yshift=params["yshift"],
+        cat["Alt"], cat["Az"], xcen=params["xcen"], ycen=params["ycen"],
         rotation=params["rotation"], radial_coeffs=tuple(params["radial_coeffs"]),
-        radius=radius, horizon_radius=horizon_radius,
+        horizon_radius=params.get("horizon_radius", horizon_radius),
     )
     px = np.atleast_1d(np.asarray(px, dtype=float))
     py = np.atleast_1d(np.asarray(py, dtype=float))
@@ -374,10 +374,9 @@ def _detect_alcor_frame(task):
     index, filename, vmag_limit, min_alt, fwhm, threshold_sigma, max_detections = task
     filename = Path(filename)
     time = _frame_time(filename)
-    im, _ = load_alcor_fits(filename, rotation=0.0, xshift=0.0, yshift=0.0,
-                            radial_coeffs=(1.0, 0.0, 0.0))
+    cube, _, _ = load_alcor_fits(filename, badpix=None)
     cat = alcor_reference_altaz(time, vmag_limit=vmag_limit, min_alt=min_alt)
-    det = detect_alcor_stars(im, fwhm=fwhm, threshold_sigma=threshold_sigma,
+    det = detect_alcor_stars(cube, fwhm=fwhm, threshold_sigma=threshold_sigma,
                              max_detections=max_detections)
     if len(det) < 3:
         return index, None, None, f"no stars detected ({len(det)} < 3)"
@@ -412,11 +411,12 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=4.0, sun_alt_max=-
     ``pattern_tol``/``tolerance`` recovers more (and higher-residual) matches when
     the seed geometry leaves real distortion unmodeled.
 
-    The fit runs on a neutral (uncalibrated) frame -- loaded with no recentering,
-    rotation, or radial distortion -- so the recovered (xshift, yshift, rotation,
-    radial_coeffs) are the ABSOLUTE geometry constants for the night, suitable for
-    baking into ``ALCOR_CALIBRATIONS``. It is warm-started from the nearest
-    existing epoch (via :func:`alcor_calibration` at the night's median time).
+    The fit runs directly on the raw frame, so the recovered (xcen, ycen,
+    rotation, radial_coeffs) are the ABSOLUTE raw-frame geometry constants for the
+    night, suitable for baking into ``ALCOR_CALIBRATIONS`` (the night's
+    ``horizon_radius`` is carried through from the seed epoch). It is warm-started
+    from the nearest existing epoch (via :func:`alcor_calibration` at the night's
+    median time).
 
     Returns a dict with the fitted absolute parameters plus an ``epoch`` date
     string (the night's UT date, or the seed epoch when no frame can be timed),
@@ -466,8 +466,9 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=4.0, sun_alt_max=-
     epoch = (night_time.datetime.date().isoformat()
              if night_time is not None else base["epoch"])
 
-    init = dict(xshift=base["xshift"], yshift=base["yshift"],
-                rotation=base["rotation"], radial_coeffs=base["radial_coeffs"])
+    init = dict(xcen=base["xcen"], ycen=base["ycen"],
+                rotation=base["rotation"], radial_coeffs=base["radial_coeffs"],
+                horizon_radius=base["horizon_radius"])
     # (cat, detections) per usable frame, kept in frame order for reproducible
     # pooling regardless of worker completion order.
     detected = [None] * len(dark)
@@ -523,7 +524,8 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=4.0, sun_alt_max=-
             continue
         alt, az, x, y = pooled
         if len(alt) >= 3:
-            params = _fit_params(alt, az, x, y, init_params=params, fit_k5=fit_k5)
+            params = _fit_params(alt, az, x, y, init_params=params,
+                                 horizon_radius=base["horizon_radius"], fit_k5=fit_k5)
 
     # Final pool at the tightest tolerance, then 3*MAD outlier rejection + refit.
     pooled = pool(params, float(tolerance))
@@ -531,22 +533,25 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=4.0, sun_alt_max=-
         raise RuntimeError("No matched stars across the selected frames.")
     alt, az, x, y = pooled
 
-    px, py = _predict_pixels(alt, az, xshift=params["xshift"], yshift=params["yshift"],
+    px, py = _predict_pixels(alt, az, xcen=params["xcen"], ycen=params["ycen"],
                              rotation=params["rotation"],
-                             radial_coeffs=tuple(params["radial_coeffs"]))
+                             radial_coeffs=tuple(params["radial_coeffs"]),
+                             horizon_radius=base["horizon_radius"])
     resid = np.hypot(px - x, py - y)
     mad = np.median(np.abs(resid - np.median(resid))) + 1e-9
     good = resid < np.median(resid) + 3.0 * 1.4826 * mad
     if good.sum() >= 3:
         params = _fit_params(alt[good], az[good], x[good], y[good], init_params=params,
-                             fit_k5=fit_k5)
-    px, py = _predict_pixels(alt[good], az[good], xshift=params["xshift"],
-                             yshift=params["yshift"], rotation=params["rotation"],
-                             radial_coeffs=tuple(params["radial_coeffs"]))
+                             horizon_radius=base["horizon_radius"], fit_k5=fit_k5)
+    px, py = _predict_pixels(alt[good], az[good], xcen=params["xcen"],
+                             ycen=params["ycen"], rotation=params["rotation"],
+                             radial_coeffs=tuple(params["radial_coeffs"]),
+                             horizon_radius=base["horizon_radius"])
     rms = float(np.sqrt(np.mean((px - x[good]) ** 2 + (py - y[good]) ** 2)))
 
     return {
         **params,
+        "horizon_radius": base["horizon_radius"],
         "epoch": epoch,
         "n_matched": int(good.sum()),
         "residual_rms": rms,
@@ -556,7 +561,7 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=4.0, sun_alt_max=-
 
 
 def save_alcor_residual_plot(alt, az, obs_x, obs_y, params, output_file,
-                             radius=ALCOR_RADIUS, horizon_radius=ALCOR_HORIZON_RADIUS,
+                             horizon_radius=ALCOR_HORIZON_RADIUS,
                              figsize=(18, 10), dpi=150, nbins=30, min_per_cell=3):
     """
     Diagnostic plot of the fitted WCS residuals for matched stars, as six panels
@@ -604,13 +609,18 @@ def save_alcor_residual_plot(alt, az, obs_x, obs_y, params, output_file,
     obs_x = np.asarray(obs_x, dtype=float)
     obs_y = np.asarray(obs_y, dtype=float)
 
-    ix, iy = _predict_pixels(alt, az, xshift=0.0, yshift=0.0, rotation=0.0,
-                             radial_coeffs=(1.0, 0.0, 0.0), radius=radius,
-                             horizon_radius=horizon_radius)
-    fx, fy = _predict_pixels(alt, az, xshift=params["xshift"], yshift=params["yshift"],
+    hr = params.get("horizon_radius", horizon_radius)
+    cenx = float(params["xcen"])
+    ceny = float(params["ycen"])
+    # "before" baseline: same center and rotation, but the idealized equidistant
+    # radial mapping -- so the panel isolates what the fitted radial term removes.
+    ix, iy = _predict_pixels(alt, az, xcen=cenx, ycen=ceny,
+                             rotation=params["rotation"],
+                             radial_coeffs=(1.0, 0.0, 0.0), horizon_radius=hr)
+    fx, fy = _predict_pixels(alt, az, xcen=cenx, ycen=ceny,
                              rotation=params["rotation"],
                              radial_coeffs=tuple(params["radial_coeffs"]),
-                             radius=radius, horizon_radius=horizon_radius)
+                             horizon_radius=hr)
     before = np.hypot(ix - obs_x, iy - obs_y)
     dx, dy = fx - obs_x, fy - obs_y
     after = np.hypot(dx, dy)
@@ -632,10 +642,11 @@ def save_alcor_residual_plot(alt, az, obs_x, obs_y, params, output_file,
     ax_a.set_ylabel("pixel residual")
     fig.colorbar(sc, ax=ax_a, label="zenith angle (deg)")
 
-    cen = radius - 0.5
     # Bin the residual vectors onto a grid and average per cell, so coherent
-    # structure survives while incoherent (mismatch) scatter cancels out.
-    extent = 2.0 * radius
+    # structure survives while incoherent (mismatch) scatter cancels out. The raw
+    # frame is not centered on the zenith, so the grid spans the detector extent
+    # implied by the zenith center plus the horizon radius.
+    extent = 2.0 * (max(cenx, ceny) + hr)
     cell = extent / nbins
     cx_i = np.clip((obs_x / cell).astype(int), 0, nbins - 1)
     cy_i = np.clip((obs_y / cell).astype(int), 0, nbins - 1)
@@ -655,7 +666,7 @@ def save_alcor_residual_plot(alt, az, obs_x, obs_y, params, output_file,
     amp = (1.5 * cell) / (p90 + 1e-9)  # 90th-pct arrow spans ~1.5 cells
     q = ax_v.quiver(gx, gy, mean_dx, mean_dy, gmag, angles="xy",
                     scale_units="xy", scale=1.0 / amp, cmap="viridis", width=0.004)
-    ax_v.plot(cen, cen, "r+", ms=14, label="zenith (array center)")
+    ax_v.plot(cenx, ceny, "r+", ms=14, label="zenith")
     ax_v.set_aspect("equal")
     ax_v.set_xlim(0, extent)
     ax_v.set_ylim(0, extent)
@@ -665,9 +676,9 @@ def save_alcor_residual_plot(alt, az, obs_x, obs_y, params, output_file,
     ax_v.legend(loc="upper right")
     fig.colorbar(q, ax=ax_v, label="mean |residual| (pix)")
 
-    # Radial/tangential decomposition about the zenith (array center).
-    vx = obs_x - cen
-    vy = obs_y - cen
+    # Radial/tangential decomposition about the zenith.
+    vx = obs_x - cenx
+    vy = obs_y - ceny
     rr = np.hypot(vx, vy)
     safe = rr > 1e-6
     denom = np.where(safe, rr, 1.0)
@@ -1954,10 +1965,11 @@ def _format_calibration_entry(result):
     """Format a calibration result as a paste-ready ALCOR_CALIBRATIONS entry."""
     rc = tuple(float(c) for c in result["radial_coeffs"])
     return (f'    {{"epoch": "{result["epoch"]}", '
-            f'"xshift": {result["xshift"]:.3f}, '
-            f'"yshift": {result["yshift"]:.3f}, '
+            f'"xcen": {result["xcen"]:.3f}, '
+            f'"ycen": {result["ycen"]:.3f}, '
             f'"rotation": {result["rotation"]:.4f}, '
-            f'"radial_coeffs": {rc!r}}},')
+            f'"radial_coeffs": {rc!r}, '
+            f'"horizon_radius": {result["horizon_radius"]:.1f}}},')
 
 
 def fit_alcor_wcs_cli():

@@ -320,7 +320,7 @@ def _clean_frame(true_params, n=12, seed=0):
 
 
 def test_assign_alcor_matches_recovers_clean_frame():
-    true = dict(xshift=4.0, yshift=-3.0, rotation=0.6, radial_coeffs=(1.0, 0.03, 0.0))
+    true = dict(xcen=4.0, ycen=-3.0, rotation=0.6, radial_coeffs=(1.0, 0.03, 0.0))
     cat, det, tx, ty = _clean_frame(true, n=12, seed=1)
     matched = assign_alcor_matches(cat, det, params=true, tolerance=3.0)
     assert len(matched) == 12
@@ -330,7 +330,7 @@ def test_assign_alcor_matches_recovers_clean_frame():
 
 
 def test_assign_alcor_matches_pattern_rejects_decoy():
-    true = dict(xshift=4.0, yshift=-3.0, rotation=0.6, radial_coeffs=(1.0, 0.03, 0.0))
+    true = dict(xcen=4.0, ycen=-3.0, rotation=0.6, radial_coeffs=(1.0, 0.03, 0.0))
     cat, det, tx, ty = _clean_frame(true, n=12, seed=2)
     # Plant a decoy detection near catalog star 0's predicted pixel, nearer than
     # its true detection, but displaced so it breaks the local constellation.
@@ -357,18 +357,18 @@ def test_fit_params_recovers_k5_when_enabled():
     rng = np.random.default_rng(9)
     alt = rng.uniform(5.0, 88.0, 400)
     az = rng.uniform(0.0, 360.0, 400)
-    true = dict(xshift=5.0, yshift=-4.0, rotation=0.7, radial_coeffs=(1.0, 0.03, 0.02))
+    true = dict(xcen=5.0, ycen=-4.0, rotation=0.7, radial_coeffs=(1.0, 0.03, 0.02))
     x, y = _predict_pixels(alt, az, **true)
 
     fit = _fit_params(alt, az, x, y,
-                      init_params=dict(xshift=0.0, yshift=0.0, rotation=0.0,
+                      init_params=dict(xcen=0.0, ycen=0.0, rotation=0.0,
                                        radial_coeffs=(1.0, 0.0, 0.0)),
                       fit_k5=True)
     assert abs(fit["radial_coeffs"][1] - 0.03) < 5e-3
     assert abs(fit["radial_coeffs"][2] - 0.02) < 5e-3
     # default (k3-only) still pins k5 at zero
     k3_only = _fit_params(alt, az, x, y,
-                          init_params=dict(xshift=0.0, yshift=0.0, rotation=0.0,
+                          init_params=dict(xcen=0.0, ycen=0.0, rotation=0.0,
                                            radial_coeffs=(1.0, 0.0, 0.0)))
     assert k3_only["radial_coeffs"][2] == 0.0
 
@@ -376,7 +376,7 @@ def test_fit_params_recovers_k5_when_enabled():
 def test_assign_alcor_matches_brightness_tiebreak():
     # One detection contested by two catalog stars within tolerance.
     # Catalog A is bright (Vmag 1.0) and farther; B is faint (Vmag 4.0) and nearer.
-    params = dict(xshift=0.0, yshift=0.0, rotation=0.0, radial_coeffs=(1.0, 0.0, 0.0))
+    params = dict(xcen=0.0, ycen=0.0, rotation=0.0, radial_coeffs=(1.0, 0.0, 0.0))
     ax, ay = _predict_pixels(60.0, 10.0, **params)
     bx, by = _predict_pixels(60.5, 10.0, **params)  # close neighbor
     cat = _Table({"Alt": [60.0, 60.5], "Az": [10.0, 10.0], "Vmag": [1.0, 4.0]})
@@ -396,7 +396,7 @@ def test_assign_alcor_matches_brightness_tiebreak():
 
 
 def test_assign_alcor_matches_empty_inputs():
-    params = dict(xshift=0.0, yshift=0.0, rotation=0.0, radial_coeffs=(1.0, 0.0, 0.0))
+    params = dict(xcen=0.0, ycen=0.0, rotation=0.0, radial_coeffs=(1.0, 0.0, 0.0))
     cat = _Table({"Alt": [45.0], "Az": [10.0], "Vmag": [2.0]})
     empty_det = _Table({"xcentroid": [], "ycentroid": [], "flux": []})
     out = assign_alcor_matches(cat, empty_det, params=params, tolerance=3.0)
@@ -409,14 +409,14 @@ def test_fit_params_recovers_known_geometry():
     alt = rng.uniform(5.0, 88.0, 200)
     az = rng.uniform(0.0, 360.0, 200)
     # The fitter is k3-only (k5 held at 0), so generate the truth with k5=0.
-    true = dict(xshift=5.0, yshift=-4.0, rotation=0.7, radial_coeffs=(1.0, 0.03, 0.0))
+    true = dict(xcen=5.0, ycen=-4.0, rotation=0.7, radial_coeffs=(1.0, 0.03, 0.0))
     x, y = _predict_pixels(alt, az, **true)
 
     fit = _fit_params(alt, az, x, y,
-                      init_params=dict(xshift=0.0, yshift=0.0, rotation=0.0,
+                      init_params=dict(xcen=0.0, ycen=0.0, rotation=0.0,
                                        radial_coeffs=(1.0, 0.0, 0.0)))
-    assert abs(fit["xshift"] - 5.0) < 1e-3
-    assert abs(fit["yshift"] + 4.0) < 1e-3
+    assert abs(fit["xcen"] - 5.0) < 1e-3
+    assert abs(fit["ycen"] + 4.0) < 1e-3
     assert abs(fit["rotation"] - 0.7) < 1e-3
     np.testing.assert_allclose(fit["radial_coeffs"], (1.0, 0.03, 0.0), atol=1e-4)
 
@@ -431,7 +431,7 @@ def test_fit_params_stays_physical_with_mismatches():
     rng = np.random.default_rng(7)
     alt = rng.uniform(5.0, 88.0, 200)
     az = rng.uniform(0.0, 360.0, 200)
-    true = dict(xshift=5.0, yshift=-4.0, rotation=0.7, radial_coeffs=(1.0, 0.08, 0.0))
+    true = dict(xcen=5.0, ycen=-4.0, rotation=0.7, radial_coeffs=(1.0, 0.08, 0.0))
     x, y = _predict_pixels(alt, az, **true)
     # 15% of the points are gross mismatches to other detections.
     bad = rng.choice(len(x), size=30, replace=False)
@@ -439,19 +439,19 @@ def test_fit_params_stays_physical_with_mismatches():
     y[bad] -= 45.0
 
     fit = _fit_params(alt, az, x, y,
-                      init_params=dict(xshift=0.0, yshift=0.0, rotation=0.0,
+                      init_params=dict(xcen=0.0, ycen=0.0, rotation=0.0,
                                        radial_coeffs=(1.0, 0.0, 0.0)))
     assert fit["radial_coeffs"][2] == 0.0           # k5 held at zero, no runaway
     assert abs(fit["radial_coeffs"][1] - 0.08) < 0.03
-    assert abs(fit["xshift"] - 5.0) < 3.0
-    assert abs(fit["yshift"] + 4.0) < 3.0
+    assert abs(fit["xcen"] - 5.0) < 3.0
+    assert abs(fit["ycen"] + 4.0) < 3.0
 
 
 def test_fit_alcor_wcs_aggregates_synthetic_frames(monkeypatch, tmp_path):
     import skycam_utils.alcor as alcor_mod
     from astropy.table import Table
 
-    true = dict(xshift=6.0, yshift=-5.0, rotation=0.8, radial_coeffs=(1.0, 0.04, 0.0))
+    true = dict(xcen=6.0, ycen=-5.0, rotation=0.8, radial_coeffs=(1.0, 0.04, 0.0))
     rng = np.random.default_rng(2)
 
     frame_alt = [rng.uniform(10.0, 88.0, 30), rng.uniform(10.0, 88.0, 30)]
@@ -467,7 +467,7 @@ def test_fit_alcor_wcs_aggregates_synthetic_frames(monkeypatch, tmp_path):
     calls = {"i": 0}
 
     def fake_load_alcor_fits(path, **kw):
-        return np.zeros((2 * ALCOR_RADIUS, 2 * ALCOR_RADIUS, 3)), None
+        return np.zeros((3, 2 * ALCOR_RADIUS, 2 * ALCOR_RADIUS)), None, None
 
     def fake_reference_altaz(time, **kw):
         i = calls["i"]
@@ -489,13 +489,13 @@ def test_fit_alcor_wcs_aggregates_synthetic_frames(monkeypatch, tmp_path):
     monkeypatch.setattr(alcor_mod, "detect_alcor_stars", fake_detect)
     monkeypatch.setattr(alcor_mod, "_frame_time", fake_frame_time)
     monkeypatch.setattr(alcor_mod, "alcor_calibration",
-                        lambda time=None: {"epoch": "2024-09-05", "xshift": 0.0,
-                                           "yshift": 0.0, "rotation": 0.0,
-                                           "radial_coeffs": (1.0, 0.0, 0.0)})
+                        lambda time=None: {"epoch": "2024-09-05", "xcen": 0.0,
+                                           "ycen": 0.0, "rotation": 0.0,
+                                           "radial_coeffs": (1.0, 0.0, 0.0), "horizon_radius": 662.0})
 
     result = fit_alcor_wcs(tmp_path, pattern="*.fits")
-    assert abs(result["xshift"] - 6.0) < 0.05
-    assert abs(result["yshift"] + 5.0) < 0.05
+    assert abs(result["xcen"] - 6.0) < 0.05
+    assert abs(result["ycen"] + 5.0) < 0.05
     assert abs(result["rotation"] - 0.8) < 0.05
     np.testing.assert_allclose(result["radial_coeffs"], (1.0, 0.04, 0.0), atol=2e-3)
     assert result["n_matched"] >= 40
@@ -507,7 +507,7 @@ def test_fit_alcor_wcs_survives_injected_mismatches(monkeypatch, tmp_path):
     import skycam_utils.alcor as alcor_mod
     from astropy.table import Table
 
-    true = dict(xshift=6.0, yshift=-5.0, rotation=0.8, radial_coeffs=(1.0, 0.04, 0.0))
+    true = dict(xcen=6.0, ycen=-5.0, rotation=0.8, radial_coeffs=(1.0, 0.04, 0.0))
     rng = np.random.default_rng(5)
 
     frame_alt = [rng.uniform(15.0, 85.0, 25), rng.uniform(15.0, 85.0, 25)]
@@ -523,7 +523,7 @@ def test_fit_alcor_wcs_survives_injected_mismatches(monkeypatch, tmp_path):
     calls = {"i": 0}
 
     def fake_load_alcor_fits(path, **kw):
-        return np.zeros((2 * ALCOR_RADIUS, 2 * ALCOR_RADIUS, 3)), None
+        return np.zeros((3, 2 * ALCOR_RADIUS, 2 * ALCOR_RADIUS)), None, None
 
     def fake_reference_altaz(time, **kw):
         i = calls["i"]
@@ -560,13 +560,13 @@ def test_fit_alcor_wcs_survives_injected_mismatches(monkeypatch, tmp_path):
     monkeypatch.setattr(alcor_mod, "detect_alcor_stars", fake_detect)
     monkeypatch.setattr(alcor_mod, "_frame_time", fake_frame_time)
     monkeypatch.setattr(alcor_mod, "alcor_calibration",
-                        lambda time=None: {"epoch": "2024-09-05", "xshift": 0.0,
-                                           "yshift": 0.0, "rotation": 0.0,
-                                           "radial_coeffs": (1.0, 0.0, 0.0)})
+                        lambda time=None: {"epoch": "2024-09-05", "xcen": 0.0,
+                                           "ycen": 0.0, "rotation": 0.0,
+                                           "radial_coeffs": (1.0, 0.0, 0.0), "horizon_radius": 662.0})
 
     result = fit_alcor_wcs(tmp_path, pattern="*.fits")
-    assert abs(result["xshift"] - 6.0) < 0.1
-    assert abs(result["yshift"] + 5.0) < 0.1
+    assert abs(result["xcen"] - 6.0) < 0.1
+    assert abs(result["ycen"] + 5.0) < 0.1
     assert abs(result["rotation"] - 0.8) < 0.05
     np.testing.assert_allclose(result["radial_coeffs"], (1.0, 0.04, 0.0), atol=3e-3)
     assert result["residual_rms"] < 0.5
@@ -583,7 +583,7 @@ def test_fit_alcor_wcs_parallel_matches_serial(monkeypatch, tmp_path):
     import skycam_utils.alcor as alcor_mod
     from astropy.table import Table
 
-    true = dict(xshift=6.0, yshift=-5.0, rotation=0.8, radial_coeffs=(1.0, 0.04, 0.0))
+    true = dict(xcen=6.0, ycen=-5.0, rotation=0.8, radial_coeffs=(1.0, 0.04, 0.0))
     rng = np.random.default_rng(2)
 
     frame_alt = [rng.uniform(10.0, 88.0, 30), rng.uniform(10.0, 88.0, 30)]
@@ -597,7 +597,7 @@ def test_fit_alcor_wcs_parallel_matches_serial(monkeypatch, tmp_path):
         return list(files)
 
     def fake_load_alcor_fits(path, **kw):
-        return np.zeros((2 * ALCOR_RADIUS, 2 * ALCOR_RADIUS, 3)), None
+        return np.zeros((3, 2 * ALCOR_RADIUS, 2 * ALCOR_RADIUS)), None, None
 
     # _detect_alcor_frame processes one frame's calls atomically, so a shared
     # "active frame index" keyed off the filename keeps reference/detect in sync
@@ -647,13 +647,13 @@ def test_fit_alcor_wcs_parallel_matches_serial(monkeypatch, tmp_path):
     monkeypatch.setattr(alcor_mod, "ProcessPoolExecutor", _SyncExecutor)
     monkeypatch.setattr(alcor_mod, "as_completed", lambda futures: list(futures))
     monkeypatch.setattr(alcor_mod, "alcor_calibration",
-                        lambda time=None: {"epoch": "2024-09-05", "xshift": 0.0,
-                                           "yshift": 0.0, "rotation": 0.0,
-                                           "radial_coeffs": (1.0, 0.0, 0.0)})
+                        lambda time=None: {"epoch": "2024-09-05", "xcen": 0.0,
+                                           "ycen": 0.0, "rotation": 0.0,
+                                           "radial_coeffs": (1.0, 0.0, 0.0), "horizon_radius": 662.0})
 
     result = fit_alcor_wcs(tmp_path, pattern="*.fits", workers=2)
-    assert abs(result["xshift"] - 6.0) < 0.05
-    assert abs(result["yshift"] + 5.0) < 0.05
+    assert abs(result["xcen"] - 6.0) < 0.05
+    assert abs(result["ycen"] + 5.0) < 0.05
     assert abs(result["rotation"] - 0.8) < 0.05
     np.testing.assert_allclose(result["radial_coeffs"], (1.0, 0.04, 0.0), atol=2e-3)
     assert result["n_matched"] >= 40
@@ -671,7 +671,7 @@ def test_fit_alcor_wcs_log_reports_dispositions(monkeypatch, tmp_path):
     import skycam_utils.alcor as alcor_mod
     from astropy.table import Table
 
-    true = dict(xshift=2.0, yshift=-1.0, rotation=0.3, radial_coeffs=(1.0, 0.0, 0.0))
+    true = dict(xcen=2.0, ycen=-1.0, rotation=0.3, radial_coeffs=(1.0, 0.0, 0.0))
     rng = np.random.default_rng(4)
 
     # f_day is dropped by the Sun filter; f_empty yields no detections; f_good is used.
@@ -687,7 +687,7 @@ def test_fit_alcor_wcs_log_reports_dispositions(monkeypatch, tmp_path):
         return [tmp_path / "f_empty.fits", tmp_path / "f_good.fits"]
 
     def fake_load_alcor_fits(path, **kw):
-        return np.zeros((2 * ALCOR_RADIUS, 2 * ALCOR_RADIUS, 3)), None
+        return np.zeros((3, 2 * ALCOR_RADIUS, 2 * ALCOR_RADIUS)), None, None
 
     def fake_reference_altaz(time, **kw):
         return Table({"Alt": good_alt, "Az": good_az,
@@ -709,6 +709,11 @@ def test_fit_alcor_wcs_log_reports_dispositions(monkeypatch, tmp_path):
     monkeypatch.setattr(alcor_mod, "alcor_reference_altaz", fake_reference_altaz)
     monkeypatch.setattr(alcor_mod, "detect_alcor_stars", fake_detect)
     monkeypatch.setattr(alcor_mod, "_frame_time", fake_frame_time)
+    monkeypatch.setattr(alcor_mod, "alcor_calibration",
+                        lambda time=None: {"epoch": "2024-09-05", "xcen": 0.0,
+                                           "ycen": 0.0, "rotation": 0.0,
+                                           "radial_coeffs": (1.0, 0.0, 0.0),
+                                           "horizon_radius": 662.0})
 
     messages = []
     fit_alcor_wcs(tmp_path, pattern="*.fits", log=messages.append)
@@ -723,7 +728,7 @@ def test_save_alcor_residual_plot_writes_output(tmp_path):
     rng = np.random.default_rng(3)
     alt = rng.uniform(5.0, 88.0, 100)
     az = rng.uniform(0.0, 360.0, 100)
-    params = dict(xshift=2.0, yshift=-1.0, rotation=0.3, radial_coeffs=(1.0, 0.02, 0.03))
+    params = dict(xcen=2.0, ycen=-1.0, rotation=0.3, radial_coeffs=(1.0, 0.02, 0.03))
     x, y = _predict_pixels(alt, az, **params)
     x = x + rng.normal(0, 0.2, x.shape)
     y = y + rng.normal(0, 0.2, y.shape)
@@ -735,7 +740,7 @@ def test_save_alcor_residual_plot_writes_output(tmp_path):
 
 def test_load_alcor_fits_world_pixel_round_trip():
     test_fits = Path(__file__).with_name("test.fits.bz2")
-    _, wcs = load_alcor_fits(test_fits)
+    _, wcs, _ = load_alcor_fits(test_fits)
     az = np.array([10.0, 100.0, 200.0, 300.0])
     alt = np.array([15.0, 35.0, 55.0, 75.0])
     px, py = wcs.world_to_pixel_values(az, alt)
@@ -747,9 +752,9 @@ def test_load_alcor_fits_world_pixel_round_trip():
 def test_alcor_calibration_nearest_in_time(monkeypatch):
     import skycam_utils.alcor as alcor_mod
     table = [
-        {"epoch": "2024-09-04", "xshift": -4.5, "yshift": 4.4,
+        {"epoch": "2024-09-04", "xcen": -4.5, "ycen": 4.4,
          "rotation": 0.39, "radial_coeffs": (1.0, 0.014, 0.0)},
-        {"epoch": "2026-05-19", "xshift": -12.0, "yshift": 9.9,
+        {"epoch": "2026-05-19", "xcen": -12.0, "ycen": 9.9,
          "rotation": 0.31, "radial_coeffs": (1.0, 0.084, 0.0)},
     ]
     monkeypatch.setattr(alcor_mod, "ALCOR_CALIBRATIONS", table)
@@ -775,8 +780,8 @@ def test_alcor_calibration_nearest_in_time(monkeypatch):
 
     # returns a copy, not the stored dict
     c = alcor_mod.alcor_calibration(Time("2024-10-01T00:00:00"))
-    c["xshift"] = 999.0
-    assert table[0]["xshift"] == -4.5
+    c["xcen"] = 999.0
+    assert table[0]["xcen"] == -4.5
 
 
 def test_load_alcor_fits_resolves_and_overrides(monkeypatch):
@@ -784,27 +789,27 @@ def test_load_alcor_fits_resolves_and_overrides(monkeypatch):
     test_fits = Path(__file__).with_name("test.fits.bz2")
 
     calls = {"n": 0}
-    real = alcor_mod._alcor_frame_calibration
+    real = alcor_mod.alcor_calibration
 
-    def spy(filename):
+    def spy(time=None):
         calls["n"] += 1
-        return real(filename)
+        return real(time)
 
-    monkeypatch.setattr(alcor_mod, "_alcor_frame_calibration", spy)
+    monkeypatch.setattr(alcor_mod, "alcor_calibration", spy)
 
-    # defaults -> resolver is consulted
-    _, wcs = alcor_mod.load_alcor_fits(test_fits)
+    # wcs=None -> the calibration epoch resolver is consulted to build the WCS
+    _, wcs, _ = alcor_mod.load_alcor_fits(test_fits)
     assert calls["n"] == 1
     assert "ARC" in wcs.wcs.ctype[0]
 
-    # all calibration kwargs explicit -> resolver NOT consulted, and an
-    # idealized radial term yields a plain ARC WCS (no SIP).
+    # explicit wcs -> resolver NOT consulted; the passed WCS is returned as-is
     calls["n"] = 0
-    _, wcs = alcor_mod.load_alcor_fits(
-        test_fits, rotation=0.0, xshift=0.0, yshift=0.0,
-        radial_coeffs=(1.0, 0.0, 0.0))
+    w = alcor_mod.build_alcor_wcs(xcen=0.0, ycen=0.0, rotation=0.0,
+                                  radial_coeffs=(1.0, 0.0, 0.0), horizon_radius=30.0)
+    _, wcs, _ = alcor_mod.load_alcor_fits(test_fits, wcs=w)
     assert calls["n"] == 0
     assert wcs.sip is None
+    assert list(wcs.wcs.crpix) == [1.0, 1.0]
 
 
 def test_alcor_frame_calibration_uses_filename_then_header(monkeypatch, tmp_path):
@@ -812,9 +817,9 @@ def test_alcor_frame_calibration_uses_filename_then_header(monkeypatch, tmp_path
     from astropy.io import fits
 
     table = [
-        {"epoch": "2024-09-04", "xshift": -4.5, "yshift": 4.4,
+        {"epoch": "2024-09-04", "xcen": -4.5, "ycen": 4.4,
          "rotation": 0.39, "radial_coeffs": (1.0, 0.014, 0.0)},
-        {"epoch": "2026-05-19", "xshift": -12.0, "yshift": 9.9,
+        {"epoch": "2026-05-19", "xcen": -12.0, "ycen": 9.9,
          "rotation": 0.31, "radial_coeffs": (1.0, 0.084, 0.0)},
     ]
     monkeypatch.setattr(alcor_mod, "ALCOR_CALIBRATIONS", table)
@@ -838,12 +843,13 @@ def test_format_calibration_entry_is_parseable():
     from skycam_utils.alcor import _format_calibration_entry
 
     line = _format_calibration_entry(dict(
-        epoch="2026-05-19", xshift=-12.0, yshift=9.9, rotation=0.3013,
-        radial_coeffs=(1.0, 0.084, 0.0)))
+        epoch="2026-05-19", xcen=-12.0, ycen=9.9, rotation=0.3013,
+        radial_coeffs=(1.0, 0.084, 0.0), horizon_radius=662.0))
     parsed = ast.literal_eval(line.strip().rstrip(","))
     assert parsed["epoch"] == "2026-05-19"
     assert parsed["radial_coeffs"] == (1.0, 0.084, 0.0)
-    assert abs(parsed["xshift"] + 12.0) < 1e-9
+    assert abs(parsed["xcen"] + 12.0) < 1e-9
+    assert parsed["horizon_radius"] == 662.0
 
 
 def test_plot_alcor_fits_defaults_rotation_to_none():
@@ -889,8 +895,9 @@ def test_fit_alcor_wcs_cli_passes_new_flags(monkeypatch, capsys):
 
     def fake_fit(input_dir, **kwargs):
         captured.update(kwargs)
-        return {"xshift": 1.0, "yshift": 2.0, "rotation": 0.3,
-                "radial_coeffs": (1.0, 0.02, 0.0), "epoch": "2026-05-19",
+        return {"xcen": 1.0, "ycen": 2.0, "rotation": 0.3,
+                "radial_coeffs": (1.0, 0.02, 0.0), "horizon_radius": 662.0,
+                "epoch": "2026-05-19",
                 "n_matched": 123, "residual_rms": 2.5, "matched_fraction": 0.42,
                 "alt": np.array([]), "az": np.array([]),
                 "x": np.array([]), "y": np.array([])}
@@ -924,12 +931,12 @@ def test_fit_alcor_wcs_forwards_matcher_knobs(monkeypatch, tmp_path):
     files[0].write_bytes(b"stub")
     alt = np.array([60.0, 50.0, 40.0, 30.0])
     az = np.array([10.0, 100.0, 200.0, 300.0])
-    x, y = _predict_pixels(alt, az, xshift=0.0, yshift=0.0, rotation=0.0,
+    x, y = _predict_pixels(alt, az, xcen=0.0, ycen=0.0, rotation=0.0,
                            radial_coeffs=(1.0, 0.0, 0.0))
 
     monkeypatch.setattr(alcor_mod, "select_dark_frames", lambda fs, **kw: list(files))
     monkeypatch.setattr(alcor_mod, "load_alcor_fits",
-                        lambda p, **kw: (np.zeros((2 * ALCOR_RADIUS, 2 * ALCOR_RADIUS, 3)), None))
+                        lambda p, **kw: (np.zeros((3, 2 * ALCOR_RADIUS, 2 * ALCOR_RADIUS)), None, None))
     monkeypatch.setattr(alcor_mod, "alcor_reference_altaz",
                         lambda t, **kw: Table({"Alt": alt, "Az": az,
                                                "Vmag": [1.0, 2.0, 3.0, 4.0],
@@ -941,9 +948,9 @@ def test_fit_alcor_wcs_forwards_matcher_knobs(monkeypatch, tmp_path):
     monkeypatch.setattr(alcor_mod, "_frame_time",
                         lambda p: Time("2024-09-05T07:00:00", format="isot", scale="utc"))
     monkeypatch.setattr(alcor_mod, "alcor_calibration",
-                        lambda time=None: {"epoch": "2024-09-05", "xshift": 0.0,
-                                           "yshift": 0.0, "rotation": 0.0,
-                                           "radial_coeffs": (1.0, 0.0, 0.0)})
+                        lambda time=None: {"epoch": "2024-09-05", "xcen": 0.0,
+                                           "ycen": 0.0, "rotation": 0.0,
+                                           "radial_coeffs": (1.0, 0.0, 0.0), "horizon_radius": 662.0})
 
     seen = {}
 

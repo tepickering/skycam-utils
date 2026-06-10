@@ -43,12 +43,13 @@ def test_predict_pixels_zenith_maps_to_center():
     assert abs(y - 698.0) < 1e-6
 
 
-def test_predict_pixels_north_is_minus_y():
-    # az=0, alt below zenith -> straight "up" the sensor = decreasing row (-y)
+def test_predict_pixels_north_is_plus_y():
+    # az=0 (north), alt below zenith -> +y (larger row); verified against
+    # ground-truth Polaris, which sits well above the image center.
     x, y = _predict_pixels(80.0, 0.0, xcen=696.0, ycen=698.0, rotation=0.0,
                            radial_coeffs=(1.0, 0.0, 0.0), horizon_radius=662.0)
     assert abs(x - 696.0) < 1e-6
-    assert y < 698.0
+    assert y > 698.0
 
 
 def test_predict_pixels_horizon_radius_at_alt_zero():
@@ -66,7 +67,7 @@ def test_predict_pixels_radial_term_changes_radius():
     # a positive rho**5 coefficient makes z grow faster with rho, so a star at a
     # fixed altitude (fixed z) is reached at a SMALLER detector radius: it is
     # pulled inward relative to the equidistant mapping.
-    base_x, base_y = _predict_pixels(10.0, 45.0)
+    base_x, base_y = _predict_pixels(10.0, 45.0, radial_coeffs=(1.0, 0.0, 0.0))
     bent_x, bent_y = _predict_pixels(10.0, 45.0, radial_coeffs=(1.0, 0.0, 0.1))
     base_r = np.hypot(base_x - ALCOR_XCEN, base_y - ALCOR_YCEN)
     bent_r = np.hypot(bent_x - ALCOR_XCEN, bent_y - ALCOR_YCEN)
@@ -226,11 +227,14 @@ def test_build_alcor_wcs_with_radial_term_reproduces_forward_model():
 
 
 def test_load_alcor_fits_returns_raw_cube():
+    from skycam_utils.alcor import alcor_calibration
     test_fits = Path(__file__).with_name("test.fits.bz2")
     cube, wcs, _ = load_alcor_fits(test_fits)
     assert cube.ndim == 3 and cube.shape[0] == 3
     assert cube.dtype == np.float32
-    np.testing.assert_allclose(wcs.wcs.cdelt, [90.0 / 662.0, 90.0 / 662.0])
+    # cdelt is the zenith plate scale set by the resolved epoch's horizon_radius
+    hr = alcor_calibration()["horizon_radius"]
+    np.testing.assert_allclose(wcs.wcs.cdelt, [90.0 / hr, 90.0 / hr])
 
 
 def test_detect_alcor_stars_accepts_cube_and_2d():
@@ -492,7 +496,7 @@ def test_fit_alcor_wcs_aggregates_synthetic_frames(monkeypatch, tmp_path):
     monkeypatch.setattr(alcor_mod, "alcor_calibration",
                         lambda time=None: {"epoch": "2024-09-05", "xcen": 0.0,
                                            "ycen": 0.0, "rotation": 0.0,
-                                           "radial_coeffs": (1.0, 0.0, 0.0), "horizon_radius": 662.0})
+                                           "radial_coeffs": (1.0, 0.0, 0.0), "horizon_radius": 747.0})
 
     result = fit_alcor_wcs(tmp_path, pattern="*.fits")
     assert abs(result["xcen"] - 6.0) < 0.05
@@ -563,7 +567,7 @@ def test_fit_alcor_wcs_survives_injected_mismatches(monkeypatch, tmp_path):
     monkeypatch.setattr(alcor_mod, "alcor_calibration",
                         lambda time=None: {"epoch": "2024-09-05", "xcen": 0.0,
                                            "ycen": 0.0, "rotation": 0.0,
-                                           "radial_coeffs": (1.0, 0.0, 0.0), "horizon_radius": 662.0})
+                                           "radial_coeffs": (1.0, 0.0, 0.0), "horizon_radius": 747.0})
 
     result = fit_alcor_wcs(tmp_path, pattern="*.fits")
     assert abs(result["xcen"] - 6.0) < 0.1
@@ -650,7 +654,7 @@ def test_fit_alcor_wcs_parallel_matches_serial(monkeypatch, tmp_path):
     monkeypatch.setattr(alcor_mod, "alcor_calibration",
                         lambda time=None: {"epoch": "2024-09-05", "xcen": 0.0,
                                            "ycen": 0.0, "rotation": 0.0,
-                                           "radial_coeffs": (1.0, 0.0, 0.0), "horizon_radius": 662.0})
+                                           "radial_coeffs": (1.0, 0.0, 0.0), "horizon_radius": 747.0})
 
     result = fit_alcor_wcs(tmp_path, pattern="*.fits", workers=2)
     assert abs(result["xcen"] - 6.0) < 0.05
@@ -944,7 +948,7 @@ def test_fit_alcor_wcs_forwards_matcher_knobs(monkeypatch, tmp_path):
     monkeypatch.setattr(alcor_mod, "alcor_calibration",
                         lambda time=None: {"epoch": "2024-09-05", "xcen": 0.0,
                                            "ycen": 0.0, "rotation": 0.0,
-                                           "radial_coeffs": (1.0, 0.0, 0.0), "horizon_radius": 662.0})
+                                           "radial_coeffs": (1.0, 0.0, 0.0), "horizon_radius": 747.0})
 
     seen = {}
 

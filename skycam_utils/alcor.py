@@ -30,15 +30,14 @@ from astropy.coordinates import SkyCoord, AltAz, get_sun, get_body
 from .astrometry import MMT_LOCATION
 
 
-# Geometry constants for load_alcor_fits, calibrated by fit_alcor_wcs against
-# bright_star_sloan.fits (Vmag<=3) over a full night of dark-sky frames.
-# XSHIFT/YSHIFT are absolute pixel offsets valid at the calibrated RADIUS/
-# HORIZON_RADIUS; RADIAL_COEFFS=(k1,k3,k5) is the odd-power detector->sky plate
-# solution. The per-star residual floor is ~4 px (centroid noise), which
-# averages out for the fixed WCS; the fitted radial term removes a systematic
-# that grows to ~5 px near the horizon.
+# Nominal raw-frame geometry defaults. The real geometry is per-epoch (see
+# ALCOR_CALIBRATIONS) and is threaded explicitly through every call path;
+# ALCOR_HORIZON_RADIUS is only a fallback default for the rare arg-less call.
+# It is the zenith plate scale: the pixel radius from the zenith at which
+# altitude=0 (cdelt = 90/horizon_radius deg/px). ALCOR_RADIUS is the default
+# display-crop half-width for plot_alcor_fits.
 ALCOR_RADIUS = 680
-ALCOR_HORIZON_RADIUS = 662
+ALCOR_HORIZON_RADIUS = 747
 
 # Time-indexed lens calibrations. Each epoch holds the raw-frame geometry as
 # absolutes: the zenith pixel (xcen, ycen) in the raw FITS frame, the azimuth
@@ -48,9 +47,8 @@ ALCOR_HORIZON_RADIUS = 662
 # epoch by pasting the dict that fit_alcor_wcs prints. `epoch` is the calibration
 # night at day precision (UT, not local night -- do not "fix" it to local).
 ALCOR_CALIBRATIONS = [
-    {"epoch": "2024-09-05", "xcen": 694.765, "ycen": 697.595, "rotation": 0.3546,
-     "radial_coeffs": (1.0, -0.003402713701100494, 0.033355312555651086),
-     "horizon_radius": 662.0},
+    {"epoch": "2024-09-05", "xcen": 699.124, "ycen": 710.469, "rotation": -0.9523,
+     "radial_coeffs": (1.0, 0.08998303496979766, 0.0), "horizon_radius": 747.2},
 ]
 
 
@@ -120,18 +118,19 @@ def _predict_pixels(
     The zenith sits at ``(xcen, ycen)``; ``rotation`` is the camera azimuth
     zero-point offset (deg). The lens plate solution
     ``z = 90*(k1*rho + k3*rho**3 + k5*rho**5)`` (``rho = r/horizon_radius``,
-    ``z = 90 - alt``) is inverted for ``rho`` via Newton's method. The parity of
-    the raw frame (north toward -y, the reflection the old ``flipud`` produced)
-    is baked into the -sin/-cos signs; the matching WCS encodes the same parity
-    in its PC matrix (see ``build_alcor_wcs``).
+    ``z = 90 - alt``) is inverted for ``rho`` via Newton's method. The sky's
+    azimuth runs opposite to the sensor's polar angle (an all-sky camera images
+    the sky as seen from below), so the pixel angle is ``rotation - az``; north
+    (az=0) lands toward +y. The matching WCS encodes the same mapping in its PC
+    rotation matrix (see ``build_alcor_wcs``).
     """
     alt = np.asarray(alt, dtype=float)
     az = np.asarray(az, dtype=float)
     rho = _invert_radial(90.0 - alt, tuple(float(c) for c in radial_coeffs))
     r = horizon_radius * rho
-    ang = np.radians(az + rotation)
-    x = xcen - r * np.sin(ang)
-    y = ycen - r * np.cos(ang)
+    ang = np.radians(rotation - az)
+    x = xcen + r * np.sin(ang)
+    y = ycen + r * np.cos(ang)
     return x, y
 
 
@@ -174,7 +173,8 @@ def _fit_params(alt, az, obs_x, obs_y, init_params,
         result = least_squares(residuals, p0, loss="soft_l1", f_scale=3.0)
         xcen, ycen, rot, k3, k5 = result.x
         return dict(xcen=float(xcen), ycen=float(ycen), rotation=float(rot),
-                    radial_coeffs=(1.0, float(k3), float(k5)))
+                    radial_coeffs=(1.0, float(k3), float(k5)),
+                    horizon_radius=float(horizon_radius))
 
     p0 = np.array([init_params["xcen"], init_params["ycen"],
                    init_params["rotation"], init_k3], dtype=float)
@@ -189,7 +189,8 @@ def _fit_params(alt, az, obs_x, obs_y, init_params,
     result = least_squares(residuals, p0, loss="soft_l1", f_scale=3.0)
     xcen, ycen, rot, k3 = result.x
     return dict(xcen=float(xcen), ycen=float(ycen), rotation=float(rot),
-                radial_coeffs=(1.0, float(k3), 0.0))
+                radial_coeffs=(1.0, float(k3), 0.0),
+                horizon_radius=float(horizon_radius))
 
 
 def assign_alcor_matches(cat, det, params, tolerance,
@@ -374,7 +375,7 @@ def _detect_alcor_frame(task):
     index, filename, vmag_limit, min_alt, fwhm, threshold_sigma, max_detections = task
     filename = Path(filename)
     time = _frame_time(filename)
-    cube, _, _ = load_alcor_fits(filename, badpix=None)
+    cube, _, _ = load_alcor_fits(filename, badpix="repair")  # repair hot pixels so they aren't detected as stars
     cat = alcor_reference_altaz(time, vmag_limit=vmag_limit, min_alt=min_alt)
     det = detect_alcor_stars(cube, fwhm=fwhm, threshold_sigma=threshold_sigma,
                              max_detections=max_detections)
@@ -848,8 +849,9 @@ def select_dark_frames(files, sun_alt_max=-18.0, moon_alt_max=-6.0,
 def _base_arc_wcs(xcen, ycen, rotation, k1, horizon_radius):
     """Linear ARC WCS (no SIP) reproducing the raw forward model's linear part.
 
-    crpix is the 1-based zenith pixel; the PC matrix carries the rotation and the
-    det=-1 parity that replaces the old flipud.
+    crpix is the 1-based zenith pixel; the PC matrix is the pure rotation
+    (det=+1) that matches ``_predict_pixels`` (the sky/sensor handedness lives in
+    the ``rotation - az`` azimuth convention, encoded by the ARC longitude axis).
     """
     cdelt = 90.0 * k1 / horizon_radius
     rot = np.radians(rotation)
@@ -859,7 +861,7 @@ def _base_arc_wcs(xcen, ycen, rotation, k1, horizon_radius):
     wcs.wcs.crpix = [xcen + 1.0, ycen + 1.0]
     wcs.wcs.crval = [0.0, 90.0]
     wcs.wcs.cdelt = [cdelt, cdelt]
-    wcs.wcs.pc = [[c, -s], [-s, -c]]
+    wcs.wcs.pc = [[c, -s], [s, c]]
     wcs.wcs.lonpole = 0.0
     return wcs
 
@@ -908,9 +910,10 @@ def build_alcor_wcs(xcen=ALCOR_XCEN, ycen=ALCOR_YCEN, rotation=ALCOR_ROTATION,
                     horizon_radius=ALCOR_HORIZON_RADIUS, sip_degree=5):
     """Build the raw-frame alt/az ARC WCS for the alcor sensor.
 
-    The zenith is at pixel ``(xcen, ycen)``; ``rotation`` and the frame parity are
-    in the PC matrix; the radial ``k3``/``k5`` distortion is an exact analytic SIP
-    centered on the zenith. Cached on its hashable args; returns a fresh copy.
+    The zenith is at pixel ``(xcen, ycen)``; ``rotation`` is the PC rotation
+    matrix (the sky/sensor handedness is in the ``rotation - az`` convention, see
+    ``_predict_pixels``); the radial ``k3``/``k5`` distortion is an exact analytic
+    SIP centered on the zenith. Cached on its hashable args; returns a fresh copy.
 
     The lens is parametrized as a plate solution that maps the detector directly
     to the sky: ``z = 90*(k1*rho + k3*rho**3 + k5*rho**5)`` with ``rho =

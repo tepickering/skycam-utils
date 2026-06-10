@@ -19,6 +19,7 @@ from skycam_utils.alcor import (
     _timestamp_edges,
     alcor_keogram,
     alcor_proc_fits,
+    build_alcor_wcs,
     load_alcor_keogram_fits,
     load_alcor_fits,
     plot_alcor_keogram_fits,
@@ -32,31 +33,38 @@ TEST_FITS = Path(__file__).with_name("test.fits.bz2")
 
 
 @pytest.fixture(scope="module")
-def alcor_image_and_wcs():
+def alcor_cube_wcs_mask():
     return load_alcor_fits(TEST_FITS)
 
 
-def test_load_alcor_fits_returns_centered_rgb_image(alcor_image_and_wcs):
-    im, wcs = alcor_image_and_wcs
-
-    assert im.shape == (1360, 1360, 3)
-    assert np.issubdtype(im.dtype, np.floating)
-    assert np.isfinite(im).all()
-    assert im.max() > im.min()
-
-    assert list(wcs.wcs.ctype) == ["RA---ARC-SIP", "DEC--ARC-SIP"]
-    np.testing.assert_allclose(wcs.wcs.crpix, [680.5, 680.5])
-    np.testing.assert_allclose(wcs.wcs.crval, [0.0, 90.0])
-    np.testing.assert_allclose(wcs.wcs.cdelt, [90.0 / 662.0, 90.0 / 662.0])
-    assert wcs.wcs.lonpole == 0.0
-    assert wcs.sip is not None
+def test_load_alcor_fits_returns_raw_cube_wcs_mask(alcor_cube_wcs_mask):
+    cube, wcs, mask = alcor_cube_wcs_mask
+    assert cube.ndim == 3 and cube.shape[0] == 3          # (3, ny, nx), no transpose
+    assert cube.dtype == np.float32
+    assert wcs.wcs.ctype[0].startswith("RA---ARC")
+    assert mask is None or mask.shape == cube.shape       # native-orientation mask
 
 
-def test_load_alcor_fits_wcs_maps_zenith_and_horizon(alcor_image_and_wcs):
-    _, wcs = alcor_image_and_wcs
+def test_load_alcor_fits_no_bias_subtraction():
+    cube, _, _ = load_alcor_fits(TEST_FITS, badpix=None)
+    with fits.open(TEST_FITS) as hdul:
+        raw = np.asarray(hdul[0].data, dtype=np.float32)
+    np.testing.assert_array_equal(cube, raw)              # untouched: no -2000, no clip
 
-    # Zenith maps to the array center (0-based 679.5 == crpix 680.5).
-    _, zenith_alt = wcs.pixel_to_world_values(679.5, 679.5)
+
+def test_load_alcor_fits_accepts_explicit_wcs():
+    w = build_alcor_wcs(xcen=10.0, ycen=20.0, rotation=0.0,
+                        radial_coeffs=(1.0, 0.0, 0.0), horizon_radius=30.0)
+    _, wcs, _ = load_alcor_fits(TEST_FITS, wcs=w)
+    assert list(wcs.wcs.crpix) == [11.0, 21.0]
+
+
+def test_load_alcor_fits_wcs_maps_zenith_and_horizon(alcor_cube_wcs_mask):
+    _, wcs, _ = alcor_cube_wcs_mask
+
+    # Zenith maps to alt=90 at the WCS reference pixel.
+    xz, yz = wcs.wcs.crpix[0] - 1.0, wcs.wcs.crpix[1] - 1.0
+    _, zenith_alt = wcs.pixel_to_world_values(xz, yz)
     np.testing.assert_allclose(zenith_alt, 90.0, atol=0.02)
 
     # The SIP-encoded radial model round-trips world -> pixel -> world.

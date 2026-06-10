@@ -11,9 +11,7 @@ from pathlib import Path
 
 import numpy as np
 from scipy.ndimage import median_filter
-from scipy.ndimage import rotate
 from scipy.optimize import least_squares
-from scipy.ndimage import shift as ndimage_shift
 from scipy.spatial import cKDTree
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
@@ -782,6 +780,18 @@ def _alcor_frame_calibration(filename):
     return alcor_calibration(time)
 
 
+def _alcor_frame_time(filename):
+    """Best-effort observation Time for a frame: filename timestamp, then DATE
+    header, then None (so callers fall back to the latest epoch)."""
+    dt = _filename_ut_datetime(filename)
+    if dt is not None:
+        return Time(dt)
+    try:
+        return Time(_read_frame_date(filename), format="isot", scale="utc")
+    except (KeyError, OSError, ValueError):
+        return None
+
+
 def select_dark_frames(files, sun_alt_max=-18.0, moon_alt_max=-6.0,
                         location=MMT_LOCATION, log=None):
     """
@@ -940,16 +950,18 @@ def _build_alcor_wcs_cached(xcen, ycen, rotation, radial_coeffs, horizon_radius,
 
 def detect_alcor_stars(im, fwhm=3.0, threshold_sigma=5.0, max_detections=200):
     """
-    Detect point sources in a processed alcor RGB image.
+    Detect point sources in an alcor frame.
 
-    The three channels are summed into a luminance image, the background level is
-    estimated with a sigma-clipped median, and `~photutils.detection.DAOStarFinder`
-    extracts sources above ``threshold_sigma`` times the background noise.
+    A ``(3, ny, nx)`` RGB cube is averaged over its channels into a luminance
+    frame; a 2D frame is used as-is. The background level is estimated with a
+    sigma-clipped median, and `~photutils.detection.DAOStarFinder` extracts
+    sources above ``threshold_sigma`` times the background noise.
 
     Parameters
     ----------
     im : ndarray
-        Processed RGB image of shape (ny, nx, 3), as returned by ``load_alcor_fits``.
+        A 2D frame ``(ny, nx)`` or a raw ``(3, ny, nx)`` RGB cube, as returned by
+        ``load_alcor_fits``.
     fwhm : float (default=3.0)
         FWHM (pixels) of the Gaussian kernel used by the star finder.
     threshold_sigma : float (default=5.0)
@@ -965,7 +977,13 @@ def detect_alcor_stars(im, fwhm=3.0, threshold_sigma=5.0, max_detections=200):
         Detected sources with at least ``xcentroid``, ``ycentroid``, ``flux``
         columns. Empty (with those columns) if nothing is found.
     """
-    lum = np.asarray(im, dtype=float).sum(axis=2)
+    arr = np.asarray(im, dtype=float)
+    if arr.ndim == 3:
+        lum = arr.mean(axis=0)            # (3, ny, nx) R,G,B -> luminance
+    elif arr.ndim == 2:
+        lum = arr
+    else:
+        raise ValueError(f"expected a 2D frame or (3, ny, nx) cube, got {arr.shape}")
     _, median, std = sigma_clipped_stats(lum, sigma=3.0)
     finder = DAOStarFinder(fwhm=fwhm, threshold=threshold_sigma * std)
     sources = finder(lum - median)
@@ -1223,144 +1241,71 @@ def alcor_reference_altaz(time, vmag_limit=3.0, min_alt=5.0, refraction=True,
     return cat
 
 
-def load_alcor_fits(filename, rotation=None, xcen=696, ycen=698,
-                    radius=ALCOR_RADIUS, horizon_radius=ALCOR_HORIZON_RADIUS,
-                    xshift=None, yshift=None,
-                    radial_coeffs=None, sip_degree=5,
-                    badpix="repair", return_mask=False, masks_dir=None):
-    """
-    Load a FITS image from the alcor OMEA 8C all-sky camera and return a
-    zenith-centered, north-up RGB image along with a WCS that maps pixel
-    coordinates to altitude/azimuth.
+def load_alcor_fits(filename, wcs=None, badpix="repair", masks_dir=None):
+    """Load an alcor OMEA 8C FITS file and return ``(cube, wcs, mask)``.
 
-    The image is bias-subtracted, trimmed to a square centered on the
-    illuminated region, rotated to remove the camera tilt, and flipped so
-    north is at the top.
-
-    The WCS is an ARC (zenith equidistant) projection with the pole placed
-    at zenith (CRVAL=(0, 90)) so that altitude=0 sits on a circle of
-    `horizon_radius` pixels. Azimuth is encoded as the RA-analog and
-    altitude as the Dec-analog. The 185° lens FOV means usable pixels
-    extend slightly past the horizon_radius circle (altitude ≲ -2.5°).
+    The raw ``(3, ny, nx)`` RGB cube is returned in native FITS orientation,
+    unmodified except for optional bad-pixel repair: no transpose, trim, rotate,
+    shift, or flipud, and no bias subtraction. Geometry lives entirely in the
+    returned WCS.
 
     Parameters
     ----------
-    filename : str
-        FITS filename. Compressed (.gz, .bz2) inputs are supported.
-    rotation : float or None (default=None)
-        Camera rotation w.r.t. true north, in degrees. When None, resolved from
-        the calibration epoch nearest the frame's time (see alcor_calibration).
-    xcen : int (default=696)
-        X center of illuminated region in original image coordinates.
-    ycen : int (default=698)
-        Y center of illuminated region in original image coordinates.
-    radius : int (default=680)
-        Half-width of the trimmed square around (xcen, ycen).
-    horizon_radius : float (default=662)
-        Pixel radius from zenith at which altitude=0.
-    xshift : float or None (default=None)
-        Zenith offset from the array center in x (pixels). When None, resolved
-        from the nearest calibration epoch. Applied via scipy.ndimage.shift.
-    yshift : float or None (default=None)
-        Zenith offset from the array center in y (pixels). When None, resolved
-        from the nearest calibration epoch.
-    radial_coeffs : tuple of float or None (default=None)
-        The (k1, k3, k5) plate-solution coefficients. When None, resolved from
-        the nearest calibration epoch. The idealized mapping is (1.0, 0.0, 0.0).
-    sip_degree : int (default=5)
-        Degree of the SIP polynomial used to encode lens distortion in the
-        WCS. A degree of 5 is required to represent the ``k5`` term exactly;
-        lower values may be used when only ``k3`` is non-zero.
+    filename : str or Path
+        FITS file. Compressed (.gz, .bz2) inputs are supported.
+    wcs : `astropy.wcs.WCS` or None (default=None)
+        Geometry WCS. When None, the calibration epoch nearest the frame's time
+        is resolved and ``build_alcor_wcs`` constructs the raw-frame ARC WCS.
     badpix : str or None or path or ndarray (default="repair")
-        Bad-pixel handling on the raw frame, before trim/resample. "repair"
-        resolves the nearest-date epoch mask and replaces flagged pixels per
-        channel with their local 5x5 median; None disables repair; a path or
-        (3, ny, nx) bool array uses that mask explicitly (and repairs).
-    return_mask : bool (default=False)
-        When True, also return the bad-pixel mask aligned to the returned image
-        frame, i.e. (im, mask, wcs). Pair with badpix=None to get untouched
-        pixels plus the mask (e.g. to OR with a horizon mask for photometry).
+        "repair" repairs flagged pixels per channel with their local 5x5 median;
+        None leaves the cube untouched (the mask is still resolved and returned);
+        a path or (3, ny, nx) bool array uses that mask explicitly (and repairs).
     masks_dir : str or None (default=None)
         Override the bad-pixel masks directory (else $ALCOR_BADPIX_DIR, else the
         packaged data/badpix/).
 
     Returns
     -------
-    im : ndarray
-        Zenith-centered, north-up image of shape (2*radius, 2*radius, 3).
+    cube : ndarray
+        Raw ``(3, ny, nx)`` float32 cube (channels 0,1,2 = R,G,B).
     wcs : `astropy.wcs.WCS`
-        ARC-projection WCS mapping pixel (x, y) ↔ (azimuth, altitude).
+        Raw-frame ARC WCS mapping pixel (x, y) <-> (azimuth, altitude).
+    mask : ndarray or None
+        ``(3, ny, nx)`` bool bad-pixel mask in native orientation, or None when
+        no mask is available.
     """
-    if rotation is None or xshift is None or yshift is None or radial_coeffs is None:
-        cal = _alcor_frame_calibration(filename)
-        if rotation is None:
-            rotation = cal["rotation"]
-        if xshift is None:
-            xshift = cal["xshift"]
-        if yshift is None:
-            yshift = cal["yshift"]
-        if radial_coeffs is None:
-            radial_coeffs = cal["radial_coeffs"]
-
     with fits.open(filename) as hdul:
-        data = np.asarray(hdul[0].data)        # (3, ny, nx), raw sensor layout
+        cube = np.asarray(hdul[0].data, dtype=np.float32)   # (3, ny, nx)
 
-    # --- bad-pixel handling on the raw frame, before any trim/resample ---
-    raw_mask = None
-    if return_mask or badpix is not None:
-        if isinstance(badpix, np.ndarray):
-            cand = badpix.astype(bool)
-        elif isinstance(badpix, Path) or (isinstance(badpix, str) and badpix != "repair"):
-            cand = np.asarray(fits.getdata(badpix)).astype(bool)
-        else:                                   # "repair" or None -> resolve by time
+    # --- resolve the bad-pixel mask (explicit, or nearest-date) ---
+    mask = None
+    if isinstance(badpix, np.ndarray):
+        cand = badpix.astype(bool)
+    elif isinstance(badpix, Path) or (isinstance(badpix, str) and badpix != "repair"):
+        cand = np.asarray(fits.getdata(badpix)).astype(bool)
+    else:                                                   # "repair" or None
+        cand = None
+        try:
+            dt = _filename_ut_datetime(filename)
+            t = (Time(dt) if dt is not None
+                 else Time(_read_frame_date(filename), format="isot", scale="utc"))
+            cand, _ = load_alcor_badpix_mask(t, masks_dir=masks_dir)
+        except (KeyError, OSError, ValueError):
             cand = None
-            try:
-                dt = _filename_ut_datetime(filename)
-                t = (Time(dt) if dt is not None
-                     else Time(_read_frame_date(filename), format="isot", scale="utc"))
-                cand, _ = load_alcor_badpix_mask(t, masks_dir=masks_dir)
-            except (KeyError, OSError, ValueError):
-                cand = None
-        if cand is not None and cand.shape == data.shape:
-            raw_mask = cand
+    if cand is not None and cand.shape == cube.shape:
+        mask = cand
 
-    if badpix is not None and raw_mask is not None:
-        data = _apply_badpix_repair(data, raw_mask)
+    if badpix is not None and mask is not None:
+        cube = _apply_badpix_repair(cube, mask)
 
-    im = np.transpose(data, axes=(1, 2, 0)) - 2000  # 2000 is a bit above the normal bias level of the camera.
-    im[im < 0] = 0
-    im = im * 1.0
-    xl = xcen - radius
-    xu = xcen + radius
-    yl = ycen - radius
-    yu = ycen + radius
-    im = im[yl:yu, xl:xu, :]
-    im = np.flipud(rotate(im, rotation, reshape=False))
-    if xshift != 0.0 or yshift != 0.0:
-        # Recenter the zenith onto the array center (rows=y, cols=x, channels untouched).
-        im = ndimage_shift(im, shift=(-yshift, -xshift, 0.0), order=1, mode="constant", cval=0.0)
+    if wcs is None:
+        cal = alcor_calibration(_alcor_frame_time(filename))
+        wcs = build_alcor_wcs(xcen=cal["xcen"], ycen=cal["ycen"],
+                              rotation=cal["rotation"],
+                              radial_coeffs=cal["radial_coeffs"],
+                              horizon_radius=cal["horizon_radius"])
 
-    wcs = build_alcor_wcs(
-        radius=radius,
-        horizon_radius=horizon_radius,
-        radial_coeffs=tuple(float(c) for c in radial_coeffs),
-        sip_degree=sip_degree,
-    )
-
-    if return_mask:
-        if raw_mask is not None:
-            mk = np.transpose(raw_mask, axes=(1, 2, 0)).astype(np.uint8)
-            mk = mk[yl:yu, xl:xu, :]
-            mk = np.flipud(rotate(mk, rotation, reshape=False, order=0))
-            if xshift != 0.0 or yshift != 0.0:
-                mk = ndimage_shift(mk, shift=(-yshift, -xshift, 0.0), order=0,
-                                   mode="constant", cval=0)
-            mask_out = mk.astype(bool)
-        else:
-            mask_out = np.zeros(im.shape, dtype=bool)
-        return im, mask_out, wcs
-
-    return im, wcs
+    return cube, wcs, mask
 
 
 def alcor_proc_fits(filename, output_file=None, overwrite=False, **kwargs):

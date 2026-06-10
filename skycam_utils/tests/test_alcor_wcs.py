@@ -224,23 +224,34 @@ def test_build_alcor_wcs_with_radial_term_reproduces_forward_model():
     np.testing.assert_allclose(wcs_y, model_y, atol=1e-4)
 
 
-def test_load_alcor_fits_idealized_defaults_unchanged():
+def test_load_alcor_fits_returns_raw_cube():
     test_fits = Path(__file__).with_name("test.fits.bz2")
-    im, wcs = load_alcor_fits(test_fits)
-    assert im.shape == (1360, 1360, 3)
-    np.testing.assert_allclose(wcs.wcs.crpix, [680.5, 680.5])
+    cube, wcs, _ = load_alcor_fits(test_fits)
+    assert cube.ndim == 3 and cube.shape[0] == 3
+    assert cube.dtype == np.float32
     np.testing.assert_allclose(wcs.wcs.cdelt, [90.0 / 662.0, 90.0 / 662.0])
+
+
+def test_detect_alcor_stars_accepts_cube_and_2d():
+    yy, xx = np.mgrid[0:40, 0:40]
+    img = 500.0 * np.exp(-((xx - 25) ** 2 + (yy - 20) ** 2) / (2 * 2.0**2))
+    cube = np.stack([img, img, img], axis=0)              # (3, ny, nx)
+    det_cube = detect_alcor_stars(cube, fwhm=2.0, threshold_sigma=3.0)
+    det_2d = detect_alcor_stars(img, fwhm=2.0, threshold_sigma=3.0)
+    assert len(det_cube) >= 1 and len(det_2d) >= 1
+    assert abs(det_cube["xcentroid"][0] - 25) < 1.5
+    assert abs(det_cube["ycentroid"][0] - 20) < 1.5
 
 
 def test_detect_alcor_stars_on_synthetic_image():
     rng = np.random.default_rng(0)
-    im = np.zeros((200, 200, 3), dtype=float)
+    im = np.zeros((3, 200, 200), dtype=float)
     im += rng.normal(0.0, 1.0, im.shape)
     truth = [(50.0, 60.0), (120.0, 140.0), (160.0, 30.0)]
     yy, xx = np.mgrid[0:200, 0:200]
     for cx, cy in truth:
         g = 500.0 * np.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2 * 2.0**2))
-        im += g[:, :, None]
+        im += g[None, :, :]
 
     sources = detect_alcor_stars(im, fwhm=2.5, threshold_sigma=5.0)
     assert len(sources) >= 3
@@ -253,7 +264,7 @@ def test_detect_alcor_stars_on_synthetic_image():
 
 def test_detect_alcor_stars_caps_to_brightest():
     rng = np.random.default_rng(11)
-    im = np.zeros((200, 200, 3), dtype=float)
+    im = np.zeros((3, 200, 200), dtype=float)
     im += rng.normal(0.0, 1.0, im.shape)
     yy, xx = np.mgrid[0:200, 0:200]
     # 8 stars of decreasing brightness at distinct positions
@@ -261,7 +272,7 @@ def test_detect_alcor_stars_caps_to_brightest():
                (40, 120), (90, 150), (150, 130), (170, 170)]
     amps = np.linspace(2000.0, 400.0, len(centers))
     for (cx, cy), amp in zip(centers, amps):
-        im += amp * np.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2 * 2.0**2))[:, :, None]
+        im += amp * np.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2 * 2.0**2))[None, :, :]
 
     capped = detect_alcor_stars(im, fwhm=2.5, threshold_sigma=5.0, max_detections=3)
     assert len(capped) == 3
@@ -273,8 +284,8 @@ def test_detect_alcor_stars_caps_to_brightest():
 
 def test_detect_alcor_stars_on_real_fixture():
     test_fits = Path(__file__).with_name("test.fits.bz2")
-    im, _ = load_alcor_fits(test_fits)
-    sources = detect_alcor_stars(im)
+    cube, _, _ = load_alcor_fits(test_fits)
+    sources = detect_alcor_stars(cube)
     assert len(sources) > 10
 
 

@@ -18,6 +18,8 @@ from skycam_utils.alcor import (
     ALCOR_HORIZON_RADIUS,
     ALCOR_RADIUS,
     ALCOR_RADIAL_COEFFS,
+    ALCOR_XCEN,
+    ALCOR_YCEN,
     _fit_params,
     _moon_altitude,
     _predict_pixels,
@@ -34,21 +36,29 @@ from skycam_utils.alcor import (
 )
 
 
-def test_predict_pixels_idealized_reproduces_zenith_and_horizon():
-    # Pass the idealized geometry explicitly: the module defaults are now the
-    # fitted (non-zero) calibration constants, so we override them here to test
-    # the equidistant mapping itself.
-    ideal = dict(xshift=0.0, yshift=0.0, rotation=0.0, radial_coeffs=(1.0, 0.0, 0.0))
-    cen = ALCOR_RADIUS - 0.5
-    x, y = _predict_pixels(90.0, 0.0, **ideal)
-    np.testing.assert_allclose([x, y], [cen, cen], atol=1e-9)
+def test_predict_pixels_zenith_maps_to_center():
+    x, y = _predict_pixels(90.0, 0.0, xcen=696.0, ycen=698.0, rotation=0.0,
+                           radial_coeffs=(1.0, 0.0, 0.0), horizon_radius=662.0)
+    assert abs(x - 696.0) < 1e-6
+    assert abs(y - 698.0) < 1e-6
 
+
+def test_predict_pixels_north_is_minus_y():
+    # az=0, alt below zenith -> straight "up" the sensor = decreasing row (-y)
+    x, y = _predict_pixels(80.0, 0.0, xcen=696.0, ycen=698.0, rotation=0.0,
+                           radial_coeffs=(1.0, 0.0, 0.0), horizon_radius=662.0)
+    assert abs(x - 696.0) < 1e-6
+    assert y < 698.0
+
+
+def test_predict_pixels_horizon_radius_at_alt_zero():
+    # At alt=0 the detector radius equals horizon_radius about the zenith.
     az = np.array([0.0, 90.0, 180.0, 270.0])
-    x, y = _predict_pixels(np.zeros_like(az), az, **ideal)
-    radii = np.hypot(x - cen, y - cen)
-    np.testing.assert_allclose(radii, ALCOR_HORIZON_RADIUS, atol=1e-9)
-    np.testing.assert_allclose(x, cen - ALCOR_HORIZON_RADIUS * np.sin(np.radians(az)), atol=1e-9)
-    np.testing.assert_allclose(y, cen + ALCOR_HORIZON_RADIUS * np.cos(np.radians(az)), atol=1e-9)
+    x, y = _predict_pixels(np.zeros_like(az), az, xcen=696.0, ycen=698.0,
+                           rotation=0.0, radial_coeffs=(1.0, 0.0, 0.0),
+                           horizon_radius=662.0)
+    radii = np.hypot(x - 696.0, y - 698.0)
+    np.testing.assert_allclose(radii, 662.0, atol=1e-9)
 
 
 def test_predict_pixels_radial_term_changes_radius():
@@ -56,11 +66,10 @@ def test_predict_pixels_radial_term_changes_radius():
     # a positive rho**5 coefficient makes z grow faster with rho, so a star at a
     # fixed altitude (fixed z) is reached at a SMALLER detector radius: it is
     # pulled inward relative to the equidistant mapping.
-    cen = ALCOR_RADIUS - 0.5
     base_x, base_y = _predict_pixels(10.0, 45.0)
     bent_x, bent_y = _predict_pixels(10.0, 45.0, radial_coeffs=(1.0, 0.0, 0.1))
-    base_r = np.hypot(base_x - cen, base_y - cen)
-    bent_r = np.hypot(bent_x - cen, bent_y - cen)
+    base_r = np.hypot(base_x - ALCOR_XCEN, base_y - ALCOR_YCEN)
+    bent_r = np.hypot(bent_x - ALCOR_XCEN, bent_y - ALCOR_YCEN)
     assert bent_r < base_r
 
 
@@ -162,31 +171,48 @@ def test_filename_ut_datetime_applies_mst_offset():
 
 
 def test_build_alcor_wcs_idealized_matches_equidistant():
-    wcs = build_alcor_wcs(radius=680, horizon_radius=662, radial_coeffs=(1.0, 0.0, 0.0))
+    wcs = build_alcor_wcs(xcen=696.0, ycen=698.0, rotation=0.0,
+                          radial_coeffs=(1.0, 0.0, 0.0), horizon_radius=662.0)
     assert list(wcs.wcs.ctype) == ["RA---ARC", "DEC--ARC"]
-    np.testing.assert_allclose(wcs.wcs.crpix, [680.5, 680.5])
+    np.testing.assert_allclose(wcs.wcs.crpix, [697.0, 699.0])
     np.testing.assert_allclose(wcs.wcs.cdelt, [90.0 / 662.0, 90.0 / 662.0])
     assert wcs.sip is None  # no SIP attached when the model is purely linear
 
     az = np.array([0.0, 90.0, 180.0, 270.0])
     px, py = wcs.world_to_pixel_values(az, np.zeros_like(az))
-    radii = np.hypot(px - 679.5, py - 679.5)
+    radii = np.hypot(px - 696.0, py - 698.0)
     np.testing.assert_allclose(radii, 662.0, atol=1e-6)
+
+
+def test_build_alcor_wcs_reproduces_raw_forward_model():
+    xcen, ycen, rot, coeffs, hr = 696.0, 698.0, 0.4, (1.0, 0.0138, 0.0), 662.0
+    wcs = build_alcor_wcs(xcen=xcen, ycen=ycen, rotation=rot,
+                          radial_coeffs=coeffs, horizon_radius=hr)
+    az = np.array([0.0, 90.0, 180.0, 270.0, 45.0])
+    alt = np.array([85.0, 60.0, 30.0, 10.0, 0.0])
+    mx, my = _predict_pixels(alt, az, xcen=xcen, ycen=ycen, rotation=rot,
+                             radial_coeffs=coeffs, horizon_radius=hr)
+    # world_to_pixel_values runs astropy's iterative SIP inversion (refining the
+    # approximate AP/BP with the exact A/B); wcs_world2pix would only apply the
+    # approximate inverse and drift radially.
+    wx, wy = wcs.world_to_pixel_values(az, alt)
+    np.testing.assert_allclose(wx, mx, atol=1e-3)
+    np.testing.assert_allclose(wy, my, atol=1e-3)
 
 
 def test_build_alcor_wcs_with_radial_term_reproduces_forward_model():
     coeffs = (1.0, 0.02, 0.05)
-    wcs = build_alcor_wcs(radius=680, horizon_radius=662, radial_coeffs=coeffs)
+    xcen, ycen, hr = 696.0, 698.0, 662.0
+    wcs = build_alcor_wcs(xcen=xcen, ycen=ycen, rotation=0.0,
+                          radial_coeffs=coeffs, horizon_radius=hr)
     assert wcs.sip is not None
 
     alt = np.array([80.0, 60.0, 40.0, 20.0, 5.0])
     az = np.array([10.0, 100.0, 190.0, 280.0, 350.0])
     assert list(wcs.wcs.ctype) == ["RA---ARC-SIP", "DEC--ARC-SIP"]
-    # build_alcor_wcs encodes only the radial plate solution about the array
-    # center; compare against the forward model with no shift/rotation so the
-    # geometries match (the module defaults now carry non-zero shifts).
     model_x, model_y = _predict_pixels(
-        alt, az, xshift=0.0, yshift=0.0, rotation=0.0, radial_coeffs=coeffs
+        alt, az, xcen=xcen, ycen=ycen, rotation=0.0, radial_coeffs=coeffs,
+        horizon_radius=hr,
     )
     wcs_x, wcs_y = wcs.world_to_pixel_values(az, alt)
     # The plate-solution radial model maps the detector to the sky as an

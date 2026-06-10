@@ -42,15 +42,17 @@ from .astrometry import MMT_LOCATION
 ALCOR_RADIUS = 680
 ALCOR_HORIZON_RADIUS = 662
 
-# Time-indexed lens calibrations. Each epoch holds only the fitted geometry
-# (xshift, yshift, rotation, radial_coeffs); the trim/scale geometry
-# (ALCOR_RADIUS / ALCOR_HORIZON_RADIUS / xcen / ycen) is fixed. The camera
-# geometry drifts over time (mount/focus), so the epoch nearest in time to an
-# image is used (see alcor_calibration). Add a new epoch by pasting the dict
-# that fit_alcor_wcs prints. `epoch` is the calibration night at day precision.
+# Time-indexed lens calibrations. Each epoch holds the raw-frame geometry as
+# absolutes: the zenith pixel (xcen, ycen) in the raw FITS frame, the azimuth
+# rotation, the radial_coeffs (k1, k3, k5), and the horizon_radius (pixels from
+# zenith to alt=0). The camera geometry drifts over time (mount/focus), so the
+# epoch nearest in time to an image is used (see alcor_calibration). Add a new
+# epoch by pasting the dict that fit_alcor_wcs prints. `epoch` is the calibration
+# night at day precision (UT, not local night -- do not "fix" it to local).
 ALCOR_CALIBRATIONS = [
-    {"epoch": "2024-09-04", "xshift": -4.570, "yshift": 4.413,
-     "rotation": 0.3886, "radial_coeffs": (1.0, 0.01383, 0.0)},
+    {"epoch": "2024-09-04", "xcen": 696.0, "ycen": 698.0,
+     "rotation": 0.3886, "radial_coeffs": (1.0, 0.01383, 0.0),
+     "horizon_radius": 662.0},
 ]
 
 
@@ -81,8 +83,8 @@ def alcor_calibration(time=None):
 # references (in _predict_pixels, build_alcor_wcs, etc.) keep working unchanged.
 _LATEST_CALIBRATION = alcor_calibration()
 ALCOR_ROTATION = _LATEST_CALIBRATION["rotation"]
-ALCOR_XSHIFT = _LATEST_CALIBRATION["xshift"]
-ALCOR_YSHIFT = _LATEST_CALIBRATION["yshift"]
+ALCOR_XCEN = _LATEST_CALIBRATION["xcen"]
+ALCOR_YCEN = _LATEST_CALIBRATION["ycen"]
 ALCOR_RADIAL_COEFFS = _LATEST_CALIBRATION["radial_coeffs"]
 
 
@@ -108,45 +110,30 @@ def _invert_radial(z_deg, radial_coeffs, n_iter=8):
 def _predict_pixels(
     alt,
     az,
-    xshift=ALCOR_XSHIFT,
-    yshift=ALCOR_YSHIFT,
+    xcen=ALCOR_XCEN,
+    ycen=ALCOR_YCEN,
     rotation=0.0,
     radial_coeffs=ALCOR_RADIAL_COEFFS,
-    radius=ALCOR_RADIUS,
     horizon_radius=ALCOR_HORIZON_RADIUS,
 ):
-    """
-    Forward lens model: map altitude/azimuth (degrees) to processed-frame pixel
-    coordinates (x=column, y=row).
+    """Forward lens model: map altitude/azimuth (deg) to RAW-frame pixel
+    coordinates (x=column, y=row, 0-based).
 
-    Pixel y increases upward (FITS/WCS convention), matching the coordinate
-    system of the WCS returned by ``load_alcor_fits``; it is not a direct numpy
-    row index.
-
-    The lens is described by the plate solution ``z = 90*(k1*rho + k3*rho**3 +
-    k5*rho**5)`` with ``rho = r / horizon_radius`` the normalized detector radius
-    and ``z = 90 - alt`` the zenith angle (an odd-power, symmetric-fisheye
-    polynomial in detector radius). Mapping alt/az to a pixel inverts this for
-    ``rho`` via Newton's method. The idealized coefficients ``(1, 0, 0)`` give the
-    equidistant ARC mapping; higher-order terms encode the lens's non-linear
-    behavior with zenith angle. ``xshift``/``yshift`` offset the zenith from the
-    array center.
-
-    ``rotation`` is the camera's absolute azimuth-frame rotation (degrees).
-    ``fit_alcor_wcs`` fits against a neutral (un-rotated, un-shifted) frame, so the
-    recovered value is absolute; ``load_alcor_fits`` then applies exactly this
-    rotation to the image. It defaults to 0.0, the idealized/centered frame.
-
-    The zenith maps to the array geometric center (radius-0.5, radius-0.5),
-    consistent with crpix=radius+0.5.
+    The zenith sits at ``(xcen, ycen)``; ``rotation`` is the camera azimuth
+    zero-point offset (deg). The lens plate solution
+    ``z = 90*(k1*rho + k3*rho**3 + k5*rho**5)`` (``rho = r/horizon_radius``,
+    ``z = 90 - alt``) is inverted for ``rho`` via Newton's method. The parity of
+    the raw frame (north toward -y, the reflection the old ``flipud`` produced)
+    is baked into the -sin/-cos signs; the matching WCS encodes the same parity
+    in its PC matrix (see ``build_alcor_wcs``).
     """
     alt = np.asarray(alt, dtype=float)
     az = np.asarray(az, dtype=float)
     rho = _invert_radial(90.0 - alt, tuple(float(c) for c in radial_coeffs))
     r = horizon_radius * rho
     ang = np.radians(az + rotation)
-    x = (radius - 0.5) + xshift - r * np.sin(ang)
-    y = (radius - 0.5) + yshift + r * np.cos(ang)
+    x = xcen - r * np.sin(ang)
+    y = ycen - r * np.cos(ang)
     return x, y
 
 
@@ -837,14 +824,21 @@ def select_dark_frames(files, sun_alt_max=-18.0, moon_alt_max=-6.0,
     return [f for f, k in zip(files, keep) if k]
 
 
-def _base_arc_wcs(radius, horizon_radius, k1):
-    """Construct the linear ARC WCS (no SIP) for the given geometry."""
+def _base_arc_wcs(xcen, ycen, rotation, k1, horizon_radius):
+    """Linear ARC WCS (no SIP) reproducing the raw forward model's linear part.
+
+    crpix is the 1-based zenith pixel; the PC matrix carries the rotation and the
+    det=-1 parity that replaces the old flipud.
+    """
     cdelt = 90.0 * k1 / horizon_radius
+    rot = np.radians(rotation)
+    c, s = np.cos(rot), np.sin(rot)
     wcs = WCS(naxis=2)
     wcs.wcs.ctype = ["RA---ARC", "DEC--ARC"]
-    wcs.wcs.crpix = [radius + 0.5, radius + 0.5]
+    wcs.wcs.crpix = [xcen + 1.0, ycen + 1.0]
     wcs.wcs.crval = [0.0, 90.0]
     wcs.wcs.cdelt = [cdelt, cdelt]
+    wcs.wcs.pc = [[c, -s], [-s, -c]]
     wcs.wcs.lonpole = 0.0
     return wcs
 
@@ -888,14 +882,14 @@ def _fit_sip_inverse(a, b, radius, sip_degree):
     return ap, bp
 
 
-def build_alcor_wcs(radius=ALCOR_RADIUS, horizon_radius=ALCOR_HORIZON_RADIUS,
-                    radial_coeffs=ALCOR_RADIAL_COEFFS, sip_degree=5):
-    """
-    Build an ARC-projection WCS for the processed alcor frame. When the radial
-    model has non-trivial higher-order terms, the deviation from the linear
-    (equidistant) mapping is encoded as an exact analytic SIP distortion, so
-    ``world_to_pixel``/``to_header`` reproduce the lens distortion. Cached
-    because the geometry is fixed across images.
+def build_alcor_wcs(xcen=ALCOR_XCEN, ycen=ALCOR_YCEN, rotation=ALCOR_ROTATION,
+                    radial_coeffs=ALCOR_RADIAL_COEFFS,
+                    horizon_radius=ALCOR_HORIZON_RADIUS, sip_degree=5):
+    """Build the raw-frame alt/az ARC WCS for the alcor sensor.
+
+    The zenith is at pixel ``(xcen, ycen)``; ``rotation`` and the frame parity are
+    in the PC matrix; the radial ``k3``/``k5`` distortion is an exact analytic SIP
+    centered on the zenith. Cached on its hashable args; returns a fresh copy.
 
     The lens is parametrized as a plate solution that maps the detector directly
     to the sky: ``z = 90*(k1*rho + k3*rho**3 + k5*rho**5)`` with ``rho =
@@ -904,24 +898,23 @@ def build_alcor_wcs(radius=ALCOR_RADIUS, horizon_radius=ALCOR_HORIZON_RADIUS,
     the ``k5`` term needs degree 5, hence ``sip_degree=5``). The Cartesian
     displacement of this radial map is an exact degree-5 polynomial in the
     detector pixel offsets, so the SIP coefficients are constructed analytically
-    (not fitted) and reproduce the plate solution to numerical precision over
-    the whole FOV.
-
-    Accepts any iterable of radial coefficients (coerced to a tuple for caching)
-    and returns a fresh WCS copy on each call, so the cached canonical object is
-    never mutated by callers.
+    (not fitted) and reproduce the plate solution to numerical precision over the
+    whole FOV. The radial polynomial is rotation/reflection invariant, so the
+    same A/B coefficients hold in the raw frame -- only the SIP reference pixel
+    moves to the zenith.
     """
-    wcs = _build_alcor_wcs_cached(
-        int(radius), float(horizon_radius),
-        tuple(float(c) for c in radial_coeffs), int(sip_degree),
-    )
-    return wcs.deepcopy()
+    return _build_alcor_wcs_cached(
+        float(xcen), float(ycen), float(rotation),
+        tuple(float(c) for c in radial_coeffs),
+        float(horizon_radius), int(sip_degree),
+    ).deepcopy()
 
 
 @lru_cache(maxsize=32)
-def _build_alcor_wcs_cached(radius, horizon_radius, radial_coeffs, sip_degree):
+def _build_alcor_wcs_cached(xcen, ycen, rotation, radial_coeffs, horizon_radius,
+                            sip_degree):
     k1, k3, k5 = radial_coeffs
-    base = _base_arc_wcs(radius, horizon_radius, k1)
+    base = _base_arc_wcs(xcen, ycen, rotation, k1, horizon_radius)
     if abs(k3) < 1e-12 and abs(k5) < 1e-12:
         return base
 
@@ -937,11 +930,11 @@ def _build_alcor_wcs_cached(radius, horizon_radius, radial_coeffs, sip_degree):
     a[5, 0] = c5; a[3, 2] = 2 * c5; a[1, 4] = c5
     b[0, 3] = c3; b[2, 1] = c3
     b[0, 5] = c5; b[2, 3] = 2 * c5; b[4, 1] = c5
-    ap, bp = _fit_sip_inverse(a, b, radius, sip_degree)
+    ap, bp = _fit_sip_inverse(a, b, int(round(H)), sip_degree)
 
     wcs = base.deepcopy()
     wcs.wcs.ctype = ["RA---ARC-SIP", "DEC--ARC-SIP"]
-    wcs.sip = Sip(a, b, ap, bp, [radius + 0.5, radius + 0.5])
+    wcs.sip = Sip(a, b, ap, bp, [xcen + 1.0, ycen + 1.0])
     return wcs
 
 

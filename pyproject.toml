@@ -56,7 +56,7 @@ create_badpix_mask = "skycam_utils.alcor:create_badpix_mask_cli"
 include = ["skycam_utils*"]
 
 [tool.setuptools.package-data]
-skycam_utils = ["data/*"]
+skycam_utils = ["data/*", "data/badpix/*"]
 
 [tool.setuptools_scm]
 version_file = "skycam_utils/_version.py"

@@ -103,3 +103,44 @@ def test_apply_badpix_repair_local_median():
     assert out[0, 1, 1] == 10                   # neighbor untouched
     assert (out[1] == 10).all() and (out[2] == 10).all()   # other channels untouched
     assert data[0, 2, 2] == 1000                # input not mutated
+
+
+def _write_alcor_raw(path, cube):
+    # alcor raw layout is (3, ny, nx) int16
+    fits.PrimaryHDU(data=cube.astype(np.int16)).writeto(path, overwrite=True)
+
+
+def test_load_alcor_fits_repairs_and_returns_mask(tmp_path):
+    from skycam_utils.alcor import load_alcor_fits
+    ny = nx = 60
+    cube = np.full((3, ny, nx), 2100, dtype=np.int16)   # ~100 above bias
+    cube[0, 30, 30] = 30000                              # hot pixel in R at center
+    raw = tmp_path / "raw.fits"
+    _write_alcor_raw(raw, cube)
+
+    badpix = np.zeros((3, ny, nx), dtype=bool)
+    badpix[0, 30, 30] = True
+
+    # explicit mask array -> repair; neutral geometry so no resampling moves pixels
+    im, mask, wcs = load_alcor_fits(
+        raw, xcen=30, ycen=30, radius=25, horizon_radius=25,
+        rotation=0.0, xshift=0.0, yshift=0.0, radial_coeffs=(1.0, 0.0, 0.0),
+        badpix=badpix, return_mask=True)
+
+    assert im.shape == (50, 50, 3)
+    assert mask.shape == im.shape
+    assert im.max() < 1000          # hot pixel repaired (would be ~28000 otherwise)
+    assert mask[:, :, 0].sum() == 1 # exactly the one R bad pixel survives transforms
+    assert mask[:, :, 1].sum() == 0 and mask[:, :, 2].sum() == 0
+
+
+def test_load_alcor_fits_default_two_tuple(tmp_path):
+    from skycam_utils.alcor import load_alcor_fits
+    cube = np.full((3, 60, 60), 2100, dtype=np.int16)
+    raw = tmp_path / "raw.fits"
+    _write_alcor_raw(raw, cube)
+    result = load_alcor_fits(
+        raw, xcen=30, ycen=30, radius=25, horizon_radius=25,
+        rotation=0.0, xshift=0.0, yshift=0.0, radial_coeffs=(1.0, 0.0, 0.0),
+        badpix=None)
+    assert len(result) == 2          # (im, wcs) unchanged for default callers

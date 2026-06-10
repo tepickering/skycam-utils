@@ -65,8 +65,8 @@ def test_build_badpix_mask_channel_multiplicity():
     assert mask[0, 7, 7] and mask[1, 7, 7] and not mask[2, 7, 7]
     # 3-channel excluded everywhere
     assert not mask[:, 12, 12].any()
-    # nothing else flagged
-    assert mask.sum() == 4
+    # nothing else flagged (1-ch contributes 1 + 2-ch contributes 2 = 3)
+    assert mask.sum() == 3
 ```
 
 - [ ] **Step 2: Run test to verify it fails**

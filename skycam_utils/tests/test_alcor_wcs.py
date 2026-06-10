@@ -853,27 +853,18 @@ def test_format_calibration_entry_is_parseable():
     assert parsed["horizon_radius"] == 662.0
 
 
-def test_plot_alcor_fits_defaults_rotation_to_none():
-    import inspect
-    from skycam_utils.alcor import plot_alcor_fits
-    assert inspect.signature(plot_alcor_fits).parameters["rotation"].default is None
-
-
-def test_cli_rotation_flags_default_to_none(monkeypatch):
-    """Each CLI's --rotation default is None so load_alcor_fits auto-resolves.
-
-    The parsers are constructed inside the *_cli functions, so capture the
-    parsed namespace by patching parse_args and stop before the body runs.
-    """
+def test_cli_geometry_flags_removed(monkeypatch):
+    """The geometry flags (--rotation/--xcen/--ycen/--horizon-radius) are gone
+    from the consumer CLIs now that the WCS is the single source of geometry."""
     import argparse
     import skycam_utils.alcor as alcor_mod
 
-    captured = {}
+    seen = {}
     orig_parse = argparse.ArgumentParser.parse_args
 
     def grab(self, *a, **k):
         ns = orig_parse(self, *a, **k)
-        captured["rotation"] = getattr(ns, "rotation", "MISSING")
+        seen["ns"] = ns
         raise SystemExit  # stop before the CLI does real work
     monkeypatch.setattr(argparse.ArgumentParser, "parse_args", grab)
 
@@ -882,10 +873,12 @@ def test_cli_rotation_flags_default_to_none(monkeypatch):
         (alcor_mod.alcor_proc_fits_cli, ["prog", "in.fits"]),
         (alcor_mod.alcor_keogram_cli, ["prog", "in_dir"]),
     ]:
-        captured.clear()
+        seen.clear()
         monkeypatch.setattr("sys.argv", argv)
         with pytest.raises(SystemExit):
             cli()
+        for gone in ("rotation", "xcen", "ycen", "horizon_radius"):
+            assert not hasattr(seen["ns"], gone), f"{cli.__name__} still has --{gone}"
 
 
 def test_fit_alcor_wcs_cli_passes_new_flags(monkeypatch, capsys):

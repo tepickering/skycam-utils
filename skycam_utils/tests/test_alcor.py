@@ -80,42 +80,35 @@ def test_alcor_proc_fits_writes_processed_cube_and_header(tmp_path):
     input_file = tmp_path / "sample.fits.bz2"
     shutil.copyfile(TEST_FITS, input_file)
 
-    output_file = alcor_proc_fits(
-        input_file,
-        overwrite=False,
-        radius=32,
-        horizon_radius=30,
-    )
+    output_file = alcor_proc_fits(input_file, overwrite=False)
 
     assert output_file == tmp_path / "sample_proc.fits"
     assert output_file.exists()
 
+    cube, wcs, _ = load_alcor_fits(input_file)
     with fits.open(output_file) as hdul:
-        assert hdul[0].data.shape == (3, 64, 64)
+        # the raw (3, ny, nx) cube is written untouched (native orientation)
+        assert hdul[0].data.shape == cube.shape
         assert hdul[0].data.dtype.kind == "f"
         assert hdul[0].data.dtype.itemsize == np.dtype(np.float32).itemsize
-        assert np.isfinite(hdul[0].data).all()
-        assert hdul[0].header["CTYPE1"] == "RA---ARC-SIP"
-        assert hdul[0].header["CTYPE2"] == "DEC--ARC-SIP"
-        np.testing.assert_allclose(hdul[0].header["CRPIX1"], 32.5)
-        np.testing.assert_allclose(hdul[0].header["CRPIX2"], 32.5)
-        np.testing.assert_allclose(hdul[0].header["CDELT1"], 3.0)
-        np.testing.assert_allclose(hdul[0].header["CDELT2"], 3.0)
+        np.testing.assert_array_equal(hdul[0].data, cube.astype(np.float32))
+        assert hdul[0].header["CTYPE1"].startswith("RA---ARC")
+        assert hdul[0].header["CTYPE2"].startswith("DEC--ARC")
+        # header WCS round-trips to the same reference pixel as the loaded WCS
+        np.testing.assert_allclose(hdul[0].header["CRPIX1"], wcs.wcs.crpix[0])
+        np.testing.assert_allclose(hdul[0].header["CRPIX2"], wcs.wcs.crpix[1])
 
 
 def test_alcor_keogram_uses_center_columns_and_date_headers(tmp_path):
     for index in range(3):
         shutil.copyfile(TEST_FITS, tmp_path / f"alcor_{index:03d}.fits.bz2")
 
-    keogram, timestamps, files = alcor_keogram(
-        tmp_path,
-        radius=32,
-        horizon_radius=30,
-    )
-    im, _ = load_alcor_fits(TEST_FITS, radius=32, horizon_radius=30)
-    center_column = im.shape[1] // 2
+    keogram, timestamps, files = alcor_keogram(tmp_path)
+    cube, wcs, _ = load_alcor_fits(TEST_FITS)
+    zcol = int(round(wcs.wcs.crpix[0] - 1.0))             # 0-based zenith column
+    ny = cube.shape[1]
 
-    assert keogram.shape == (64, 3, 3)
+    assert keogram.shape == (ny, 3, 3)
     assert len(timestamps) == 3
     assert all(timestamp == "2024-09-05T06:51:31.224500" for timestamp in timestamps)
     assert [file.name for file in files] == [
@@ -123,7 +116,7 @@ def test_alcor_keogram_uses_center_columns_and_date_headers(tmp_path):
         "alcor_001.fits.bz2",
         "alcor_002.fits.bz2",
     ]
-    np.testing.assert_allclose(keogram[:, 0, :], im[:, center_column, :])
+    np.testing.assert_allclose(keogram[:, 0, :], cube[:, :, zcol].T)
 
 
 def test_alcor_keogram_can_report_progress(tmp_path):
@@ -133,8 +126,6 @@ def test_alcor_keogram_can_report_progress(tmp_path):
     progress_file = StringIO()
     alcor_keogram(
         tmp_path,
-        radius=32,
-        horizon_radius=30,
         progress=True,
         progress_file=progress_file,
     )
@@ -152,8 +143,6 @@ def test_alcor_keogram_dispatches_center_columns_to_workers(tmp_path, monkeypatc
 
     serial_keogram, serial_timestamps, serial_files = alcor_keogram(
         tmp_path,
-        radius=32,
-        horizon_radius=30,
         workers=1,
     )
 
@@ -185,8 +174,6 @@ def test_alcor_keogram_dispatches_center_columns_to_workers(tmp_path, monkeypatc
 
     parallel_keogram, parallel_timestamps, parallel_files = alcor_keogram(
         tmp_path,
-        radius=32,
-        horizon_radius=30,
         workers=2,
     )
 
@@ -200,11 +187,7 @@ def test_save_alcor_keogram_plot_writes_output(tmp_path):
     for index in range(2):
         shutil.copyfile(TEST_FITS, tmp_path / f"alcor_{index:03d}.fits.bz2")
 
-    keogram, timestamps, _ = alcor_keogram(
-        tmp_path,
-        radius=32,
-        horizon_radius=30,
-    )
+    keogram, timestamps, _ = alcor_keogram(tmp_path)
     output_file = save_alcor_keogram_plot(
         keogram,
         timestamps,
@@ -246,21 +229,18 @@ def test_save_alcor_keogram_fits_writes_image_and_timestamp_table(tmp_path):
     for index in range(2):
         shutil.copyfile(TEST_FITS, tmp_path / f"alcor_{index:03d}.fits.bz2")
 
-    keogram, timestamps, _ = alcor_keogram(
-        tmp_path,
-        radius=32,
-        horizon_radius=30,
-    )
+    keogram, timestamps, _ = alcor_keogram(tmp_path)
     output_file = save_alcor_keogram_fits(
         keogram,
         timestamps,
         tmp_path / "keogram.fits",
     )
 
+    ny = keogram.shape[0]
     assert output_file == tmp_path / "keogram.fits"
     assert output_file.exists()
     with fits.open(output_file) as hdul:
-        assert hdul[0].data.shape == (3, 64, 2)
+        assert hdul[0].data.shape == (3, ny, 2)
         assert hdul[0].data.dtype.kind == "f"
         assert hdul[1].name == "TIMESTAMPS"
         assert list(hdul[1].data["DATE"]) == timestamps
@@ -316,8 +296,7 @@ def test_plot_alcor_fits_writes_outputs_and_returns_figure(tmp_path):
         TEST_FITS,
         outimage=outimage,
         outfig=outfig,
-        radius=32,
-        horizon_radius=30,
+        radius=600,
         figsize=2,
     )
 

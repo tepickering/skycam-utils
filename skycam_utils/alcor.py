@@ -1322,8 +1322,8 @@ def load_alcor_fits(filename, wcs=None, badpix="repair", masks_dir=None):
 def alcor_proc_fits(filename, output_file=None, overwrite=False, **kwargs):
     """
     Process an alcor OMEA 8C FITS file via `load_alcor_fits` and write a new
-    FITS file containing the zenith-centered, north-up image with the
-    alt/az WCS encoded in the header.
+    FITS file containing the raw ``(3, ny, nx)`` RGB cube (native orientation)
+    with the raw-frame alt/az WCS encoded in the header.
 
     Parameters
     ----------
@@ -1335,15 +1335,14 @@ def alcor_proc_fits(filename, output_file=None, overwrite=False, **kwargs):
     overwrite : bool (default=False)
         Passed through to `fits.PrimaryHDU.writeto`.
     **kwargs
-        Forwarded to `load_alcor_fits` (rotation, xcen, ycen, radius,
-        horizon_radius).
+        Forwarded to `load_alcor_fits` (``wcs``, ``badpix``, ``masks_dir``).
 
     Returns
     -------
     output_file : `~pathlib.Path`
         Path to the written FITS file.
     """
-    im, wcs = load_alcor_fits(filename, **kwargs)
+    cube, wcs, _ = load_alcor_fits(filename, **kwargs)
     if output_file is None:
         stem = str(filename)
         for ext in (".fits.bz2", ".fits.gz", ".fits"):
@@ -1353,8 +1352,8 @@ def alcor_proc_fits(filename, output_file=None, overwrite=False, **kwargs):
         output_file = stem + "_proc.fits"
     output_file = Path(output_file)
 
-    cube = np.transpose(np.flipud(im), axes=(2, 0, 1)).astype(np.float32)
-    hdu = fits.PrimaryHDU(data=cube, header=wcs.to_header(relax=True))
+    hdu = fits.PrimaryHDU(data=cube.astype(np.float32),
+                          header=wcs.to_header(relax=True))
     hdu.writeto(output_file, overwrite=overwrite)
     return output_file
 
@@ -1436,9 +1435,9 @@ def _load_alcor_center_column(task):
     with fits.open(filename) as hdul:
         timestamp = hdul[0].header.get("DATE", "")
 
-    im, _ = load_alcor_fits(filename, **kwargs)
-    center_column = im.shape[1] // 2
-    return index, timestamp, im[:, center_column, :], filename.name
+    cube, wcs, _ = load_alcor_fits(filename, **kwargs)
+    zcol = int(round(wcs.wcs.crpix[0] - 1.0))             # 0-based zenith column
+    return index, timestamp, cube[:, :, zcol].T, filename.name  # (ny, 3) RGB strip
 
 
 def _print_progress(current, total, label="", width=32, file=None):
@@ -1660,74 +1659,73 @@ def _parse_timestamps(timestamps):
         return None
 
 
-def plot_alcor_fits(filename, outimage=None, outfig=None, rotation=None, xcen=696, ycen=698, radius=680,
-                    horizon_radius=662, powerstretch=0.75, contrast=0.35, gscale=0.7, bscale=1.7, figsize=12):
+def plot_alcor_fits(filename, outimage=None, outfig=None, radius=680,
+                    powerstretch=0.75, contrast=0.35, gscale=0.7, bscale=1.7,
+                    figsize=12):
     """
-    Take a FITS file as produced by the alcor OMEA 8C and create a trimmed, rotated, and annotated figure
-    file appropriate for display
+    Take a FITS file as produced by the alcor OMEA 8C and create an annotated
+    all-sky figure for display.
+
+    The raw cube and its WCS are loaded; the display RGB is built, cropped to a
+    ``radius``-pixel square around the WCS zenith, and rendered with
+    ``origin="lower"`` (north-up). Geometry comes entirely from the WCS.
 
     Parameters
     ----------
     filename : str
-        FITS filename of image. Uses astropy.io.fits so gz and bz2 extentions are allowed.
+        FITS filename of image. Uses astropy.io.fits so gz and bz2 extensions are allowed.
     outimage : str (default=None)
-        If not None, write out raw, unannotated image
+        If not None, write out raw, unannotated cropped image.
     outfig : str (default=None)
-        If not None, write out annotated image as produced by matplotlib
-    rotation : float or None (default=None)
-        Camera rotation w.r.t. true north (deg). When None, resolved from the
-        calibration epoch nearest the frame date.
-    xcen : int (default=696)
-        X center of illuminated region in original image coordinates
-    ycen : int (default=698)
-        Y center of illuminated region in original image coordinates
+        If not None, write out annotated image as produced by matplotlib.
     radius : float (default=680)
-        Radius of illuminated region
-    horizon_radius : float (default=662)
-        Pixel radius from zenith at which altitude=0.
+        Half-width (pixels) of the display crop around the zenith.
     powerstretch : float (default=0.75)
-        Power of the stretch function to use
+        Power of the stretch function to use.
     contrast : float (default=0.35)
-        ZScale contrast factor
+        ZScale contrast factor.
     gscale : float (default=0.7)
-        Scale factor to apply to green channel
+        Scale factor to apply to green channel.
     bscale : float (default=1.7)
-        Scale factor to apply to blue channel
+        Scale factor to apply to blue channel.
     figsize : float (default=12)
-        Size of matplotlib figure in inches
+        Size of matplotlib figure in inches.
     """
-    im, wcs = load_alcor_fits(
-        filename,
-        rotation=rotation,
-        xcen=xcen,
-        ycen=ycen,
-        radius=radius,
-        horizon_radius=horizon_radius,
-    )
-    im[:, :, 1] *= gscale  # the factors to scale the green and blue channels were determined empirically and provide a
-    im[:, :, 2] *= bscale  # reasonably good white/color balance for both day and night images.
-    stretch = viz.PowerStretch(powerstretch) + viz.ZScaleInterval(contrast=contrast)  # apply a power-law stretch and
-                                                                                      # zscale interval to the image data
-    im = stretch(im)
+    cube, wcs, _ = load_alcor_fits(filename)
+    rgb = np.transpose(cube, (1, 2, 0)).astype(float)     # (ny, nx, 3)
+    rgb[:, :, 1] *= gscale  # the factors to scale the green and blue channels were determined empirically and provide a
+    rgb[:, :, 2] *= bscale  # reasonably good white/color balance for both day and night images.
+    stretch = viz.PowerStretch(powerstretch) + viz.ZScaleInterval(contrast=contrast)
+    rgb = stretch(rgb)
+
+    xz = int(round(wcs.wcs.crpix[0] - 1.0))               # 0-based zenith
+    yz = int(round(wcs.wcs.crpix[1] - 1.0))
+    ny, nx = rgb.shape[:2]
+    yl, yu = max(0, yz - radius), min(ny, yz + radius)
+    xl, xu = max(0, xz - radius), min(nx, xz + radius)
+    crop = rgb[yl:yu, xl:xu, :]
+    cx, cy = xz - xl, yz - yl                              # zenith in crop coords
 
     if outimage is not None:
-        plt.imsave(outimage, im)
+        plt.imsave(outimage, np.flipud(crop))             # imsave is origin-upper
 
     fig, ax = plt.subplots(figsize=(figsize, figsize))
-    circle = Circle((radius, radius), radius, facecolor='none', edgecolor=(0, 0, 0), linewidth=1, alpha=0.5)
+    circle = Circle((cx, cy), radius, facecolor='none', edgecolor=(0, 0, 0),
+                    linewidth=1, alpha=0.5)
     ax.add_patch(circle)
     ax.axis("off")
-    im_plot = plt.imshow(im)
+    im_plot = ax.imshow(crop, origin="lower")
     im_plot.set_clip_path(circle)
 
     pax = fig.add_subplot(111, polar=True, label='polar')
     pax.set_facecolor("None")
     pax.set_theta_zero_location("N")
-    # Use the WCS to map altitude ticks to the correct radial fraction. The polar overlay
-    # spans the figure region, so r=1 corresponds to a pixel distance of `radius` from zenith.
+    # Use the WCS to map altitude ticks to the correct radial fraction. The polar
+    # overlay spans the figure region, so r=1 corresponds to `radius` pixels from zenith.
     tick_alts = np.array([75, 60, 45, 30, 15])
-    px, py = wcs.world_to_pixel_values(np.zeros_like(tick_alts), tick_alts)
-    yticks = np.hypot(px - (radius - 0.5), py - (radius - 0.5)) / radius
+    px, py = wcs.world_to_pixel_values(np.zeros_like(tick_alts, dtype=float),
+                                       tick_alts.astype(float))
+    yticks = np.hypot(px - xz, py - yz) / radius
     ylabels = [f" {a}°" for a in tick_alts]
     pax.set_yticks(yticks, labels=ylabels, color="white", alpha=0.5, fontsize=16)
     pax.set_rlabel_position(90)
@@ -1735,7 +1733,7 @@ def plot_alcor_fits(filename, outimage=None, outfig=None, rotation=None, xcen=69
     pax.tick_params(axis='x', labelsize=16, labelcolor='silver', pad=10)
 
     if outfig is not None:
-        plt.savefig(outfig, transparent=True, bbox_inches='tight', pad_inches = 0)
+        plt.savefig(outfig, transparent=True, bbox_inches='tight', pad_inches=0)
 
     return fig
 
@@ -1746,30 +1744,18 @@ def alcor_proc_fits_cli():
     the alt/az WCS encoded in the header.
     """
     parser = argparse.ArgumentParser(
-        description="Process an alcor OMEA 8C FITS image into a zenith-centered, north-up FITS file with alt/az WCS.",
+        description="Process an alcor OMEA 8C FITS image into a raw (3, ny, nx) FITS cube with raw-frame alt/az WCS.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("filename", help="Input alcor FITS file.")
     parser.add_argument("-o", "--output", default=None, help="Output FITS path (default: <input>_proc.fits).")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite output file if it exists.")
-    parser.add_argument("--rotation", type=float, default=None,
-                        help="Camera rotation w.r.t. true north (deg); "
-                             "default resolves the calibration epoch nearest the frame date.")
-    parser.add_argument("--xcen", type=int, default=696, help="X center of illuminated region.")
-    parser.add_argument("--ycen", type=int, default=698, help="Y center of illuminated region.")
-    parser.add_argument("--radius", type=int, default=680, help="Half-width of trimmed square around (xcen, ycen).")
-    parser.add_argument("--horizon-radius", type=float, default=662, help="Pixel radius from zenith at altitude=0.")
     args = parser.parse_args()
 
     out = alcor_proc_fits(
         args.filename,
         output_file=args.output,
         overwrite=args.overwrite,
-        rotation=args.rotation,
-        xcen=args.xcen,
-        ycen=args.ycen,
-        radius=args.radius,
-        horizon_radius=args.horizon_radius,
     )
     print(out)
 
@@ -1808,13 +1794,6 @@ def alcor_keogram_cli():
         default=None,
         help="Optional text file to write DATE header values, one per line.",
     )
-    parser.add_argument("--rotation", type=float, default=None,
-                        help="Camera rotation w.r.t. true north (deg); "
-                             "default resolves the calibration epoch nearest the frame date.")
-    parser.add_argument("--xcen", type=int, default=696, help="X center of illuminated region.")
-    parser.add_argument("--ycen", type=int, default=698, help="Y center of illuminated region.")
-    parser.add_argument("--radius", type=int, default=680, help="Half-width of trimmed square around (xcen, ycen).")
-    parser.add_argument("--horizon-radius", type=float, default=662, help="Pixel radius from zenith at altitude=0.")
     parser.add_argument("--powerstretch", type=float, default=0.75, help="Power-stretch exponent.")
     parser.add_argument("--contrast", type=float, default=0.35, help="ZScale contrast factor.")
     parser.add_argument("--gscale", type=float, default=0.7, help="Green channel scale factor.")
@@ -1836,11 +1815,6 @@ def alcor_keogram_cli():
         pattern=args.pattern,
         workers=args.workers,
         progress=not args.no_progress,
-        rotation=args.rotation,
-        xcen=args.xcen,
-        ycen=args.ycen,
-        radius=args.radius,
-        horizon_radius=args.horizon_radius,
     )
     output_file = save_alcor_keogram_plot(
         keogram,
@@ -1920,13 +1894,8 @@ def plot_alcor_fits_cli():
         help="Output figure path (default: <input>.pdf). Format inferred from extension."
     )
     parser.add_argument("--outimage", default=None, help="If set, also write the raw stretched image to this path.")
-    parser.add_argument("--rotation", type=float, default=None,
-                        help="Camera rotation w.r.t. true north (deg); "
-                             "default resolves the calibration epoch nearest the frame date.")
-    parser.add_argument("--xcen", type=int, default=696, help="X center of illuminated region.")
-    parser.add_argument("--ycen", type=int, default=698, help="Y center of illuminated region.")
-    parser.add_argument("--radius", type=int, default=680, help="Half-width of trimmed square around (xcen, ycen).")
-    parser.add_argument("--horizon-radius", type=float, default=662, help="Pixel radius from zenith at altitude=0.")
+    parser.add_argument("--radius", type=int, default=680,
+                        help="Half-width (pixels) of the display crop around the zenith.")
     parser.add_argument("--powerstretch", type=float, default=0.75, help="Power-stretch exponent.")
     parser.add_argument("--contrast", type=float, default=0.35, help="ZScale contrast factor.")
     parser.add_argument("--gscale", type=float, default=0.7, help="Green channel scale factor.")
@@ -1947,11 +1916,7 @@ def plot_alcor_fits_cli():
         args.filename,
         outimage=args.outimage,
         outfig=outfig,
-        rotation=args.rotation,
-        xcen=args.xcen,
-        ycen=args.ycen,
         radius=args.radius,
-        horizon_radius=args.horizon_radius,
         powerstretch=args.powerstretch,
         contrast=args.contrast,
         gscale=args.gscale,

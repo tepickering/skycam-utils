@@ -121,29 +121,27 @@ def test_load_alcor_fits_repairs_and_returns_mask(tmp_path):
     badpix = np.zeros((3, ny, nx), dtype=bool)
     badpix[0, 30, 30] = True
 
-    # explicit mask array -> repair; neutral geometry so no resampling moves pixels
-    im, mask, wcs = load_alcor_fits(
-        raw, xcen=30, ycen=30, radius=25, horizon_radius=25,
-        rotation=0.0, xshift=0.0, yshift=0.0, radial_coeffs=(1.0, 0.0, 0.0),
-        badpix=badpix, return_mask=True)
+    # explicit mask array -> repair; raw cube returned untouched in orientation
+    out_cube, wcs, mask = load_alcor_fits(raw, badpix=badpix)
 
-    assert im.shape == (50, 50, 3)
-    assert mask.shape == im.shape
-    assert im.max() < 1000          # hot pixel repaired (would be ~28000 otherwise)
-    assert mask[:, :, 0].sum() == 1 # exactly the one R bad pixel survives transforms
-    assert mask[:, :, 1].sum() == 0 and mask[:, :, 2].sum() == 0
+    assert out_cube.shape == (3, ny, nx)           # raw (3, ny, nx), no transform
+    assert mask.shape == out_cube.shape            # mask aligned to the raw cube
+    assert out_cube[0, 30, 30] < 3000              # spike repaired to bg ~2100 (was 30000)
+    assert mask[0].sum() == 1                      # the one R bad pixel, in place
+    assert mask[1].sum() == 0 and mask[2].sum() == 0
 
 
-def test_load_alcor_fits_default_two_tuple(tmp_path):
+def test_load_alcor_fits_default_three_tuple(tmp_path):
     from skycam_utils.alcor import load_alcor_fits
     cube = np.full((3, 60, 60), 2100, dtype=np.int16)
     raw = tmp_path / "raw.fits"
     _write_alcor_raw(raw, cube)
-    result = load_alcor_fits(
-        raw, xcen=30, ycen=30, radius=25, horizon_radius=25,
-        rotation=0.0, xshift=0.0, yshift=0.0, radial_coeffs=(1.0, 0.0, 0.0),
-        badpix=None)
-    assert len(result) == 2          # (im, wcs) unchanged for default callers
+    result = load_alcor_fits(raw, badpix=None)
+    assert len(result) == 3                        # always (cube, wcs, mask)
+    out_cube, wcs, mask = result
+    assert out_cube.shape == (3, 60, 60)
+    assert mask is None                            # no mask resolves for this file
+    np.testing.assert_array_equal(out_cube, cube.astype(np.float32))  # untouched
 
 
 def test_create_badpix_mask_min_frames_gate(tmp_path, monkeypatch):
@@ -178,11 +176,9 @@ def test_load_alcor_fits_resolves_epoch_mask(tmp_path):
     fits.PrimaryHDU(data=mask).writeto(masks / "alcor_badpix_2026-05-18.fits.gz")
 
     # default badpix="repair"; resolution by frame time against masks_dir
-    im, wcs = load_alcor_fits(
-        raw, xcen=30, ycen=30, radius=25, horizon_radius=25,
-        rotation=0.0, xshift=0.0, yshift=0.0, radial_coeffs=(1.0, 0.0, 0.0),
-        masks_dir=str(masks))
-    assert im.max() < 1000          # epoch mask was resolved and the spike repaired
+    out_cube, wcs, out_mask = load_alcor_fits(raw, masks_dir=str(masks))
+    assert out_cube[0, 30, 30] < 3000   # epoch mask was resolved and the spike repaired
+    assert out_mask is not None and bool(out_mask[0, 30, 30])
 
 
 def test_create_badpix_mask_writes_and_resolves(tmp_path, monkeypatch):

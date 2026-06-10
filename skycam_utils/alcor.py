@@ -49,6 +49,12 @@ ALCOR_HORIZON_RADIUS = 747
 ALCOR_CALIBRATIONS = [
     {"epoch": "2024-09-05", "xcen": 699.124, "ycen": 710.469, "rotation": -0.9523,
      "radial_coeffs": (1.0, 0.08998303496979766, 0.0), "horizon_radius": 747.2},
+    # The camera was not moved or changed between 2024 and 2026; this epoch is
+    # consistent with 2024 within the fit uncertainty (center stable <1px, k3
+    # ~unchanged, only ~0.11deg rotation drift). It is kept as a separate entry
+    # so per-era geometry is supported if the camera is ever moved/refocused.
+    {"epoch": "2026-05-19", "xcen": 699.317, "ycen": 709.815, "rotation": -1.0645,
+     "radial_coeffs": (1.0, 0.09720385277487764, 0.0), "horizon_radius": 747.2},
 ]
 
 

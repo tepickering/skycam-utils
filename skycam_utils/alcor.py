@@ -48,8 +48,8 @@ ALCOR_HORIZON_RADIUS = 662
 # epoch by pasting the dict that fit_alcor_wcs prints. `epoch` is the calibration
 # night at day precision (UT, not local night -- do not "fix" it to local).
 ALCOR_CALIBRATIONS = [
-    {"epoch": "2024-09-04", "xcen": 696.0, "ycen": 698.0,
-     "rotation": 0.3886, "radial_coeffs": (1.0, 0.01383, 0.0),
+    {"epoch": "2024-09-05", "xcen": 694.765, "ycen": 697.595, "rotation": 0.3546,
+     "radial_coeffs": (1.0, -0.003402713701100494, 0.033355312555651086),
      "horizon_radius": 662.0},
 ]
 

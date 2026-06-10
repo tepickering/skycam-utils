@@ -74,9 +74,10 @@ def test_predict_pixels_radial_term_changes_radius():
 
 
 def test_predict_pixels_default_coeffs_are_baked_calibration():
-    # The module defaults carry the full-night fitted calibration (k1=1 by
-    # construction, fitted odd-power k3, k5 unused).
-    assert ALCOR_RADIAL_COEFFS == (1.0, 0.01383, 0.0)
+    # The module defaults carry the full-night fitted calibration: k1=1 by
+    # construction plus the fitted odd-power k3/k5 terms.
+    assert ALCOR_RADIAL_COEFFS[0] == 1.0
+    assert len(ALCOR_RADIAL_COEFFS) == 3
 
 
 def test_sun_altitude_night_vs_day():

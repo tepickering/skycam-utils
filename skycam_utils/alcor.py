@@ -367,6 +367,7 @@ def assign_alcor_matches(cat, det, params, tolerance,
         rotation=params["rotation"], radial_coeffs=tuple(params["radial_coeffs"]),
         horizon_radius=params.get("horizon_radius", horizon_radius),
         tangential_coeffs=tuple(params.get("tangential_coeffs", (0.0, 0.0))),
+        axis_tilt=tuple(params.get("axis_tilt", (0.0, 0.0))),
     )
     px = np.atleast_1d(np.asarray(px, dtype=float))
     py = np.atleast_1d(np.asarray(py, dtype=float))
@@ -544,8 +545,8 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=4.0, sun_alt_max=-
     the seed geometry leaves real distortion unmodeled.
 
     The fit runs directly on the raw frame, so the recovered (xcen, ycen,
-    rotation, radial_coeffs, tangential_coeffs) are the ABSOLUTE raw-frame
-    geometry constants for the
+    rotation, radial_coeffs, tangential_coeffs, axis_tilt) are the ABSOLUTE
+    raw-frame geometry constants for the
     night, suitable for baking into ``ALCOR_CALIBRATIONS`` (the night's
     ``horizon_radius`` is carried through from the seed epoch). It is warm-started
     from the nearest existing epoch (via :func:`alcor_calibration` at the night's
@@ -602,6 +603,7 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=4.0, sun_alt_max=-
     init = dict(xcen=base["xcen"], ycen=base["ycen"],
                 rotation=base["rotation"], radial_coeffs=base["radial_coeffs"],
                 tangential_coeffs=base.get("tangential_coeffs", (0.0, 0.0)),
+                axis_tilt=base.get("axis_tilt", (0.0, 0.0)),
                 horizon_radius=base["horizon_radius"])
     # (cat, detections) per usable frame, kept in frame order for reproducible
     # pooling regardless of worker completion order.
@@ -671,7 +673,8 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=4.0, sun_alt_max=-
                              rotation=params["rotation"],
                              radial_coeffs=tuple(params["radial_coeffs"]),
                              horizon_radius=base["horizon_radius"],
-                             tangential_coeffs=tuple(params["tangential_coeffs"]))
+                             tangential_coeffs=tuple(params["tangential_coeffs"]),
+                             axis_tilt=tuple(params["axis_tilt"]))
     resid = np.hypot(px - x, py - y)
     mad = np.median(np.abs(resid - np.median(resid))) + 1e-9
     good = resid < np.median(resid) + 3.0 * 1.4826 * mad
@@ -682,7 +685,8 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=4.0, sun_alt_max=-
                              ycen=params["ycen"], rotation=params["rotation"],
                              radial_coeffs=tuple(params["radial_coeffs"]),
                              horizon_radius=base["horizon_radius"],
-                             tangential_coeffs=tuple(params["tangential_coeffs"]))
+                             tangential_coeffs=tuple(params["tangential_coeffs"]),
+                             axis_tilt=tuple(params["axis_tilt"]))
     rms = float(np.sqrt(np.mean((px - x[good]) ** 2 + (py - y[good]) ** 2)))
 
     return {
@@ -758,7 +762,9 @@ def save_alcor_residual_plot(alt, az, obs_x, obs_y, params, output_file,
                              radial_coeffs=tuple(params["radial_coeffs"]),
                              horizon_radius=hr,
                              tangential_coeffs=tuple(
-                                 params.get("tangential_coeffs", (0.0, 0.0))))
+                                 params.get("tangential_coeffs", (0.0, 0.0))),
+                             axis_tilt=tuple(
+                                 params.get("axis_tilt", (0.0, 0.0))))
     before = np.hypot(ix - obs_x, iy - obs_y)
     dx, dy = fx - obs_x, fy - obs_y
     after = np.hypot(dx, dy)
@@ -1490,7 +1496,8 @@ def load_alcor_fits(filename, wcs=None, badpix="repair", masks_dir=None):
                               rotation=cal["rotation"],
                               radial_coeffs=cal["radial_coeffs"],
                               horizon_radius=cal["horizon_radius"],
-                              tangential_coeffs=cal["tangential_coeffs"])
+                              tangential_coeffs=cal["tangential_coeffs"],
+                              axis_tilt=cal["axis_tilt"])
 
     return cube, wcs, mask
 
@@ -1612,7 +1619,8 @@ def _load_alcor_center_column(task):
         timestamp = hdul[0].header.get("DATE", "")
 
     cube, wcs, _ = load_alcor_fits(filename, **kwargs)
-    zcol = int(round(wcs.wcs.crpix[0] - 1.0))             # 0-based zenith column
+    zx, _ = wcs.world_to_pixel_values(0.0, 90.0)
+    zcol = int(round(float(zx)))                          # 0-based zenith column
     return index, timestamp, cube[:, :, zcol].T, filename.name  # (ny, 3) RGB strip
 
 
@@ -1874,8 +1882,9 @@ def plot_alcor_fits(filename, outimage=None, outfig=None, radius=680,
     stretch = viz.PowerStretch(powerstretch) + viz.ZScaleInterval(contrast=contrast)
     rgb = stretch(rgb)
 
-    xz = int(round(wcs.wcs.crpix[0] - 1.0))               # 0-based zenith
-    yz = int(round(wcs.wcs.crpix[1] - 1.0))
+    zx, zy = wcs.world_to_pixel_values(0.0, 90.0)
+    xz = int(round(float(zx)))                            # 0-based zenith
+    yz = int(round(float(zy)))
     ny, nx = rgb.shape[:2]
     yl, yu = max(0, yz - radius), min(ny, yz + radius)
     xl, xu = max(0, xz - radius), min(nx, xz + radius)
@@ -2180,6 +2189,10 @@ def fit_alcor_wcs_cli():
     print(f"# matched stars: {result['n_matched']}")
     print(f"# residual RMS (pix): {result['residual_rms']:.3f}")
     print(f"# matched fraction: {result['matched_fraction']:.3f}")
+    tn, te = result.get("axis_tilt", (0.0, 0.0))
+    eps = float(np.hypot(tn, te))
+    a0 = float(np.degrees(np.arctan2(te, tn))) % 360.0
+    print(f"# axis tilt: eps={eps:.4f} deg toward az={a0:.1f} deg")
     print("# add this entry to ALCOR_CALIBRATIONS in alcor.py:")
     print(_format_calibration_entry(result))
     if args.residual_plot is not None:

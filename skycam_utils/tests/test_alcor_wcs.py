@@ -1291,3 +1291,75 @@ def test_fit_params_recovers_axis_tilt():
                        fit_k5=True)
     assert abs(fit5["axis_tilt"][0] - 0.3) < 0.01
     assert abs(fit5["axis_tilt"][1] + 0.2) < 0.01
+
+
+def test_fit_alcor_wcs_recovers_axis_tilt(monkeypatch, tmp_path):
+    import skycam_utils.alcor as alcor_mod
+    from astropy.table import Table
+
+    true = dict(xcen=6.0, ycen=-5.0, rotation=0.8,
+                radial_coeffs=(1.0, 0.09, 0.0),
+                tangential_coeffs=(0.002, -0.001),
+                axis_tilt=(0.3, -0.2))
+    rng = np.random.default_rng(5)
+
+    frame_alt = [rng.uniform(10.0, 88.0, 30), rng.uniform(10.0, 88.0, 30)]
+    frame_az = [rng.uniform(0.0, 360.0, 30), rng.uniform(0.0, 360.0, 30)]
+    files = [tmp_path / "2024_09_05__00_00_00.fits",
+             tmp_path / "2024_09_05__00_10_00.fits"]
+    for f in files:
+        f.write_bytes(b"stub")
+
+    calls = {"i": 0}
+
+    def fake_load_alcor_fits(path, **kw):
+        return np.zeros((3, 2 * ALCOR_RADIUS, 2 * ALCOR_RADIUS)), None, None
+
+    def fake_reference_altaz(time, **kw):
+        i = calls["i"]
+        return Table({"Alt": frame_alt[i], "Az": frame_az[i],
+                      "Vmag": rng.uniform(0.5, 3.0, 30), "HD": np.arange(30)})
+
+    def fake_detect(im, **kw):
+        i = calls["i"]
+        calls["i"] += 1
+        x, y = _predict_pixels(frame_alt[i], frame_az[i], **true)
+        return Table({"xcentroid": x, "ycentroid": y,
+                      "flux": np.linspace(1e3, 1e2, 30)})
+
+    monkeypatch.setattr(alcor_mod, "select_dark_frames",
+                        lambda fs, **kw: list(files))
+    monkeypatch.setattr(alcor_mod, "load_alcor_fits", fake_load_alcor_fits)
+    monkeypatch.setattr(alcor_mod, "alcor_reference_altaz", fake_reference_altaz)
+    monkeypatch.setattr(alcor_mod, "detect_alcor_stars", fake_detect)
+    monkeypatch.setattr(alcor_mod, "_frame_time",
+                        lambda path: Time("2024-09-05T07:00:00", format="isot",
+                                          scale="utc"))
+    # No axis_tilt key: the night fit must default it to (0, 0).
+    monkeypatch.setattr(alcor_mod, "alcor_calibration",
+                        lambda time=None: {"epoch": "2024-09-05", "xcen": 0.0,
+                                           "ycen": 0.0, "rotation": 0.0,
+                                           "radial_coeffs": (1.0, 0.0, 0.0),
+                                           "horizon_radius": 747.0})
+
+    result = fit_alcor_wcs(tmp_path, pattern="*.fits")
+    assert abs(result["axis_tilt"][0] - 0.3) < 0.01
+    assert abs(result["axis_tilt"][1] + 0.2) < 0.01
+    assert abs(result["xcen"] - 6.0) < 0.1
+    assert abs(result["ycen"] + 5.0) < 0.1
+    assert result["residual_rms"] < 0.1
+
+
+def test_wcs_zenith_lookup_with_and_without_tilt():
+    kw = dict(xcen=699.0, ycen=710.0, rotation=-1.0,
+              radial_coeffs=(1.0, 0.09, 0.0), horizon_radius=747.0)
+    # zero tilt: zenith pixel == crpix (0-based)
+    w0 = build_alcor_wcs(axis_tilt=(0.0, 0.0), **kw)
+    zx, zy = w0.world_to_pixel_values(0.0, 90.0)
+    np.testing.assert_allclose([zx, zy], [699.0, 710.0], atol=1e-6)
+    # tilted: zenith pixel moves off crpix by ~eps * dr/dz ~ 8.3 px/deg
+    wt = build_alcor_wcs(axis_tilt=(0.3, -0.2), **kw)
+    zx, zy = wt.world_to_pixel_values(0.0, 90.0)
+    offset = np.hypot(zx - 699.0, zy - 710.0)
+    eps = np.hypot(0.3, -0.2)
+    assert 0.5 * eps * 747.0 / 90.0 < offset < 2.0 * eps * 747.0 / 90.0

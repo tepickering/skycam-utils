@@ -1090,3 +1090,59 @@ def test_fit_params_recovers_tangential_coeffs():
                        fit_k5=True)
     assert abs(fit5["tangential_coeffs"][0] - 0.004) < 5e-4
     assert abs(fit5["tangential_coeffs"][1] + 0.003) < 5e-4
+
+
+def test_fit_alcor_wcs_recovers_tangential_terms(monkeypatch, tmp_path):
+    import skycam_utils.alcor as alcor_mod
+    from astropy.table import Table
+
+    true = dict(xcen=6.0, ycen=-5.0, rotation=0.8,
+                radial_coeffs=(1.0, 0.09, 0.0),
+                tangential_coeffs=(0.004, -0.003))
+    rng = np.random.default_rng(3)
+
+    frame_alt = [rng.uniform(10.0, 88.0, 30), rng.uniform(10.0, 88.0, 30)]
+    frame_az = [rng.uniform(0.0, 360.0, 30), rng.uniform(0.0, 360.0, 30)]
+    files = [tmp_path / "2024_09_05__00_00_00.fits",
+             tmp_path / "2024_09_05__00_10_00.fits"]
+    for f in files:
+        f.write_bytes(b"stub")
+
+    calls = {"i": 0}
+
+    def fake_load_alcor_fits(path, **kw):
+        return np.zeros((3, 2 * ALCOR_RADIUS, 2 * ALCOR_RADIUS)), None, None
+
+    def fake_reference_altaz(time, **kw):
+        i = calls["i"]
+        return Table({"Alt": frame_alt[i], "Az": frame_az[i],
+                      "Vmag": rng.uniform(0.5, 3.0, 30), "HD": np.arange(30)})
+
+    def fake_detect(im, **kw):
+        i = calls["i"]
+        calls["i"] += 1
+        x, y = _predict_pixels(frame_alt[i], frame_az[i], **true)
+        return Table({"xcentroid": x, "ycentroid": y,
+                      "flux": np.linspace(1e3, 1e2, 30)})
+
+    monkeypatch.setattr(alcor_mod, "select_dark_frames",
+                        lambda fs, **kw: list(files))
+    monkeypatch.setattr(alcor_mod, "load_alcor_fits", fake_load_alcor_fits)
+    monkeypatch.setattr(alcor_mod, "alcor_reference_altaz", fake_reference_altaz)
+    monkeypatch.setattr(alcor_mod, "detect_alcor_stars", fake_detect)
+    monkeypatch.setattr(alcor_mod, "_frame_time",
+                        lambda path: Time("2024-09-05T07:00:00", format="isot",
+                                          scale="utc"))
+    # No tangential_coeffs key: the night fit must default it to (0, 0).
+    monkeypatch.setattr(alcor_mod, "alcor_calibration",
+                        lambda time=None: {"epoch": "2024-09-05", "xcen": 0.0,
+                                           "ycen": 0.0, "rotation": 0.0,
+                                           "radial_coeffs": (1.0, 0.0, 0.0),
+                                           "horizon_radius": 747.0})
+
+    result = fit_alcor_wcs(tmp_path, pattern="*.fits")
+    assert abs(result["tangential_coeffs"][0] - 0.004) < 5e-4
+    assert abs(result["tangential_coeffs"][1] + 0.003) < 5e-4
+    assert abs(result["xcen"] - 6.0) < 0.1
+    assert abs(result["ycen"] + 5.0) < 0.1
+    assert result["residual_rms"] < 0.1

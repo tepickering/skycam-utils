@@ -303,6 +303,7 @@ def assign_alcor_matches(cat, det, params, tolerance,
         cat["Alt"], cat["Az"], xcen=params["xcen"], ycen=params["ycen"],
         rotation=params["rotation"], radial_coeffs=tuple(params["radial_coeffs"]),
         horizon_radius=params.get("horizon_radius", horizon_radius),
+        tangential_coeffs=tuple(params.get("tangential_coeffs", (0.0, 0.0))),
     )
     px = np.atleast_1d(np.asarray(px, dtype=float))
     py = np.atleast_1d(np.asarray(py, dtype=float))
@@ -480,7 +481,8 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=4.0, sun_alt_max=-
     the seed geometry leaves real distortion unmodeled.
 
     The fit runs directly on the raw frame, so the recovered (xcen, ycen,
-    rotation, radial_coeffs) are the ABSOLUTE raw-frame geometry constants for the
+    rotation, radial_coeffs, tangential_coeffs) are the ABSOLUTE raw-frame
+    geometry constants for the
     night, suitable for baking into ``ALCOR_CALIBRATIONS`` (the night's
     ``horizon_radius`` is carried through from the seed epoch). It is warm-started
     from the nearest existing epoch (via :func:`alcor_calibration` at the night's
@@ -536,6 +538,7 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=4.0, sun_alt_max=-
 
     init = dict(xcen=base["xcen"], ycen=base["ycen"],
                 rotation=base["rotation"], radial_coeffs=base["radial_coeffs"],
+                tangential_coeffs=base.get("tangential_coeffs", (0.0, 0.0)),
                 horizon_radius=base["horizon_radius"])
     # (cat, detections) per usable frame, kept in frame order for reproducible
     # pooling regardless of worker completion order.
@@ -604,7 +607,8 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=4.0, sun_alt_max=-
     px, py = _predict_pixels(alt, az, xcen=params["xcen"], ycen=params["ycen"],
                              rotation=params["rotation"],
                              radial_coeffs=tuple(params["radial_coeffs"]),
-                             horizon_radius=base["horizon_radius"])
+                             horizon_radius=base["horizon_radius"],
+                             tangential_coeffs=tuple(params["tangential_coeffs"]))
     resid = np.hypot(px - x, py - y)
     mad = np.median(np.abs(resid - np.median(resid))) + 1e-9
     good = resid < np.median(resid) + 3.0 * 1.4826 * mad
@@ -614,7 +618,8 @@ def fit_alcor_wcs(input_dir, pattern="*.fits.bz2", vmag_limit=4.0, sun_alt_max=-
     px, py = _predict_pixels(alt[good], az[good], xcen=params["xcen"],
                              ycen=params["ycen"], rotation=params["rotation"],
                              radial_coeffs=tuple(params["radial_coeffs"]),
-                             horizon_radius=base["horizon_radius"])
+                             horizon_radius=base["horizon_radius"],
+                             tangential_coeffs=tuple(params["tangential_coeffs"]))
     rms = float(np.sqrt(np.mean((px - x[good]) ** 2 + (py - y[good]) ** 2)))
 
     return {
@@ -688,7 +693,9 @@ def save_alcor_residual_plot(alt, az, obs_x, obs_y, params, output_file,
     fx, fy = _predict_pixels(alt, az, xcen=cenx, ycen=ceny,
                              rotation=params["rotation"],
                              radial_coeffs=tuple(params["radial_coeffs"]),
-                             horizon_radius=hr)
+                             horizon_radius=hr,
+                             tangential_coeffs=tuple(
+                                 params.get("tangential_coeffs", (0.0, 0.0))))
     before = np.hypot(ix - obs_x, iy - obs_y)
     dx, dy = fx - obs_x, fy - obs_y
     after = np.hypot(dx, dy)
@@ -1397,7 +1404,8 @@ def load_alcor_fits(filename, wcs=None, badpix="repair", masks_dir=None):
         wcs = build_alcor_wcs(xcen=cal["xcen"], ycen=cal["ycen"],
                               rotation=cal["rotation"],
                               radial_coeffs=cal["radial_coeffs"],
-                              horizon_radius=cal["horizon_radius"])
+                              horizon_radius=cal["horizon_radius"],
+                              tangential_coeffs=cal["tangential_coeffs"])
 
     return cube, wcs, mask
 

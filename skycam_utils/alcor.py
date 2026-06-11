@@ -967,7 +967,8 @@ def _fit_sip_inverse(a, b, radius, sip_degree):
 
 def build_alcor_wcs(xcen=ALCOR_XCEN, ycen=ALCOR_YCEN, rotation=ALCOR_ROTATION,
                     radial_coeffs=ALCOR_RADIAL_COEFFS,
-                    horizon_radius=ALCOR_HORIZON_RADIUS, sip_degree=5):
+                    horizon_radius=ALCOR_HORIZON_RADIUS, sip_degree=5,
+                    tangential_coeffs=ALCOR_TANGENTIAL_COEFFS):
     """Build the raw-frame alt/az ARC WCS for the alcor sensor.
 
     The zenith is at pixel ``(xcen, ycen)``; ``rotation`` is the PC rotation
@@ -986,20 +987,27 @@ def build_alcor_wcs(xcen=ALCOR_XCEN, ycen=ALCOR_YCEN, rotation=ALCOR_ROTATION,
     whole FOV. The radial polynomial is rotation/reflection invariant, so the
     same A/B coefficients hold in the raw frame -- only the SIP reference pixel
     moves to the zenith.
+
+    ``tangential_coeffs`` (P1, P2) adds Brown-Conrady decentering; its Cartesian
+    displacement is an exact degree-2 polynomial (see ``_tangential_delta``), so
+    it joins the analytic SIP without approximation.
     """
     return _build_alcor_wcs_cached(
         float(xcen), float(ycen), float(rotation),
         tuple(float(c) for c in radial_coeffs),
         float(horizon_radius), int(sip_degree),
+        tuple(float(c) for c in tangential_coeffs),
     ).deepcopy()
 
 
 @lru_cache(maxsize=32)
 def _build_alcor_wcs_cached(xcen, ycen, rotation, radial_coeffs, horizon_radius,
-                            sip_degree):
+                            sip_degree, tangential_coeffs=(0.0, 0.0)):
     k1, k3, k5 = radial_coeffs
+    p1, p2 = tangential_coeffs
     base = _base_arc_wcs(xcen, ycen, rotation, k1, horizon_radius)
-    if abs(k3) < 1e-12 and abs(k5) < 1e-12:
+    if (abs(k3) < 1e-12 and abs(k5) < 1e-12
+            and abs(p1) < 1e-12 and abs(p2) < 1e-12):
         return base
 
     # Analytic SIP for the radial plate solution. The Cartesian displacement of
@@ -1014,6 +1022,11 @@ def _build_alcor_wcs_cached(xcen, ycen, rotation, radial_coeffs, horizon_radius,
     a[5, 0] = c5; a[3, 2] = 2 * c5; a[1, 4] = c5
     b[0, 3] = c3; b[2, 1] = c3
     b[0, 5] = c5; b[2, 3] = 2 * c5; b[4, 1] = c5
+    # Brown-Conrady tangential (decentering) terms: an exact degree-2 polynomial
+    # in the pixel offsets (see _tangential_delta). The radial terms occupy only
+    # odd-total-degree slots, the tangential only even ones -- no collisions.
+    a[2, 0] = 3.0 * p1 / H; a[0, 2] = p1 / H; a[1, 1] = 2.0 * p2 / H
+    b[0, 2] = 3.0 * p2 / H; b[2, 0] = p2 / H; b[1, 1] = 2.0 * p1 / H
     ap, bp = _fit_sip_inverse(a, b, int(round(H)), sip_degree)
 
     wcs = base.deepcopy()

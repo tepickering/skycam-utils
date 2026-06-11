@@ -1028,3 +1028,36 @@ def test_predict_pixels_tangential_satisfies_plate_solution():
     ang = np.radians(-1.0 - az)
     np.testing.assert_allclose(fu, s * np.sin(ang), atol=1e-3)
     np.testing.assert_allclose(fv, s * np.cos(ang), atol=1e-3)
+
+
+def test_build_alcor_wcs_with_tangential_reproduces_forward_model():
+    coeffs = (1.0, 0.02, 0.05)
+    tc = (0.004, -0.003)
+    xcen, ycen, hr = 696.0, 698.0, 662.0
+    wcs = build_alcor_wcs(xcen=xcen, ycen=ycen, rotation=0.4,
+                          radial_coeffs=coeffs, horizon_radius=hr,
+                          tangential_coeffs=tc)
+    assert wcs.sip is not None
+
+    alt = np.array([80.0, 60.0, 40.0, 20.0, 5.0])
+    az = np.array([10.0, 100.0, 190.0, 280.0, 350.0])
+    mx, my = _predict_pixels(alt, az, xcen=xcen, ycen=ycen, rotation=0.4,
+                             radial_coeffs=coeffs, horizon_radius=hr,
+                             tangential_coeffs=tc)
+    wx, wy = wcs.world_to_pixel_values(az, alt)
+    np.testing.assert_allclose(wx, mx, atol=1e-3)
+    np.testing.assert_allclose(wy, my, atol=1e-3)
+    # pixel->world applies the exact A/B; round-trip back to the inputs
+    waz, walt = wcs.pixel_to_world_values(mx, my)
+    np.testing.assert_allclose(walt, alt, atol=1e-4)
+    daz = (waz - az + 180.0) % 360.0 - 180.0   # wrap-safe angular difference
+    np.testing.assert_allclose(daz, 0.0, atol=1e-3)
+
+
+def test_build_alcor_wcs_tangential_only_attaches_sip():
+    # No radial distortion but nonzero tangential terms must still get a SIP.
+    wcs = build_alcor_wcs(xcen=696.0, ycen=698.0, rotation=0.0,
+                          radial_coeffs=(1.0, 0.0, 0.0), horizon_radius=662.0,
+                          tangential_coeffs=(0.003, 0.0))
+    assert wcs.sip is not None
+    assert list(wcs.wcs.ctype) == ["RA---ARC-SIP", "DEC--ARC-SIP"]

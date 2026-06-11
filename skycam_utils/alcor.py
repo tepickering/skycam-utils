@@ -117,6 +117,20 @@ def _invert_radial(z_deg, radial_coeffs, n_iter=8):
     return rho
 
 
+def _tangential_delta(u, v, p1, p2, horizon_radius):
+    """Brown-Conrady tangential (decentering) displacement in raw pixels.
+
+    ``u``, ``v`` are pixel offsets from the zenith; ``p1``/``p2`` are
+    dimensionless (normalized by ``horizon_radius``), like the radial k
+    coefficients. This is the pix->world displacement the WCS SIP applies
+    (see build_alcor_wcs); it is an exact degree-2 polynomial.
+    """
+    H = float(horizon_radius)
+    du = (p1 / H) * (3.0 * u**2 + v**2) + (2.0 * p2 / H) * u * v
+    dv = (p2 / H) * (u**2 + 3.0 * v**2) + (2.0 * p1 / H) * u * v
+    return du, dv
+
+
 def _predict_pixels(
     alt,
     az,
@@ -125,6 +139,7 @@ def _predict_pixels(
     rotation=0.0,
     radial_coeffs=ALCOR_RADIAL_COEFFS,
     horizon_radius=ALCOR_HORIZON_RADIUS,
+    tangential_coeffs=(0.0, 0.0),
 ):
     """Forward lens model: map altitude/azimuth (deg) to RAW-frame pixel
     coordinates (x=column, y=row, 0-based).
@@ -137,14 +152,45 @@ def _predict_pixels(
     the sky as seen from below), so the pixel angle is ``rotation - az``; north
     (az=0) lands toward +y. The matching WCS encodes the same mapping in its PC
     rotation matrix (see ``build_alcor_wcs``).
+
+    ``tangential_coeffs`` (P1, P2) adds Brown-Conrady decentering, defined like
+    the k's on the pix->world side (`_tangential_delta`). It is inverted with a
+    fixed-point loop that re-solves the radial part exactly each pass, so the
+    contraction is governed by the (tiny, ~4*P) tangential derivative rather
+    than the O(k3, k5) radial one; three passes reach well below 1e-3 px for
+    |P| up to ~1e-2.
     """
     alt = np.asarray(alt, dtype=float)
     az = np.asarray(az, dtype=float)
-    rho = _invert_radial(90.0 - alt, tuple(float(c) for c in radial_coeffs))
+    coeffs = tuple(float(c) for c in radial_coeffs)
+    rho = _invert_radial(90.0 - alt, coeffs)
     r = horizon_radius * rho
     ang = np.radians(rotation - az)
-    x = xcen + r * np.sin(ang)
-    y = ycen + r * np.cos(ang)
+    u = r * np.sin(ang)
+    v = r * np.cos(ang)
+
+    p1, p2 = (float(c) for c in tangential_coeffs)
+    if p1 != 0.0 or p2 != 0.0:
+        k1 = coeffs[0]
+        H = float(horizon_radius)
+        # Linear-pixel target of the SIP equation t = (u,v) + D_rad + D_tan:
+        # the radial displacement preserves direction, so |t| = H*z/(90*k1).
+        s = H * (90.0 - alt) / (90.0 * k1)
+        tu = s * np.sin(ang)
+        tv = s * np.cos(ang)
+        for _ in range(3):
+            du, dv = _tangential_delta(u, v, p1, p2, H)
+            wu = tu - du
+            wv = tv - dv
+            wr = np.hypot(wu, wv)
+            safe = np.where(wr > 0.0, wr, 1.0)
+            rho_w = _invert_radial(90.0 * k1 * wr / H, coeffs)
+            scale = np.where(wr > 0.0, H * rho_w / safe, 0.0)
+            u = wu * scale
+            v = wv * scale
+
+    x = xcen + u
+    y = ycen + v
     return x, y
 
 

@@ -989,3 +989,42 @@ def test_format_calibration_entry_includes_tangential():
         radial_coeffs=(1.0, 0.084, 0.0), horizon_radius=662.0))
     parsed = ast.literal_eval(line.strip().rstrip(","))
     assert parsed["tangential_coeffs"] == (0.0, 0.0)
+
+
+def test_predict_pixels_tangential_zero_is_noop():
+    alt = np.array([80.0, 45.0, 10.0])
+    az = np.array([15.0, 120.0, 300.0])
+    bx, by = _predict_pixels(alt, az, xcen=700.0, ycen=710.0, rotation=-1.0,
+                             radial_coeffs=(1.0, 0.09, 0.0), horizon_radius=747.0)
+    tx, ty = _predict_pixels(alt, az, xcen=700.0, ycen=710.0, rotation=-1.0,
+                             radial_coeffs=(1.0, 0.09, 0.0), horizon_radius=747.0,
+                             tangential_coeffs=(0.0, 0.0))
+    np.testing.assert_array_equal(tx, bx)
+    np.testing.assert_array_equal(ty, by)
+
+
+def test_predict_pixels_tangential_satisfies_plate_solution():
+    """The forward model must invert the exact pix->world plate solution:
+    (u, v) + D_radial(u, v) + D_tangential(u, v) lands on the linear ARC target,
+    whose radius is H * z / (90 * k1) along the (rotation - az) direction."""
+    k1, k3, k5 = 1.0, 0.09, 0.02
+    H = 747.0
+    p1, p2 = 3e-3, -2e-3
+    rng = np.random.default_rng(11)
+    alt = rng.uniform(2.0, 88.0, 200)
+    az = rng.uniform(0.0, 360.0, 200)
+    x, y = _predict_pixels(alt, az, xcen=700.0, ycen=710.0, rotation=-1.0,
+                           radial_coeffs=(k1, k3, k5), horizon_radius=H,
+                           tangential_coeffs=(p1, p2))
+    u = x - 700.0
+    v = y - 710.0
+    rho2 = (u**2 + v**2) / H**2
+    drad = (k3 * rho2 + k5 * rho2**2) / k1
+    du = (p1 / H) * (3.0 * u**2 + v**2) + (2.0 * p2 / H) * u * v
+    dv = (p2 / H) * (u**2 + 3.0 * v**2) + (2.0 * p1 / H) * u * v
+    fu = u * (1.0 + drad) + du
+    fv = v * (1.0 + drad) + dv
+    s = H * (90.0 - alt) / (90.0 * k1)
+    ang = np.radians(-1.0 - az)
+    np.testing.assert_allclose(fu, s * np.sin(ang), atol=1e-3)
+    np.testing.assert_allclose(fv, s * np.cos(ang), atol=1e-3)

@@ -1061,3 +1061,32 @@ def test_build_alcor_wcs_tangential_only_attaches_sip():
                           tangential_coeffs=(0.003, 0.0))
     assert wcs.sip is not None
     assert list(wcs.wcs.ctype) == ["RA---ARC-SIP", "DEC--ARC-SIP"]
+
+
+def test_fit_params_recovers_tangential_coeffs():
+    rng = np.random.default_rng(13)
+    alt = rng.uniform(5.0, 88.0, 400)
+    az = rng.uniform(0.0, 360.0, 400)
+    true = dict(xcen=5.0, ycen=-4.0, rotation=0.7,
+                radial_coeffs=(1.0, 0.08, 0.0),
+                tangential_coeffs=(0.004, -0.003))
+    x, y = _predict_pixels(alt, az, **true)
+
+    fit = _fit_params(alt, az, x, y,
+                      init_params=dict(xcen=0.0, ycen=0.0, rotation=0.0,
+                                       radial_coeffs=(1.0, 0.0, 0.0)))
+    assert abs(fit["tangential_coeffs"][0] - 0.004) < 2e-4
+    assert abs(fit["tangential_coeffs"][1] + 0.003) < 2e-4
+    assert abs(fit["xcen"] - 5.0) < 0.05
+    assert abs(fit["ycen"] + 4.0) < 0.05
+    assert abs(fit["radial_coeffs"][1] - 0.08) < 1e-3
+    # k3-only mode still pins k5 at zero with tangential terms free
+    assert fit["radial_coeffs"][2] == 0.0
+
+    # fit_k5 branch also carries the tangential terms
+    fit5 = _fit_params(alt, az, x, y,
+                       init_params=dict(xcen=0.0, ycen=0.0, rotation=0.0,
+                                        radial_coeffs=(1.0, 0.0, 0.0)),
+                       fit_k5=True)
+    assert abs(fit5["tangential_coeffs"][0] - 0.004) < 5e-4
+    assert abs(fit5["tangential_coeffs"][1] + 0.003) < 5e-4

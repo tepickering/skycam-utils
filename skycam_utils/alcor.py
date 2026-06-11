@@ -199,18 +199,27 @@ def _fit_params(alt, az, obs_x, obs_y, init_params,
     """
     Robust least-squares fit of the lens geometry to matched stars.
 
-    By default fits (xcen, ycen, rotation, k3) with k1 held at 1.0 (the zenith
-    plate scale is set by horizon_radius) and k5 at 0.0. k3 and k5 are nearly
-    collinear in rho over [0, 1], so fitting both is ill-conditioned on *dirty*
-    data and runs away to large cancelling values (e.g. k3=-0.58, k5=3.6) that are
-    unphysical despite a tolerable RMS -- which is why k3 alone is the default
-    (the model the shipped 2024 constants used). With ``fit_k5=True`` the odd
-    quintic term k5 is fit as well: appropriate only on a clean, well-distributed
-    match set (asterism-verified, spanning the full zenith range), where the radial
-    residual that k3 alone leaves near the horizon can be captured. A ``soft_l1``
-    loss downweights mismatched/noise detections, common in this sparse
-    bright-star field. Returns an updated params dict with
-    radial_coeffs=(1.0, k3, k5) (k5=0.0 unless ``fit_k5``).
+    By default fits (xcen, ycen, rotation, k3, P1, P2) with k1 held at 1.0 (the
+    zenith plate scale is set by horizon_radius) and k5 at 0.0. k3 and k5 are
+    nearly collinear in rho over [0, 1], so fitting both is ill-conditioned on
+    *dirty* data and runs away to large cancelling values (e.g. k3=-0.58,
+    k5=3.6) that are unphysical despite a tolerable RMS -- which is why k3
+    alone is the default (the model the shipped 2024 constants used). With
+    ``fit_k5=True`` the odd quintic term k5 is fit as well: appropriate only on
+    a clean, well-distributed match set (asterism-verified, spanning the full
+    zenith range), where the radial residual that k3 alone leaves near the
+    horizon can be captured.
+
+    The Brown-Conrady tangential terms (P1, P2) are always fit: unlike k3/k5
+    they are well-conditioned against the other parameters (their displacement
+    grows as r**2 and varies once per azimuth revolution, while a center shift
+    is constant and rotation grows as r), and they capture the sensor-tilt /
+    decentering signature the azimuthally-symmetric radial basis cannot.
+
+    A ``soft_l1`` loss downweights mismatched/noise detections, common in this
+    sparse bright-star field. Returns an updated params dict with
+    radial_coeffs=(1.0, k3, k5) (k5=0.0 unless ``fit_k5``) and
+    tangential_coeffs=(P1, P2).
     """
     alt = np.asarray(alt, dtype=float)
     az = np.asarray(az, dtype=float)
@@ -218,38 +227,36 @@ def _fit_params(alt, az, obs_x, obs_y, init_params,
     obs_y = np.asarray(obs_y, dtype=float)
     init_k3 = init_params["radial_coeffs"][1]
     init_k5 = init_params["radial_coeffs"][2]
+    init_p1, init_p2 = init_params.get("tangential_coeffs", (0.0, 0.0))
 
+    p0 = [init_params["xcen"], init_params["ycen"],
+          init_params["rotation"], init_k3]
     if fit_k5:
-        p0 = np.array([init_params["xcen"], init_params["ycen"],
-                       init_params["rotation"], init_k3, init_k5], dtype=float)
+        p0.append(init_k5)
+    p0 += [init_p1, init_p2]
+    p0 = np.asarray(p0, dtype=float)
 
-        def residuals(p):
-            xcen, ycen, rot, k3, k5 = p
-            x, y = _predict_pixels(alt, az, xcen=xcen, ycen=ycen, rotation=rot,
-                                   radial_coeffs=(1.0, k3, k5),
-                                   horizon_radius=horizon_radius)
-            return np.concatenate([x - obs_x, y - obs_y])
-
-        result = least_squares(residuals, p0, loss="soft_l1", f_scale=3.0)
-        xcen, ycen, rot, k3, k5 = result.x
-        return dict(xcen=float(xcen), ycen=float(ycen), rotation=float(rot),
-                    radial_coeffs=(1.0, float(k3), float(k5)),
-                    horizon_radius=float(horizon_radius))
-
-    p0 = np.array([init_params["xcen"], init_params["ycen"],
-                   init_params["rotation"], init_k3], dtype=float)
+    def unpack(p):
+        if fit_k5:
+            xcen, ycen, rot, k3, k5, p1, p2 = p
+        else:
+            xcen, ycen, rot, k3, p1, p2 = p
+            k5 = 0.0
+        return xcen, ycen, rot, k3, k5, p1, p2
 
     def residuals(p):
-        xcen, ycen, rot, k3 = p
+        xcen, ycen, rot, k3, k5, p1, p2 = unpack(p)
         x, y = _predict_pixels(alt, az, xcen=xcen, ycen=ycen, rotation=rot,
-                               radial_coeffs=(1.0, k3, 0.0),
-                               horizon_radius=horizon_radius)
+                               radial_coeffs=(1.0, k3, k5),
+                               horizon_radius=horizon_radius,
+                               tangential_coeffs=(p1, p2))
         return np.concatenate([x - obs_x, y - obs_y])
 
     result = least_squares(residuals, p0, loss="soft_l1", f_scale=3.0)
-    xcen, ycen, rot, k3 = result.x
+    xcen, ycen, rot, k3, k5, p1, p2 = unpack(result.x)
     return dict(xcen=float(xcen), ycen=float(ycen), rotation=float(rot),
-                radial_coeffs=(1.0, float(k3), 0.0),
+                radial_coeffs=(1.0, float(k3), float(k5)),
+                tangential_coeffs=(float(p1), float(p2)),
                 horizon_radius=float(horizon_radius))
 
 

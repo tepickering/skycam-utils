@@ -45,6 +45,11 @@ ALCOR_HORIZON_RADIUS = 747
 # zenith to alt=0). An optional "tangential_coeffs": (P1, P2) holds the
 # Brown-Conrady decentering (sensor-tilt) terms, dimensionless like the k's;
 # epochs without the key mean (0.0, 0.0) (alcor_calibration fills the default).
+# An optional "axis_tilt": (t_n, t_e) holds the optical-axis tilt from the
+# zenith as components toward north and east, in DEGREES (the axis points at
+# alt 90 - hypot(t_n, t_e), az atan2(t_e, t_n)); epochs without the key mean
+# (0.0, 0.0). With nonzero tilt, xcen/ycen is the optical-axis pixel (the
+# distortion center), not the zenith pixel.
 # The camera geometry drifts over time (mount/focus), so the
 # epoch nearest in time to an image is used (see alcor_calibration). Add a new
 # epoch by pasting the dict that fit_alcor_wcs prints. `epoch` is the calibration
@@ -85,6 +90,7 @@ def alcor_calibration(time=None):
         order = np.lexsort((-jds, dt))
         cal = dict(epochs[order[0]][1])
     cal.setdefault("tangential_coeffs", (0.0, 0.0))
+    cal.setdefault("axis_tilt", (0.0, 0.0))
     return cal
 
 
@@ -96,6 +102,7 @@ ALCOR_XCEN = _LATEST_CALIBRATION["xcen"]
 ALCOR_YCEN = _LATEST_CALIBRATION["ycen"]
 ALCOR_RADIAL_COEFFS = _LATEST_CALIBRATION["radial_coeffs"]
 ALCOR_TANGENTIAL_COEFFS = _LATEST_CALIBRATION["tangential_coeffs"]
+ALCOR_AXIS_TILT = _LATEST_CALIBRATION["axis_tilt"]
 
 
 def _invert_radial(z_deg, radial_coeffs, n_iter=8):
@@ -2021,12 +2028,14 @@ def _format_calibration_entry(result):
     """Format a calibration result as a paste-ready ALCOR_CALIBRATIONS entry."""
     rc = tuple(float(c) for c in result["radial_coeffs"])
     tc = tuple(float(c) for c in result.get("tangential_coeffs", (0.0, 0.0)))
+    at = tuple(float(c) for c in result.get("axis_tilt", (0.0, 0.0)))
     return (f'    {{"epoch": "{result["epoch"]}", '
             f'"xcen": {result["xcen"]:.3f}, '
             f'"ycen": {result["ycen"]:.3f}, '
             f'"rotation": {result["rotation"]:.4f}, '
             f'"radial_coeffs": {rc!r}, '
             f'"tangential_coeffs": {tc!r}, '
+            f'"axis_tilt": {at!r}, '
             f'"horizon_radius": {result["horizon_radius"]:.1f}}},')
 
 

@@ -1146,3 +1146,29 @@ def test_fit_alcor_wcs_recovers_tangential_terms(monkeypatch, tmp_path):
     assert abs(result["xcen"] - 6.0) < 0.1
     assert abs(result["ycen"] + 5.0) < 0.1
     assert result["residual_rms"] < 0.1
+
+
+def test_alcor_calibration_defaults_axis_tilt():
+    # Shipped epochs have no axis_tilt key; the resolver must fill it.
+    cal = alcor_calibration()
+    assert cal["axis_tilt"] == (0.0, 0.0)
+    cal = alcor_calibration(Time("2024-09-05", scale="utc"))
+    assert cal["axis_tilt"] == (0.0, 0.0)
+
+
+def test_format_calibration_entry_includes_axis_tilt():
+    import ast
+    from skycam_utils.alcor import _format_calibration_entry
+
+    line = _format_calibration_entry(dict(
+        epoch="2026-05-19", xcen=-12.0, ycen=9.9, rotation=0.3013,
+        radial_coeffs=(1.0, 0.084, 0.0), tangential_coeffs=(0.004, -0.003),
+        axis_tilt=(0.31, -0.22), horizon_radius=662.0))
+    parsed = ast.literal_eval(line.strip().rstrip(","))
+    assert parsed["axis_tilt"] == (0.31, -0.22)
+    # results without the key (old callers) format with the zero default
+    line = _format_calibration_entry(dict(
+        epoch="2026-05-19", xcen=-12.0, ycen=9.9, rotation=0.3013,
+        radial_coeffs=(1.0, 0.084, 0.0), horizon_radius=662.0))
+    parsed = ast.literal_eval(line.strip().rstrip(","))
+    assert parsed["axis_tilt"] == (0.0, 0.0)

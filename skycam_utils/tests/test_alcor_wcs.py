@@ -1223,3 +1223,42 @@ def test_predict_pixels_axis_tilt_continuous_at_zero():
     x1, y1 = _predict_pixels(alt, az, axis_tilt=(1e-9, 0.0), **kw)
     np.testing.assert_allclose(x1, x0, atol=1e-5)
     np.testing.assert_allclose(y1, y0, atol=1e-5)
+
+
+def test_build_alcor_wcs_with_axis_tilt_reproduces_forward_model():
+    """All model terms nonzero simultaneously: tilt + k3 + k5 + P1/P2."""
+    coeffs = (1.0, 0.05, 0.10)
+    tc = (0.002, -0.001)
+    at = (0.3, -0.2)
+    xcen, ycen, hr = 699.0, 710.0, 747.0
+    wcs = build_alcor_wcs(xcen=xcen, ycen=ycen, rotation=-1.0,
+                          radial_coeffs=coeffs, horizon_radius=hr,
+                          tangential_coeffs=tc, axis_tilt=at)
+    eps = np.hypot(*at)
+    a0 = np.degrees(np.arctan2(at[1], at[0])) % 360.0
+    np.testing.assert_allclose(wcs.wcs.crval, [a0, 90.0 - eps])
+
+    rng = np.random.default_rng(19)
+    alt = rng.uniform(5.0, 89.0, 100)
+    az = rng.uniform(0.0, 360.0, 100)
+    mx, my = _predict_pixels(alt, az, xcen=xcen, ycen=ycen, rotation=-1.0,
+                             radial_coeffs=coeffs, horizon_radius=hr,
+                             tangential_coeffs=tc, axis_tilt=at)
+    wx, wy = wcs.world_to_pixel_values(az, alt)
+    np.testing.assert_allclose(wx, mx, atol=1e-3)
+    np.testing.assert_allclose(wy, my, atol=1e-3)
+    waz, walt = wcs.pixel_to_world_values(mx, my)
+    np.testing.assert_allclose(walt, alt, atol=1e-4)
+    daz = (waz - az + 180.0) % 360.0 - 180.0   # wrap-safe angular difference
+    np.testing.assert_allclose(daz, 0.0, atol=1e-3)
+
+
+def test_build_alcor_wcs_zero_tilt_keeps_zenith_pole():
+    wcs = build_alcor_wcs(xcen=696.0, ycen=698.0, rotation=0.4,
+                          radial_coeffs=(1.0, 0.09, 0.0), horizon_radius=747.0,
+                          axis_tilt=(0.0, 0.0))
+    np.testing.assert_allclose(wcs.wcs.crval, [0.0, 90.0])
+    # at zero tilt the zenith pixel IS crpix
+    zx, zy = wcs.world_to_pixel_values(0.0, 90.0)
+    np.testing.assert_allclose([zx, zy], np.asarray(wcs.wcs.crpix) - 1.0,
+                               atol=1e-6)

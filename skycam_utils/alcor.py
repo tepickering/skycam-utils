@@ -974,12 +974,17 @@ def select_dark_frames(files, sun_alt_max=-18.0, moon_alt_max=-6.0,
     return [f for f, k in zip(files, keep) if k]
 
 
-def _base_arc_wcs(xcen, ycen, rotation, k1, horizon_radius):
+def _base_arc_wcs(xcen, ycen, rotation, k1, horizon_radius,
+                  axis_tilt=(0.0, 0.0)):
     """Linear ARC WCS (no SIP) reproducing the raw forward model's linear part.
 
-    crpix is the 1-based zenith pixel; the PC matrix is the pure rotation
+    crpix is the 1-based optical-axis pixel; the PC matrix is the pure rotation
     (det=+1) that matches ``_predict_pixels`` (the sky/sensor handedness lives in
     the ``rotation - az`` azimuth convention, encoded by the ARC longitude axis).
+    A nonzero ``axis_tilt`` moves the projection pole to the tilted optical
+    axis: CRVAL = (A0, 90 - eps) and LONPOLE = A0, which makes the WCS native
+    frame coincide with the minimal-rotation frame of ``_axis_frame`` (native
+    longitude phi = A' + 180; the celestial pole sits at A' = A0 + 180).
     """
     cdelt = 90.0 * k1 / horizon_radius
     rot = np.radians(rotation)
@@ -987,10 +992,17 @@ def _base_arc_wcs(xcen, ycen, rotation, k1, horizon_radius):
     wcs = WCS(naxis=2)
     wcs.wcs.ctype = ["RA---ARC", "DEC--ARC"]
     wcs.wcs.crpix = [xcen + 1.0, ycen + 1.0]
-    wcs.wcs.crval = [0.0, 90.0]
     wcs.wcs.cdelt = [cdelt, cdelt]
     wcs.wcs.pc = [[c, -s], [s, c]]
-    wcs.wcs.lonpole = 0.0
+    tn, te = axis_tilt
+    if tn != 0.0 or te != 0.0:
+        eps = float(np.hypot(tn, te))
+        a0 = float(np.degrees(np.arctan2(te, tn))) % 360.0
+        wcs.wcs.crval = [a0, 90.0 - eps]
+        wcs.wcs.lonpole = a0
+    else:
+        wcs.wcs.crval = [0.0, 90.0]
+        wcs.wcs.lonpole = 0.0
     return wcs
 
 
@@ -1036,7 +1048,8 @@ def _fit_sip_inverse(a, b, radius, sip_degree):
 def build_alcor_wcs(xcen=ALCOR_XCEN, ycen=ALCOR_YCEN, rotation=ALCOR_ROTATION,
                     radial_coeffs=ALCOR_RADIAL_COEFFS,
                     horizon_radius=ALCOR_HORIZON_RADIUS, sip_degree=5,
-                    tangential_coeffs=ALCOR_TANGENTIAL_COEFFS):
+                    tangential_coeffs=ALCOR_TANGENTIAL_COEFFS,
+                    axis_tilt=ALCOR_AXIS_TILT):
     """Build the raw-frame alt/az ARC WCS for the alcor sensor.
 
     The zenith is at pixel ``(xcen, ycen)``; ``rotation`` is the PC rotation
@@ -1059,21 +1072,30 @@ def build_alcor_wcs(xcen=ALCOR_XCEN, ycen=ALCOR_YCEN, rotation=ALCOR_ROTATION,
     ``tangential_coeffs`` (P1, P2) adds Brown-Conrady decentering; its Cartesian
     displacement is an exact degree-2 polynomial (see ``_tangential_delta``), so
     it joins the analytic SIP without approximation.
+
+    ``axis_tilt`` (t_n, t_e) tilts the optical axis off the zenith. This is
+    pure FITS-WCS geometry -- CRVAL moves to (A0, 90 - eps) with LONPOLE = A0
+    -- so the SIP is untouched and the mapping stays exact; with nonzero tilt
+    (xcen, ycen) is the optical-axis pixel, and the zenith pixel must be
+    obtained via ``world_to_pixel`` of alt=90 rather than CRPIX.
     """
     return _build_alcor_wcs_cached(
         float(xcen), float(ycen), float(rotation),
         tuple(float(c) for c in radial_coeffs),
         float(horizon_radius), int(sip_degree),
         tuple(float(c) for c in tangential_coeffs),
+        tuple(float(c) for c in axis_tilt),
     ).deepcopy()
 
 
 @lru_cache(maxsize=32)
 def _build_alcor_wcs_cached(xcen, ycen, rotation, radial_coeffs, horizon_radius,
-                            sip_degree, tangential_coeffs=(0.0, 0.0)):
+                            sip_degree, tangential_coeffs=(0.0, 0.0),
+                            axis_tilt=(0.0, 0.0)):
     k1, k3, k5 = radial_coeffs
     p1, p2 = tangential_coeffs
-    base = _base_arc_wcs(xcen, ycen, rotation, k1, horizon_radius)
+    base = _base_arc_wcs(xcen, ycen, rotation, k1, horizon_radius,
+                         axis_tilt=axis_tilt)
     if (abs(k3) < 1e-12 and abs(k5) < 1e-12
             and abs(p1) < 1e-12 and abs(p2) < 1e-12):
         return base

@@ -174,7 +174,8 @@ def test_filename_ut_datetime_applies_mst_offset():
 
 def test_build_alcor_wcs_idealized_matches_equidistant():
     wcs = build_alcor_wcs(xcen=696.0, ycen=698.0, rotation=0.0,
-                          radial_coeffs=(1.0, 0.0, 0.0), horizon_radius=662.0)
+                          radial_coeffs=(1.0, 0.0, 0.0), horizon_radius=662.0,
+                          tangential_coeffs=(0.0, 0.0), axis_tilt=(0.0, 0.0))
     assert list(wcs.wcs.ctype) == ["RA---ARC", "DEC--ARC"]
     np.testing.assert_allclose(wcs.wcs.crpix, [697.0, 699.0])
     np.testing.assert_allclose(wcs.wcs.cdelt, [90.0 / 662.0, 90.0 / 662.0])
@@ -189,7 +190,8 @@ def test_build_alcor_wcs_idealized_matches_equidistant():
 def test_build_alcor_wcs_reproduces_raw_forward_model():
     xcen, ycen, rot, coeffs, hr = 696.0, 698.0, 0.4, (1.0, 0.0138, 0.0), 662.0
     wcs = build_alcor_wcs(xcen=xcen, ycen=ycen, rotation=rot,
-                          radial_coeffs=coeffs, horizon_radius=hr)
+                          radial_coeffs=coeffs, horizon_radius=hr,
+                          tangential_coeffs=(0.0, 0.0), axis_tilt=(0.0, 0.0))
     az = np.array([0.0, 90.0, 180.0, 270.0, 45.0])
     alt = np.array([85.0, 60.0, 30.0, 10.0, 0.0])
     mx, my = _predict_pixels(alt, az, xcen=xcen, ycen=ycen, rotation=rot,
@@ -206,7 +208,8 @@ def test_build_alcor_wcs_with_radial_term_reproduces_forward_model():
     coeffs = (1.0, 0.02, 0.05)
     xcen, ycen, hr = 696.0, 698.0, 662.0
     wcs = build_alcor_wcs(xcen=xcen, ycen=ycen, rotation=0.0,
-                          radial_coeffs=coeffs, horizon_radius=hr)
+                          radial_coeffs=coeffs, horizon_radius=hr,
+                          tangential_coeffs=(0.0, 0.0), axis_tilt=(0.0, 0.0))
     assert wcs.sip is not None
 
     alt = np.array([80.0, 60.0, 40.0, 20.0, 5.0])
@@ -810,7 +813,8 @@ def test_load_alcor_fits_resolves_and_overrides(monkeypatch):
     # explicit wcs -> resolver NOT consulted; the passed WCS is returned as-is
     calls["n"] = 0
     w = alcor_mod.build_alcor_wcs(xcen=0.0, ycen=0.0, rotation=0.0,
-                                  radial_coeffs=(1.0, 0.0, 0.0), horizon_radius=30.0)
+                                  radial_coeffs=(1.0, 0.0, 0.0), horizon_radius=30.0,
+                                  tangential_coeffs=(0.0, 0.0), axis_tilt=(0.0, 0.0))
     _, wcs, _ = alcor_mod.load_alcor_fits(test_fits, wcs=w)
     assert calls["n"] == 0
     assert wcs.sip is None
@@ -965,11 +969,15 @@ def test_fit_alcor_wcs_forwards_matcher_knobs(monkeypatch, tmp_path):
     assert seen["pattern_tol"] == 4.5
 
 
-def test_alcor_calibration_defaults_tangential_coeffs():
-    # Shipped epochs have no tangential_coeffs key; the resolver must fill it.
-    cal = alcor_calibration()
+def test_alcor_calibration_defaults_tangential_coeffs(monkeypatch):
+    # Epochs without a tangential_coeffs key: the resolver must fill it.
+    import skycam_utils.alcor as alcor_mod
+    table = [{"epoch": "2024-09-04", "xcen": 0.0, "ycen": 0.0,
+              "rotation": 0.0, "radial_coeffs": (1.0, 0.0, 0.0)}]
+    monkeypatch.setattr(alcor_mod, "ALCOR_CALIBRATIONS", table)
+    cal = alcor_mod.alcor_calibration()
     assert cal["tangential_coeffs"] == (0.0, 0.0)
-    cal = alcor_calibration(Time("2024-09-05", scale="utc"))
+    cal = alcor_mod.alcor_calibration(Time("2024-09-05", scale="utc"))
     assert cal["tangential_coeffs"] == (0.0, 0.0)
 
 
@@ -1036,7 +1044,7 @@ def test_build_alcor_wcs_with_tangential_reproduces_forward_model():
     xcen, ycen, hr = 696.0, 698.0, 662.0
     wcs = build_alcor_wcs(xcen=xcen, ycen=ycen, rotation=0.4,
                           radial_coeffs=coeffs, horizon_radius=hr,
-                          tangential_coeffs=tc)
+                          tangential_coeffs=tc, axis_tilt=(0.0, 0.0))
     assert wcs.sip is not None
 
     alt = np.array([80.0, 60.0, 40.0, 20.0, 5.0])
@@ -1148,11 +1156,15 @@ def test_fit_alcor_wcs_recovers_tangential_terms(monkeypatch, tmp_path):
     assert result["residual_rms"] < 0.1
 
 
-def test_alcor_calibration_defaults_axis_tilt():
-    # Shipped epochs have no axis_tilt key; the resolver must fill it.
-    cal = alcor_calibration()
+def test_alcor_calibration_defaults_axis_tilt(monkeypatch):
+    # Epochs without an axis_tilt key: the resolver must fill it.
+    import skycam_utils.alcor as alcor_mod
+    table = [{"epoch": "2024-09-04", "xcen": 0.0, "ycen": 0.0,
+              "rotation": 0.0, "radial_coeffs": (1.0, 0.0, 0.0)}]
+    monkeypatch.setattr(alcor_mod, "ALCOR_CALIBRATIONS", table)
+    cal = alcor_mod.alcor_calibration()
     assert cal["axis_tilt"] == (0.0, 0.0)
-    cal = alcor_calibration(Time("2024-09-05", scale="utc"))
+    cal = alcor_mod.alcor_calibration(Time("2024-09-05", scale="utc"))
     assert cal["axis_tilt"] == (0.0, 0.0)
 
 

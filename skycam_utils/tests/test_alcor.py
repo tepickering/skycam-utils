@@ -62,8 +62,9 @@ def test_load_alcor_fits_accepts_explicit_wcs():
 def test_load_alcor_fits_wcs_maps_zenith_and_horizon(alcor_cube_wcs_mask):
     _, wcs, _ = alcor_cube_wcs_mask
 
-    # Zenith maps to alt=90 at the WCS reference pixel.
-    xz, yz = wcs.wcs.crpix[0] - 1.0, wcs.wcs.crpix[1] - 1.0
+    # The zenith pixel (looked up via the WCS -- with a tilted optical axis it
+    # is NOT crpix) round-trips to alt=90.
+    xz, yz = wcs.world_to_pixel_values(0.0, 90.0)
     _, zenith_alt = wcs.pixel_to_world_values(xz, yz)
     np.testing.assert_allclose(zenith_alt, 90.0, atol=0.02)
 
@@ -105,7 +106,8 @@ def test_alcor_keogram_uses_center_columns_and_date_headers(tmp_path):
 
     keogram, timestamps, files = alcor_keogram(tmp_path)
     cube, wcs, _ = load_alcor_fits(TEST_FITS)
-    zcol = int(round(wcs.wcs.crpix[0] - 1.0))             # 0-based zenith column
+    zx, _ = wcs.world_to_pixel_values(0.0, 90.0)
+    zcol = int(round(float(zx)))                          # 0-based zenith column
     ny = cube.shape[1]
 
     assert keogram.shape == (ny, 3, 3)

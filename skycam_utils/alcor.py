@@ -270,6 +270,12 @@ def _fit_params(alt, az, obs_x, obs_y, init_params,
     is constant and rotation grows as r), and they capture the sensor-tilt /
     decentering signature the azimuthally-symmetric radial basis cannot.
 
+    The axis-tilt components (t_n, t_e) are likewise always fit: their
+    tangential signature falls off as 1/tan(z), which no other parameter can
+    produce (translation is constant, rotation grows as r, Brown-Conrady as
+    r**2), so the term is well-conditioned. The returned dict also carries
+    axis_tilt=(t_n, t_e).
+
     A ``soft_l1`` loss downweights mismatched/noise detections, common in this
     sparse bright-star field. Returns an updated params dict with
     radial_coeffs=(1.0, k3, k5) (k5=0.0 unless ``fit_k5``) and
@@ -282,35 +288,38 @@ def _fit_params(alt, az, obs_x, obs_y, init_params,
     init_k3 = init_params["radial_coeffs"][1]
     init_k5 = init_params["radial_coeffs"][2]
     init_p1, init_p2 = init_params.get("tangential_coeffs", (0.0, 0.0))
+    init_tn, init_te = init_params.get("axis_tilt", (0.0, 0.0))
 
     p0 = [init_params["xcen"], init_params["ycen"],
           init_params["rotation"], init_k3]
     if fit_k5:
         p0.append(init_k5)
-    p0 += [init_p1, init_p2]
+    p0 += [init_p1, init_p2, init_tn, init_te]
     p0 = np.asarray(p0, dtype=float)
 
     def unpack(p):
         if fit_k5:
-            xcen, ycen, rot, k3, k5, p1, p2 = p
+            xcen, ycen, rot, k3, k5, p1, p2, tn, te = p
         else:
-            xcen, ycen, rot, k3, p1, p2 = p
+            xcen, ycen, rot, k3, p1, p2, tn, te = p
             k5 = 0.0
-        return xcen, ycen, rot, k3, k5, p1, p2
+        return xcen, ycen, rot, k3, k5, p1, p2, tn, te
 
     def residuals(p):
-        xcen, ycen, rot, k3, k5, p1, p2 = unpack(p)
+        xcen, ycen, rot, k3, k5, p1, p2, tn, te = unpack(p)
         x, y = _predict_pixels(alt, az, xcen=xcen, ycen=ycen, rotation=rot,
                                radial_coeffs=(1.0, k3, k5),
                                horizon_radius=horizon_radius,
-                               tangential_coeffs=(p1, p2))
+                               tangential_coeffs=(p1, p2),
+                               axis_tilt=(tn, te))
         return np.concatenate([x - obs_x, y - obs_y])
 
     result = least_squares(residuals, p0, loss="soft_l1", f_scale=3.0)
-    xcen, ycen, rot, k3, k5, p1, p2 = unpack(result.x)
+    xcen, ycen, rot, k3, k5, p1, p2, tn, te = unpack(result.x)
     return dict(xcen=float(xcen), ycen=float(ycen), rotation=float(rot),
                 radial_coeffs=(1.0, float(k3), float(k5)),
                 tangential_coeffs=(float(p1), float(p2)),
+                axis_tilt=(float(tn), float(te)),
                 horizon_radius=float(horizon_radius))
 
 

@@ -1262,3 +1262,32 @@ def test_build_alcor_wcs_zero_tilt_keeps_zenith_pole():
     zx, zy = wcs.world_to_pixel_values(0.0, 90.0)
     np.testing.assert_allclose([zx, zy], np.asarray(wcs.wcs.crpix) - 1.0,
                                atol=1e-6)
+
+
+def test_fit_params_recovers_axis_tilt():
+    rng = np.random.default_rng(23)
+    alt = rng.uniform(5.0, 88.0, 400)
+    az = rng.uniform(0.0, 360.0, 400)
+    true = dict(xcen=5.0, ycen=-4.0, rotation=0.7,
+                radial_coeffs=(1.0, 0.08, 0.0),
+                tangential_coeffs=(0.002, -0.001),
+                axis_tilt=(0.3, -0.2))
+    x, y = _predict_pixels(alt, az, **true)
+
+    fit = _fit_params(alt, az, x, y,
+                      init_params=dict(xcen=0.0, ycen=0.0, rotation=0.0,
+                                       radial_coeffs=(1.0, 0.0, 0.0)))
+    assert abs(fit["axis_tilt"][0] - 0.3) < 0.01
+    assert abs(fit["axis_tilt"][1] + 0.2) < 0.01
+    assert abs(fit["xcen"] - 5.0) < 0.1
+    assert abs(fit["ycen"] + 4.0) < 0.1
+    assert abs(fit["radial_coeffs"][1] - 0.08) < 2e-3
+    assert fit["radial_coeffs"][2] == 0.0
+
+    # fit_k5 branch also carries the tilt
+    fit5 = _fit_params(alt, az, x, y,
+                       init_params=dict(xcen=0.0, ycen=0.0, rotation=0.0,
+                                        radial_coeffs=(1.0, 0.0, 0.0)),
+                       fit_k5=True)
+    assert abs(fit5["axis_tilt"][0] - 0.3) < 0.01
+    assert abs(fit5["axis_tilt"][1] + 0.2) < 0.01

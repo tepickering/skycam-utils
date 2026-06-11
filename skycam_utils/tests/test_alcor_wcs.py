@@ -1172,3 +1172,54 @@ def test_format_calibration_entry_includes_axis_tilt():
         radial_coeffs=(1.0, 0.084, 0.0), horizon_radius=662.0))
     parsed = ast.literal_eval(line.strip().rstrip(","))
     assert parsed["axis_tilt"] == (0.0, 0.0)
+
+
+def test_predict_pixels_axis_tilt_zero_is_noop():
+    alt = np.array([80.0, 45.0, 10.0])
+    az = np.array([15.0, 120.0, 300.0])
+    bx, by = _predict_pixels(alt, az, xcen=700.0, ycen=710.0, rotation=-1.0,
+                             radial_coeffs=(1.0, 0.09, 0.0), horizon_radius=747.0,
+                             tangential_coeffs=(0.003, -0.002))
+    tx, ty = _predict_pixels(alt, az, xcen=700.0, ycen=710.0, rotation=-1.0,
+                             radial_coeffs=(1.0, 0.09, 0.0), horizon_radius=747.0,
+                             tangential_coeffs=(0.003, -0.002),
+                             axis_tilt=(0.0, 0.0))
+    np.testing.assert_array_equal(tx, bx)
+    np.testing.assert_array_equal(ty, by)
+
+
+def test_predict_pixels_axis_tilt_spherical_geometry():
+    """With tilt (and no pixel-space tangential terms), the pixel radius about
+    (xcen, ycen) must map through the plate solution to the TRUE angular
+    distance from the tilted axis, computed independently from the spherical
+    cosine identity."""
+    tn, te = 0.3, -0.2
+    eps = np.hypot(tn, te)
+    a0 = np.degrees(np.arctan2(te, tn))
+    k1, k3, k5 = 1.0, 0.09, 0.02
+    H = 747.0
+    rng = np.random.default_rng(17)
+    alt = rng.uniform(5.0, 89.5, 300)
+    az = rng.uniform(0.0, 360.0, 300)
+    x, y = _predict_pixels(alt, az, xcen=700.0, ycen=710.0, rotation=-1.0,
+                           radial_coeffs=(k1, k3, k5), horizon_radius=H,
+                           axis_tilt=(tn, te))
+    rho = np.hypot(x - 700.0, y - 710.0) / H
+    z_model = 90.0 * (k1 * rho + k3 * rho**3 + k5 * rho**5)
+    alt0 = np.radians(90.0 - eps)
+    cos_zp = (np.sin(np.radians(alt)) * np.sin(alt0)
+              + np.cos(np.radians(alt)) * np.cos(alt0)
+              * np.cos(np.radians(az - a0)))
+    z_true = np.degrees(np.arccos(np.clip(cos_zp, -1.0, 1.0)))
+    np.testing.assert_allclose(z_model, z_true, atol=1e-6)
+
+
+def test_predict_pixels_axis_tilt_continuous_at_zero():
+    alt = np.array([80.0, 45.0, 10.0])
+    az = np.array([15.0, 120.0, 300.0])
+    kw = dict(xcen=700.0, ycen=710.0, rotation=-1.0,
+              radial_coeffs=(1.0, 0.09, 0.0), horizon_radius=747.0)
+    x0, y0 = _predict_pixels(alt, az, axis_tilt=(0.0, 0.0), **kw)
+    x1, y1 = _predict_pixels(alt, az, axis_tilt=(1e-9, 0.0), **kw)
+    np.testing.assert_allclose(x1, x0, atol=1e-5)
+    np.testing.assert_allclose(y1, y0, atol=1e-5)

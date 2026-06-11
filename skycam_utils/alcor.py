@@ -124,6 +124,38 @@ def _invert_radial(z_deg, radial_coeffs, n_iter=8):
     return rho
 
 
+def _axis_frame(alt, az, t_n, t_e):
+    """Axis-centered polar coordinates (z', A') [deg] of sky points (alt, az)
+    [deg] for an optical axis tilted off the zenith.
+
+    The axis leans eps = hypot(t_n, t_e) deg from the zenith toward azimuth
+    A0 = atan2(t_e, t_n) (components toward north and east). The sky is
+    rotated by the exact minimal rotation -- by eps about the horizontal axis
+    at azimuth A0 + 90 -- that carries the optical axis to the pole, so
+    A' -> az continuously as eps -> 0. z' is the true angular distance from
+    the axis.
+    """
+    eps = np.radians(np.hypot(t_n, t_e))
+    a0 = np.arctan2(t_e, t_n)
+    alt_r = np.radians(np.asarray(alt, dtype=float))
+    az_r = np.radians(np.asarray(az, dtype=float))
+    # unit vectors: x toward north (az=0), y toward east (az=90), z up
+    vx = np.cos(alt_r) * np.cos(az_r)
+    vy = np.cos(alt_r) * np.sin(az_r)
+    vz = np.sin(alt_r)
+    # Rodrigues rotation by -eps about n = (-sin A0, cos A0, 0):
+    # v' = v cos(eps) - (n x v) sin(eps) + n (n.v)(1 - cos(eps))
+    nx, ny = -np.sin(a0), np.cos(a0)
+    ndv = nx * vx + ny * vy
+    c, s = np.cos(eps), np.sin(eps)
+    wx = c * vx - s * (ny * vz) + (1.0 - c) * ndv * nx
+    wy = c * vy - s * (-nx * vz) + (1.0 - c) * ndv * ny
+    wz = c * vz - s * (nx * vy - ny * vx)
+    zp = np.degrees(np.arccos(np.clip(wz, -1.0, 1.0)))
+    ap = np.degrees(np.arctan2(wy, wx))
+    return zp, ap
+
+
 def _tangential_delta(u, v, p1, p2, horizon_radius):
     """Brown-Conrady tangential (decentering) displacement in raw pixels.
 
@@ -147,6 +179,7 @@ def _predict_pixels(
     radial_coeffs=ALCOR_RADIAL_COEFFS,
     horizon_radius=ALCOR_HORIZON_RADIUS,
     tangential_coeffs=(0.0, 0.0),
+    axis_tilt=(0.0, 0.0),
 ):
     """Forward lens model: map altitude/azimuth (deg) to RAW-frame pixel
     coordinates (x=column, y=row, 0-based).
@@ -166,13 +199,27 @@ def _predict_pixels(
     contraction is governed by the (tiny, ~4*P) tangential derivative rather
     than the O(k3, k5) radial one; three passes reach well below 1e-3 px for
     |P| up to ~1e-2.
+
+    ``axis_tilt`` (t_n, t_e) tilts the optical axis off the zenith (degrees
+    toward north/east; see `_axis_frame`). The model is azimuthally symmetric
+    about the AXIS: the radial inversion runs in the axis distance z' and the
+    pixel angle is ``rotation - A'``. With nonzero tilt, (xcen, ycen) is the
+    optical-axis pixel, not the zenith pixel.
     """
     alt = np.asarray(alt, dtype=float)
     az = np.asarray(az, dtype=float)
     coeffs = tuple(float(c) for c in radial_coeffs)
-    rho = _invert_radial(90.0 - alt, coeffs)
+
+    tn, te = (float(c) for c in axis_tilt)
+    if tn != 0.0 or te != 0.0:
+        zp, ap = _axis_frame(alt, az, tn, te)
+    else:
+        zp = 90.0 - alt
+        ap = az
+
+    rho = _invert_radial(zp, coeffs)
     r = horizon_radius * rho
-    ang = np.radians(rotation - az)
+    ang = np.radians(rotation - ap)
     u = r * np.sin(ang)
     v = r * np.cos(ang)
 
@@ -181,8 +228,8 @@ def _predict_pixels(
         k1 = coeffs[0]
         H = float(horizon_radius)
         # Linear-pixel target of the SIP equation t = (u,v) + D_rad + D_tan:
-        # the radial displacement preserves direction, so |t| = H*z/(90*k1).
-        s = H * (90.0 - alt) / (90.0 * k1)
+        # the radial displacement preserves direction, so |t| = H*z'/(90*k1).
+        s = H * zp / (90.0 * k1)
         tu = s * np.sin(ang)
         tv = s * np.cos(ang)
         for _ in range(3):

@@ -42,7 +42,10 @@ ALCOR_HORIZON_RADIUS = 747
 # Time-indexed lens calibrations. Each epoch holds the raw-frame geometry as
 # absolutes: the zenith pixel (xcen, ycen) in the raw FITS frame, the azimuth
 # rotation, the radial_coeffs (k1, k3, k5), and the horizon_radius (pixels from
-# zenith to alt=0). The camera geometry drifts over time (mount/focus), so the
+# zenith to alt=0). An optional "tangential_coeffs": (P1, P2) holds the
+# Brown-Conrady decentering (sensor-tilt) terms, dimensionless like the k's;
+# epochs without the key mean (0.0, 0.0) (alcor_calibration fills the default).
+# The camera geometry drifts over time (mount/focus), so the
 # epoch nearest in time to an image is used (see alcor_calibration). Add a new
 # epoch by pasting the dict that fit_alcor_wcs prints. `epoch` is the calibration
 # night at day precision (UT, not local night -- do not "fix" it to local).
@@ -69,16 +72,20 @@ def alcor_calibration(time=None):
 
     ``time`` is an astropy ``Time``. An exact tie resolves to the more recent
     epoch. ``time=None`` returns the most recent epoch (the default for
-    time-agnostic calls). The returned dict is a copy and may be mutated freely.
+    time-agnostic calls). The returned dict is a copy and may be mutated freely;
+    ``tangential_coeffs`` is filled with ``(0.0, 0.0)`` for epochs that omit it.
     """
     epochs = _calibration_epochs()
     if time is None:
-        return dict(max(epochs, key=lambda e: e[0].jd)[1])
-    jds = np.array([e[0].jd for e in epochs])
-    dt = np.abs(jds - Time(time).jd)
-    # primary: smallest |dt|; tie-break: largest jd (more recent)
-    order = np.lexsort((-jds, dt))
-    return dict(epochs[order[0]][1])
+        cal = dict(max(epochs, key=lambda e: e[0].jd)[1])
+    else:
+        jds = np.array([e[0].jd for e in epochs])
+        dt = np.abs(jds - Time(time).jd)
+        # primary: smallest |dt|; tie-break: largest jd (more recent)
+        order = np.lexsort((-jds, dt))
+        cal = dict(epochs[order[0]][1])
+    cal.setdefault("tangential_coeffs", (0.0, 0.0))
+    return cal
 
 
 # Module-level defaults track the most-recent epoch so existing default-argument
@@ -88,6 +95,7 @@ ALCOR_ROTATION = _LATEST_CALIBRATION["rotation"]
 ALCOR_XCEN = _LATEST_CALIBRATION["xcen"]
 ALCOR_YCEN = _LATEST_CALIBRATION["ycen"]
 ALCOR_RADIAL_COEFFS = _LATEST_CALIBRATION["radial_coeffs"]
+ALCOR_TANGENTIAL_COEFFS = _LATEST_CALIBRATION["tangential_coeffs"]
 
 
 def _invert_radial(z_deg, radial_coeffs, n_iter=8):
@@ -1938,11 +1946,13 @@ def plot_alcor_fits_cli():
 def _format_calibration_entry(result):
     """Format a calibration result as a paste-ready ALCOR_CALIBRATIONS entry."""
     rc = tuple(float(c) for c in result["radial_coeffs"])
+    tc = tuple(float(c) for c in result.get("tangential_coeffs", (0.0, 0.0)))
     return (f'    {{"epoch": "{result["epoch"]}", '
             f'"xcen": {result["xcen"]:.3f}, '
             f'"ycen": {result["ycen"]:.3f}, '
             f'"rotation": {result["rotation"]:.4f}, '
             f'"radial_coeffs": {rc!r}, '
+            f'"tangential_coeffs": {tc!r}, '
             f'"horizon_radius": {result["horizon_radius"]:.1f}}},')
 
 

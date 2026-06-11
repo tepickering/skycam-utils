@@ -963,3 +963,29 @@ def test_fit_alcor_wcs_forwards_matcher_knobs(monkeypatch, tmp_path):
     assert seen["n_neighbors"] == 8
     assert seen["min_corroborating"] == 1
     assert seen["pattern_tol"] == 4.5
+
+
+def test_alcor_calibration_defaults_tangential_coeffs():
+    # Shipped epochs have no tangential_coeffs key; the resolver must fill it.
+    cal = alcor_calibration()
+    assert cal["tangential_coeffs"] == (0.0, 0.0)
+    cal = alcor_calibration(Time("2024-09-05", scale="utc"))
+    assert cal["tangential_coeffs"] == (0.0, 0.0)
+
+
+def test_format_calibration_entry_includes_tangential():
+    import ast
+    from skycam_utils.alcor import _format_calibration_entry
+
+    line = _format_calibration_entry(dict(
+        epoch="2026-05-19", xcen=-12.0, ycen=9.9, rotation=0.3013,
+        radial_coeffs=(1.0, 0.084, 0.0), tangential_coeffs=(0.004, -0.003),
+        horizon_radius=662.0))
+    parsed = ast.literal_eval(line.strip().rstrip(","))
+    assert parsed["tangential_coeffs"] == (0.004, -0.003)
+    # results without the key (old callers) format with the zero default
+    line = _format_calibration_entry(dict(
+        epoch="2026-05-19", xcen=-12.0, ycen=9.9, rotation=0.3013,
+        radial_coeffs=(1.0, 0.084, 0.0), horizon_radius=662.0))
+    parsed = ast.literal_eval(line.strip().rstrip(","))
+    assert parsed["tangential_coeffs"] == (0.0, 0.0)

@@ -653,7 +653,7 @@ def save_alcor_residual_plot(alt, az, obs_x, obs_y, params, output_file,
     # structure survives while incoherent (mismatch) scatter cancels out. The raw
     # frame is not centered on the zenith, so the grid spans the detector extent
     # implied by the zenith center plus the horizon radius.
-    extent = 2.0 * (max(cenx, ceny) + hr)
+    extent = max(cenx, ceny) + hr
     cell = extent / nbins
     cx_i = np.clip((obs_x / cell).astype(int), 0, nbins - 1)
     cy_i = np.clip((obs_y / cell).astype(int), 0, nbins - 1)

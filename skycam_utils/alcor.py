@@ -10,6 +10,7 @@ from importlib.resources import files
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 from scipy.ndimage import median_filter
 from scipy.optimize import least_squares
 from scipy.spatial import cKDTree
@@ -1469,6 +1470,248 @@ def alcor_reference_altaz(time, vmag_limit=3.0, min_alt=5.0, refraction=True,
     return cat
 
 
+def alcor_named_reference_altaz(time, vmag_limit=5.5, min_alt=20.0,
+                                refraction=True, location=MMT_LOCATION):
+    """
+    Load ``bright_star_sloan_named.fits`` and compute Alt/Az at ``time``.
+
+    This is the star-photometry catalog path: unlike
+    :func:`alcor_reference_altaz`, it keeps the ``NAME`` column used as the CSV
+    row index. Stars are filtered to ``Vmag <= vmag_limit`` and ``Alt >=
+    min_alt``.
+    """
+    catpath = files(__package__) / "data" / "bright_star_sloan_named.fits"
+    cat = Table.read(str(catpath))
+    cat = cat[cat["Vmag"] <= vmag_limit]
+
+    coords = SkyCoord(cat["_RAJ2000"], cat["_DEJ2000"], unit="deg", frame="icrs")
+    if refraction:
+        frame = AltAz(obstime=time, location=location, pressure=ALCOR_PRESSURE,
+                      temperature=ALCOR_TEMPERATURE, relative_humidity=ALCOR_HUMIDITY,
+                      obswl=ALCOR_OBSWL)
+    else:
+        frame = AltAz(obstime=time, location=location)
+    altaz = coords.transform_to(frame)
+    cat["Alt"] = altaz.alt.deg
+    cat["Az"] = altaz.az.deg
+    cat = cat[cat["Alt"] >= min_alt]
+    return cat
+
+
+def _alcor_star_labels(cat):
+    """
+    Return stable, unique row labels for the named bright-star catalog.
+    """
+    raw_names = [str(name).strip() for name in cat["NAME"]]
+    hd = []
+    for value in cat["HD"]:
+        try:
+            hd.append(None if np.ma.is_masked(value) else int(value))
+        except (TypeError, ValueError):
+            hd.append(None)
+    base = []
+    for index, (name, hd_value) in enumerate(zip(raw_names, hd), start=1):
+        if name and name != "--":
+            base.append(name)
+        elif hd_value is not None:
+            base.append(f"HD {hd_value}")
+        else:
+            base.append(f"unnamed {index}")
+    totals = {}
+    for label in base:
+        totals[label] = totals.get(label, 0) + 1
+    counts = {}
+    labels = []
+    for label, hd_value in zip(base, hd):
+        counts[label] = counts.get(label, 0) + 1
+        if counts[label] == 1 and totals[label] == 1:
+            labels.append(label)
+        elif hd_value is not None:
+            labels.append(f"{label} (HD {hd_value})")
+        else:
+            labels.append(f"{label} {counts[label]}")
+    return labels
+
+
+def _corner_bias(cube, size=10):
+    """
+    Per-channel median bias from square corner regions.
+    """
+    cube = np.asarray(cube, dtype=float)
+    if cube.ndim != 3 or cube.shape[0] != 3:
+        raise ValueError(f"expected a (3, ny, nx) cube, got {cube.shape}")
+    _, ny, nx = cube.shape
+    if ny < size or nx < size:
+        raise ValueError(f"image is smaller than the {size}x{size} bias regions")
+    corners = [
+        cube[:, :size, :size],
+        cube[:, :size, -size:],
+        cube[:, -size:, :size],
+        cube[:, -size:, -size:],
+    ]
+    pixels = np.concatenate([corner.reshape(3, -1) for corner in corners], axis=1)
+    return np.median(pixels, axis=1)
+
+
+def _aperture_annulus_photometry(image, xcen, ycen, aperture_radius,
+                                 annulus_width):
+    """
+    Circular aperture flux with a local median annulus background.
+    """
+    ny, nx = image.shape
+    annulus_inner = aperture_radius + 1.0
+    outer = annulus_inner + annulus_width
+    x0 = max(0, int(np.floor(xcen - outer)))
+    x1 = min(nx, int(np.ceil(xcen + outer)) + 1)
+    y0 = max(0, int(np.floor(ycen - outer)))
+    y1 = min(ny, int(np.ceil(ycen + outer)) + 1)
+    if x0 >= x1 or y0 >= y1:
+        return np.nan, np.nan
+
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    rr = np.hypot(xx - xcen, yy - ycen)
+    aperture = rr <= aperture_radius
+    annulus = (rr > annulus_inner) & (rr <= outer)
+    if not aperture.any() or not annulus.any():
+        return np.nan, np.nan
+
+    cutout = image[y0:y1, x0:x1]
+    background = float(np.median(cutout[annulus]))
+    flux = float(np.sum(cutout[aperture] - background))
+    return flux, background
+
+
+def _default_alcor_photometry_output(filename):
+    stem = str(filename)
+    for ext in (".fits.bz2", ".fits.gz", ".fits"):
+        if stem.endswith(ext):
+            stem = stem[: -len(ext)]
+            break
+    return Path(stem + "_phot.csv")
+
+
+def _default_alcor_photometry_check_plot_output(filename):
+    stem = str(filename)
+    for ext in (".fits.bz2", ".fits.gz", ".fits"):
+        if stem.endswith(ext):
+            stem = stem[: -len(ext)]
+            break
+    return Path(stem + "_phot.pdf")
+
+
+def _alcor_display_rgb(cube, powerstretch=0.75, contrast=0.35,
+                       gscale=0.7, bscale=1.7):
+    """
+    Build a stretched display RGB image from a raw Alcor cube.
+
+    This is display-only preprocessing: the raw cube returned by
+    :func:`load_alcor_fits` remains untouched, but visualization subtracts the
+    per-channel corner bias before color scaling so the bias pedestal does not
+    dominate the color balance.
+    """
+    data = np.asarray(cube, dtype=float) - _corner_bias(cube)[:, None, None]
+    rgb = np.transpose(data, (1, 2, 0))                  # (ny, nx, 3)
+    rgb[:, :, 1] *= gscale
+    rgb[:, :, 2] *= bscale
+    stretch = viz.PowerStretch(powerstretch) + viz.ZScaleInterval(contrast=contrast)
+    return stretch(rgb)
+
+
+def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
+                          annulus_width=1.0, min_altitude=20.0,
+                          vmag_limit=5.5, refraction=True, masks_dir=None,
+                          check_plot=False, check_radius=680):
+    """
+    Measure fixed-position aperture photometry for bright named stars.
+
+    The image is loaded with :func:`load_alcor_fits` using bad-pixel repair, then
+    a per-channel bias level is subtracted from the median of the four 10x10
+    image corners. Catalog stars from ``bright_star_sloan_named.fits`` with
+    ``Vmag <= vmag_limit`` and altitude above ``min_altitude`` are projected
+    into the raw image via the frame WCS. Each channel is measured with a
+    circular aperture and a surrounding annulus.
+
+    Returns
+    -------
+    phot : `pandas.DataFrame`
+        Rows indexed by star name. Columns are ``altitude``, ``azimuth``,
+        ``xcen``, ``ycen`` and per-channel ``flux_*``, ``mag_*``,
+        ``background_*`` for ``r``, ``g``, ``b``. Rows are sorted by
+        descending ``flux_g``.
+    output_file : `~pathlib.Path`
+        CSV path written.
+    """
+    if aperture_radius <= 0:
+        raise ValueError("aperture_radius must be positive")
+    if annulus_width <= 0:
+        raise ValueError("annulus_width must be positive")
+
+    filename = Path(filename)
+    time = _alcor_frame_time(filename)
+    if time is None:
+        raise ValueError(f"could not determine frame time from {filename}")
+
+    cube, wcs, _ = load_alcor_fits(filename, badpix="repair",
+                                   masks_dir=masks_dir)
+    bias = _corner_bias(cube, size=10)
+    data = cube.astype(float, copy=False) - bias[:, None, None]
+
+    cat = alcor_named_reference_altaz(
+        time, vmag_limit=vmag_limit, min_alt=min_altitude,
+        refraction=refraction,
+    )
+    xcen, ycen = wcs.world_to_pixel_values(cat["Az"], cat["Alt"])
+    xcen = np.asarray(xcen, dtype=float)
+    ycen = np.asarray(ycen, dtype=float)
+
+    rows = []
+    labels = []
+    cat_labels = _alcor_star_labels(cat)
+    channels = ("r", "g", "b")
+    for i, (x, y) in enumerate(zip(xcen, ycen)):
+        row = {
+            "altitude": float(cat["Alt"][i]),
+            "azimuth": float(cat["Az"][i]),
+            "xcen": float(x),
+            "ycen": float(y),
+        }
+        fluxes = []
+        for channel_index, channel in enumerate(channels):
+            flux, background = _aperture_annulus_photometry(
+                data[channel_index], x, y, aperture_radius, annulus_width)
+            fluxes.append(flux)
+            row[f"flux_{channel}"] = flux
+            row[f"background_{channel}"] = background
+        if any((not np.isfinite(flux)) or flux <= 0.0 for flux in fluxes):
+            continue
+        for channel, flux in zip(channels, fluxes):
+            row[f"mag_{channel}"] = float(-2.5 * np.log10(flux))
+        rows.append(row)
+        labels.append(cat_labels[i])
+
+    columns = ["altitude", "azimuth", "xcen", "ycen"]
+    for channel in channels:
+        columns += [f"flux_{channel}", f"mag_{channel}", f"background_{channel}"]
+    phot = pd.DataFrame(rows, index=labels, columns=columns)
+    phot.index.name = "name"
+    phot = phot.sort_values("flux_g", ascending=False, na_position="last")
+    output_file = (_default_alcor_photometry_output(filename)
+                   if output_file is None else Path(output_file))
+    phot.to_csv(output_file)
+    if check_plot:
+        check_plot_file = (_default_alcor_photometry_check_plot_output(filename)
+                           if check_plot is True else Path(check_plot))
+        save_alcor_photometry_check_plot(
+            filename,
+            phot,
+            check_plot_file,
+            aperture_radius=aperture_radius,
+            annulus_width=annulus_width,
+            radius=check_radius,
+        )
+    return phot, output_file
+
+
 def load_alcor_fits(filename, wcs=None, badpix="repair", masks_dir=None):
     """
     Load an alcor OMEA 8C FITS file and return ``(cube, wcs, mask)``.
@@ -1887,9 +2130,10 @@ def plot_alcor_fits(filename, outimage=None, outfig=None, radius=680,
     Take a FITS file as produced by the alcor OMEA 8C and create an annotated
     all-sky figure for display.
 
-    The raw cube and its WCS are loaded; the display RGB is built, cropped to a
-    ``radius``-pixel square around the WCS zenith, and rendered with
-    ``origin="lower"`` (north-up). Geometry comes entirely from the WCS.
+    The raw cube and its WCS are loaded; the display RGB is bias-subtracted,
+    stretched, cropped to a ``radius``-pixel square around the WCS zenith, and
+    rendered with ``origin="lower"`` (north-up). Geometry comes entirely from
+    the WCS.
 
     Parameters
     ----------
@@ -1913,11 +2157,12 @@ def plot_alcor_fits(filename, outimage=None, outfig=None, radius=680,
         Size of matplotlib figure in inches.
     """
     cube, wcs, _ = load_alcor_fits(filename)
-    rgb = np.transpose(cube, (1, 2, 0)).astype(float)     # (ny, nx, 3)
-    rgb[:, :, 1] *= gscale  # the factors to scale the green and blue channels were determined empirically and provide a
-    rgb[:, :, 2] *= bscale  # reasonably good white/color balance for both day and night images.
-    stretch = viz.PowerStretch(powerstretch) + viz.ZScaleInterval(contrast=contrast)
-    rgb = stretch(rgb)
+    # The factors to scale the green and blue channels were determined
+    # empirically and provide a reasonably good white/color balance for both day
+    # and night images. Subtract the per-channel bias first; otherwise the raw
+    # pedestal is color-scaled too and the image turns purple.
+    rgb = _alcor_display_rgb(cube, powerstretch=powerstretch, contrast=contrast,
+                             gscale=gscale, bscale=bscale)
 
     zx, zy = wcs.world_to_pixel_values(0.0, 90.0)
     xz = int(round(float(zx)))                            # 0-based zenith
@@ -1958,6 +2203,61 @@ def plot_alcor_fits(filename, outimage=None, outfig=None, radius=680,
         plt.savefig(outfig, transparent=True, bbox_inches='tight', pad_inches=0)
 
     return fig
+
+
+def save_alcor_photometry_check_plot(filename, phot, output_file,
+                                     aperture_radius=4.0, annulus_width=1.0,
+                                     radius=680, powerstretch=0.75,
+                                     contrast=0.35, gscale=0.7, bscale=1.7,
+                                     figsize=12):
+    """
+    Save a ``plot_alcor_fits`` rendering with measured apertures overlaid.
+
+    ``phot`` is the DataFrame returned by :func:`alcor_star_photometry`, with
+    raw-frame ``xcen`` and ``ycen`` columns. Apertures outside the displayed crop
+    are skipped.
+    """
+    output_file = Path(output_file)
+    fig = plot_alcor_fits(
+        filename,
+        outfig=None,
+        radius=radius,
+        powerstretch=powerstretch,
+        contrast=contrast,
+        gscale=gscale,
+        bscale=bscale,
+        figsize=figsize,
+    )
+    ax = fig.axes[0]
+
+    cube, wcs, _ = load_alcor_fits(filename)
+    zx, zy = wcs.world_to_pixel_values(0.0, 90.0)
+    xz = int(round(float(zx)))
+    yz = int(round(float(zy)))
+    ny, nx = cube.shape[1:]
+    yl, yu = max(0, yz - radius), min(ny, yz + radius)
+    xl, xu = max(0, xz - radius), min(nx, xz + radius)
+    annulus_inner = aperture_radius + 1.0
+    outer = annulus_inner + annulus_width
+
+    for _, row in phot.iterrows():
+        x = float(row["xcen"])
+        y = float(row["ycen"])
+        if x + outer < xl or x - outer > xu or y + outer < yl or y - outer > yu:
+            continue
+        cx = x - xl
+        cy = y - yl
+        ax.add_patch(Circle((cx, cy), outer, facecolor="none",
+                            edgecolor="cyan", linewidth=0.7, alpha=0.35))
+        ax.add_patch(Circle((cx, cy), annulus_inner, facecolor="none",
+                            edgecolor="cyan", linewidth=0.6, alpha=0.25,
+                            linestyle="--"))
+        ax.add_patch(Circle((cx, cy), aperture_radius, facecolor="none",
+                            edgecolor="yellow", linewidth=0.9, alpha=0.8))
+
+    fig.savefig(output_file, transparent=True, bbox_inches="tight", pad_inches=0)
+    plt.close(fig)
+    return output_file
 
 
 def alcor_proc_fits_cli():
@@ -2146,6 +2446,55 @@ def plot_alcor_fits_cli():
         figsize=args.figsize,
     )
     print(outfig)
+
+
+def alcor_star_photometry_cli():
+    """
+    CLI entry point for ``alcor_star_photometry``. Writes fixed-position
+    aperture photometry for Vmag-limited named bright stars.
+    """
+    parser = argparse.ArgumentParser(
+        description="Measure Alcor RGB aperture photometry for named bright stars at WCS-predicted positions.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("filename", help="Input alcor FITS file.")
+    parser.add_argument(
+        "-o", "--output", default=None,
+        help="Output CSV path (default: <input>_phot.csv).",
+    )
+    parser.add_argument("--aperture-radius", type=float, default=4.0,
+                        help="Circular aperture radius in pixels.")
+    parser.add_argument("--annulus-width", type=float, default=1.0,
+                        help="Background annulus width in pixels.")
+    parser.add_argument("--min-altitude", type=float, default=20.0,
+                        help="Minimum catalog-star altitude in degrees.")
+    parser.add_argument("--vmag-limit", type=float, default=5.5,
+                        help="Faintest V magnitude to measure.")
+    parser.add_argument("--no-refraction", action="store_true",
+                        help="Disable atmospheric refraction in the catalog Alt/Az transform.")
+    parser.add_argument("--masks-dir", default=None,
+                        help="Bad-pixel mask directory (default: $ALCOR_BADPIX_DIR, then packaged masks).")
+    parser.add_argument("--check-plot", action="store_true",
+                        help="Write an aperture-overlay check plot as <input>_phot.pdf.")
+    parser.add_argument("--check-radius", type=int, default=680,
+                        help="Half-width in pixels of the check-plot crop around the zenith.")
+    args = parser.parse_args()
+
+    _, output_file = alcor_star_photometry(
+        args.filename,
+        output_file=args.output,
+        aperture_radius=args.aperture_radius,
+        annulus_width=args.annulus_width,
+        min_altitude=args.min_altitude,
+        vmag_limit=args.vmag_limit,
+        refraction=not args.no_refraction,
+        masks_dir=args.masks_dir,
+        check_plot=args.check_plot,
+        check_radius=args.check_radius,
+    )
+    print(output_file)
+    if args.check_plot:
+        print(_default_alcor_photometry_check_plot_output(args.filename))
 
 
 def _format_calibration_entry(result):

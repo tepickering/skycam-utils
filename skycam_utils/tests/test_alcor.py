@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from astropy.io import fits
+from astropy.table import Table
 
 _MPLCONFIGDIR = Path(tempfile.gettempdir()) / "skycam-utils-matplotlib"
 _MPLCONFIGDIR.mkdir(exist_ok=True)
@@ -16,9 +17,13 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 os.environ.setdefault("MPLCONFIGDIR", str(_MPLCONFIGDIR))
 
 from skycam_utils.alcor import (
+    _aperture_annulus_photometry,
+    _alcor_display_rgb,
+    _corner_bias,
     _timestamp_edges,
     alcor_keogram,
     alcor_proc_fits,
+    alcor_star_photometry,
     build_alcor_wcs,
     load_alcor_keogram_fits,
     load_alcor_fits,
@@ -57,6 +62,171 @@ def test_load_alcor_fits_accepts_explicit_wcs():
                         radial_coeffs=(1.0, 0.0, 0.0), horizon_radius=30.0)
     _, wcs, _ = load_alcor_fits(TEST_FITS, wcs=w)
     assert list(wcs.wcs.crpix) == [11.0, 21.0]
+
+
+def test_corner_bias_uses_four_corners_per_channel():
+    cube = np.zeros((3, 20, 20), dtype=float)
+    cube[0] += 100.0
+    cube[1] += 200.0
+    cube[2] += 300.0
+    cube[:, 10, 10] = 10000.0
+
+    bias = _corner_bias(cube, size=10)
+
+    np.testing.assert_allclose(bias, [100.0, 200.0, 300.0])
+
+
+def test_aperture_annulus_photometry_subtracts_local_background():
+    yy, xx = np.mgrid[0:21, 0:21]
+    image = np.full((21, 21), 5.0)
+    aperture = np.hypot(xx - 10.0, yy - 10.0) <= 3.0
+    gap = (np.hypot(xx - 10.0, yy - 10.0) > 3.0) & (
+        np.hypot(xx - 10.0, yy - 10.0) <= 4.0)
+    annulus = (np.hypot(xx - 10.0, yy - 10.0) > 4.0) & (
+        np.hypot(xx - 10.0, yy - 10.0) <= 6.0)
+    image[aperture] += 10.0
+    image[gap] = 100.0
+    image[annulus] = 5.0
+    image[10, 15] = 500.0
+
+    flux, background = _aperture_annulus_photometry(
+        image, 10.0, 10.0, aperture_radius=3.0, annulus_width=2.0)
+
+    assert background == 5.0  # median background ignores the annulus outlier
+    np.testing.assert_allclose(flux, 10.0 * aperture.sum())
+
+
+def test_alcor_display_rgb_subtracts_channel_bias_before_scaling():
+    cube = np.zeros((3, 20, 20), dtype=float)
+    cube[0] = 1000.0 + 100.0
+    cube[1] = 2000.0 + 100.0 / 0.7
+    cube[2] = 3000.0 + 100.0 / 1.7
+    cube[0, 10, 10] += 1000.0
+    cube[1, 10, 10] += 1000.0 / 0.7
+    cube[2, 10, 10] += 1000.0 / 1.7
+
+    rgb = _alcor_display_rgb(cube, gscale=0.7, bscale=1.7)
+
+    np.testing.assert_allclose(rgb[10, 10, 0], rgb[10, 10, 1])
+    np.testing.assert_allclose(rgb[10, 10, 0], rgb[10, 10, 2])
+
+
+def test_alcor_star_photometry_writes_named_csv(tmp_path):
+    input_file = tmp_path / TEST_FITS.name
+    shutil.copyfile(TEST_FITS, input_file)
+    output = tmp_path / "stars.csv"
+    check_plot = tmp_path / "test_phot.pdf"
+
+    phot, output_file = alcor_star_photometry(
+        input_file,
+        output_file=output,
+        check_plot=True,
+        aperture_radius=3.0,
+        annulus_width=1.0,
+        min_altitude=80.0,
+        vmag_limit=5.0,
+    )
+
+    assert output_file == output
+    assert output.exists()
+    assert check_plot.exists()
+    assert check_plot.stat().st_size > 0
+    assert phot.index.name == "name"
+    assert len(phot) > 0
+    assert phot.index.is_unique
+    for column in [
+        "altitude", "azimuth", "xcen", "ycen",
+        "flux_r", "mag_r", "background_r",
+        "flux_g", "mag_g", "background_g",
+        "flux_b", "mag_b", "background_b",
+    ]:
+        assert column in phot.columns
+    flux_g = phot["flux_g"].to_numpy()
+    finite = np.isfinite(flux_g)
+    np.testing.assert_array_less(np.diff(flux_g[finite]), 1e-9)
+    assert np.all(np.isfinite(phot["xcen"]))
+    assert np.all(np.isfinite(phot["ycen"]))
+
+
+def test_alcor_star_photometry_skips_nonpositive_channel_flux(tmp_path, monkeypatch):
+    from astropy.time import Time
+    from skycam_utils import alcor
+
+    cube = np.zeros((3, 60, 60), dtype=float)
+    yy, xx = np.mgrid[0:60, 0:60]
+    first = np.hypot(xx - 15.0, yy - 15.0) <= 3.0
+    second = np.hypot(xx - 40.0, yy - 40.0) <= 3.0
+    cube[:, first] = 10.0
+    cube[0, second] = 10.0
+    cube[2, second] = 10.0
+
+    class FakeWCS:
+        def world_to_pixel_values(self, az, alt):
+            return np.array([15.0, 40.0]), np.array([15.0, 40.0])
+
+    cat = Table({
+        "NAME": ["keep", "skip"],
+        "HD": [1, 2],
+        "Alt": [80.0, 81.0],
+        "Az": [10.0, 20.0],
+    })
+    monkeypatch.setattr(alcor, "_alcor_frame_time",
+                        lambda filename: Time("2024-09-05T07:00:00"))
+    monkeypatch.setattr(alcor, "load_alcor_fits",
+                        lambda *args, **kwargs: (cube, FakeWCS(), None))
+    monkeypatch.setattr(alcor, "alcor_named_reference_altaz",
+                        lambda *args, **kwargs: cat)
+
+    phot, output_file = alcor_star_photometry(
+        tmp_path / "synthetic.fits",
+        output_file=tmp_path / "synthetic.csv",
+        aperture_radius=3.0,
+        annulus_width=1.0,
+    )
+
+    assert output_file.exists()
+    text = output_file.read_text()
+    assert "keep" in text
+    assert "skip" not in text
+    assert list(phot.index) == ["keep"]
+    assert phot.loc["keep", "flux_g"] > 0.0
+    assert np.isfinite(phot.loc["keep", "mag_r"])
+    assert np.isfinite(phot.loc["keep", "mag_g"])
+    assert np.isfinite(phot.loc["keep", "mag_b"])
+
+
+def test_alcor_star_photometry_default_vmag_limit_is_5p5(monkeypatch, tmp_path):
+    from astropy.time import Time
+    from skycam_utils import alcor
+
+    class FakeWCS:
+        def world_to_pixel_values(self, az, alt):
+            return np.array([10.0]), np.array([10.0])
+
+    seen = {}
+    monkeypatch.setattr(alcor, "_alcor_frame_time",
+                        lambda filename: Time("2024-09-05T07:00:00"))
+    monkeypatch.setattr(alcor, "load_alcor_fits",
+                        lambda *args, **kwargs: (
+                            np.zeros((3, 20, 20), dtype=float), FakeWCS(), None))
+
+    def fake_catalog(time, vmag_limit, min_alt, refraction):
+        seen["vmag_limit"] = vmag_limit
+        return Table({"NAME": ["default"], "HD": [1], "Alt": [80.0], "Az": [10.0]})
+
+    monkeypatch.setattr(alcor, "alcor_named_reference_altaz", fake_catalog)
+
+    def fake_photometry(image, xcen, ycen, aperture_radius, annulus_width):
+        seen["aperture_radius"] = aperture_radius
+        return 1.0, 0.0
+
+    monkeypatch.setattr(alcor, "_aperture_annulus_photometry", fake_photometry)
+
+    alcor_star_photometry(tmp_path / "synthetic.fits",
+                          output_file=tmp_path / "synthetic.csv")
+
+    assert seen["vmag_limit"] == 5.5
+    assert seen["aperture_radius"] == 4.0
 
 
 def test_load_alcor_fits_wcs_maps_zenith_and_horizon(alcor_cube_wcs_mask):

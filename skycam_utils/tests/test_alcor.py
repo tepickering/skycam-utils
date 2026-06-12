@@ -229,6 +229,36 @@ def test_alcor_star_photometry_default_vmag_limit_is_5p5(monkeypatch, tmp_path):
     assert seen["aperture_radius"] == 4.0
 
 
+def test_alcor_star_photometry_rejects_sunlit_images(monkeypatch, tmp_path, capsys):
+    from astropy.time import Time
+    from skycam_utils import alcor
+
+    output = tmp_path / "sunlit.csv"
+    loaded = {"called": False}
+    monkeypatch.setattr(alcor, "_alcor_frame_time",
+                        lambda filename: Time("2024-09-05T20:00:00"))
+    monkeypatch.setattr(alcor, "_sun_altitude", lambda time: -5.0)
+
+    def fake_load(*args, **kwargs):
+        loaded["called"] = True
+        raise AssertionError("sunlit image should not be loaded")
+
+    monkeypatch.setattr(alcor, "load_alcor_fits", fake_load)
+
+    phot, output_file = alcor_star_photometry(
+        tmp_path / "sunlit.fits",
+        output_file=output,
+    )
+
+    captured = capsys.readouterr()
+    assert "Warning: rejecting" in captured.err
+    assert "Sun altitude -5.0 deg" in captured.err
+    assert output_file is None
+    assert phot.empty
+    assert not output.exists()
+    assert not loaded["called"]
+
+
 def test_load_alcor_fits_wcs_maps_zenith_and_horizon(alcor_cube_wcs_mask):
     _, wcs, _ = alcor_cube_wcs_mask
 

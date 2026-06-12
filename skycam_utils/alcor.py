@@ -1620,7 +1620,8 @@ def _alcor_display_rgb(cube, powerstretch=0.75, contrast=0.35,
 def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
                           annulus_width=1.0, min_altitude=20.0,
                           vmag_limit=5.5, refraction=True, masks_dir=None,
-                          check_plot=False, check_radius=680):
+                          check_plot=False, check_radius=680,
+                          sun_alt_max=-12.0):
     """
     Measure fixed-position aperture photometry for bright named stars.
 
@@ -1637,19 +1638,33 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
         Rows indexed by star name. Columns are ``altitude``, ``azimuth``,
         ``xcen``, ``ycen`` and per-channel ``flux_*``, ``mag_*``,
         ``background_*`` for ``r``, ``g``, ``b``. Rows are sorted by
-        descending ``flux_g``.
-    output_file : `~pathlib.Path`
-        CSV path written.
+        descending ``flux_g``. Empty when the frame is rejected.
+    output_file : `~pathlib.Path` or None
+        CSV path written, or None when the frame is rejected.
     """
     if aperture_radius <= 0:
         raise ValueError("aperture_radius must be positive")
     if annulus_width <= 0:
         raise ValueError("annulus_width must be positive")
+    channels = ("r", "g", "b")
+    columns = ["altitude", "azimuth", "xcen", "ycen"]
+    for channel in channels:
+        columns += [f"flux_{channel}", f"mag_{channel}", f"background_{channel}"]
+    empty = pd.DataFrame(columns=columns)
+    empty.index.name = "name"
 
     filename = Path(filename)
     time = _alcor_frame_time(filename)
     if time is None:
         raise ValueError(f"could not determine frame time from {filename}")
+    sun_alt = _sun_altitude(time)
+    if sun_alt > sun_alt_max:
+        print(
+            f"Warning: rejecting {filename}: Sun altitude {sun_alt:.1f} deg "
+            f"is greater than {sun_alt_max:.1f} deg.",
+            file=sys.stderr,
+        )
+        return empty, None
 
     cube, wcs, _ = load_alcor_fits(filename, badpix="repair",
                                    masks_dir=masks_dir)
@@ -1667,7 +1682,6 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
     rows = []
     labels = []
     cat_labels = _alcor_star_labels(cat)
-    channels = ("r", "g", "b")
     for i, (x, y) in enumerate(zip(xcen, ycen)):
         row = {
             "altitude": float(cat["Alt"][i]),
@@ -1689,9 +1703,6 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
         rows.append(row)
         labels.append(cat_labels[i])
 
-    columns = ["altitude", "azimuth", "xcen", "ycen"]
-    for channel in channels:
-        columns += [f"flux_{channel}", f"mag_{channel}", f"background_{channel}"]
     phot = pd.DataFrame(rows, index=labels, columns=columns)
     phot.index.name = "name"
     phot = phot.sort_values("flux_g", ascending=False, na_position="last")
@@ -2474,6 +2485,8 @@ def alcor_star_photometry_cli():
                         help="Disable atmospheric refraction in the catalog Alt/Az transform.")
     parser.add_argument("--masks-dir", default=None,
                         help="Bad-pixel mask directory (default: $ALCOR_BADPIX_DIR, then packaged masks).")
+    parser.add_argument("--sun-alt-max", type=float, default=-12.0,
+                        help="Reject images with Sun altitude greater than this (deg).")
     parser.add_argument("--check-plot", action="store_true",
                         help="Write an aperture-overlay check plot as <input>_phot.pdf.")
     parser.add_argument("--check-radius", type=int, default=680,
@@ -2491,9 +2504,11 @@ def alcor_star_photometry_cli():
         masks_dir=args.masks_dir,
         check_plot=args.check_plot,
         check_radius=args.check_radius,
+        sun_alt_max=args.sun_alt_max,
     )
-    print(output_file)
-    if args.check_plot:
+    if output_file is not None:
+        print(output_file)
+    if args.check_plot and output_file is not None:
         print(_default_alcor_photometry_check_plot_output(args.filename))
 
 

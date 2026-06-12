@@ -33,14 +33,16 @@ from .astrometry import MMT_LOCATION
 # Nominal raw-frame geometry defaults. The real geometry is per-epoch (see
 # ALCOR_CALIBRATIONS) and is threaded explicitly through every call path;
 # ALCOR_HORIZON_RADIUS is only a fallback default for the rare arg-less call.
-# It is the zenith plate scale: the pixel radius from the zenith at which
-# altitude=0 (cdelt = 90/horizon_radius deg/px). ALCOR_RADIUS is the default
+# It is the plate scale: the pixel radius from the optical-axis pixel at which
+# the angular distance from the axis reaches 90 deg (altitude=0 when axis_tilt
+# is zero; cdelt = 90/horizon_radius deg/px). ALCOR_RADIUS is the default
 # display-crop half-width for plot_alcor_fits.
 ALCOR_RADIUS = 680
 ALCOR_HORIZON_RADIUS = 747
 
 # Time-indexed lens calibrations. Each epoch holds the raw-frame geometry as
-# absolutes: the zenith pixel (xcen, ycen) in the raw FITS frame, the azimuth
+# absolutes: the optical-axis pixel (xcen, ycen) in the raw FITS frame (the
+# zenith pixel when axis_tilt is zero), the azimuth
 # rotation, the radial_coeffs (k1, k3, k5), and the horizon_radius (pixels from
 # zenith to alt=0). An optional "tangential_coeffs": (P1, P2) holds the
 # Brown-Conrady decentering (sensor-tilt) terms, dimensionless like the k's;
@@ -74,7 +76,9 @@ ALCOR_CALIBRATIONS = [
 
 
 def _calibration_epochs():
-    """Return [(Time, calibration_dict), ...] for the configured epochs."""
+    """
+    Return [(Time, calibration_dict), ...] for the configured epochs.
+    """
     return [(Time(c["epoch"], scale="utc"), c) for c in ALCOR_CALIBRATIONS]
 
 
@@ -85,7 +89,8 @@ def alcor_calibration(time=None):
     ``time`` is an astropy ``Time``. An exact tie resolves to the more recent
     epoch. ``time=None`` returns the most recent epoch (the default for
     time-agnostic calls). The returned dict is a copy and may be mutated freely;
-    ``tangential_coeffs`` is filled with ``(0.0, 0.0)`` for epochs that omit it.
+    ``tangential_coeffs`` and ``axis_tilt`` are filled with ``(0.0, 0.0)`` for
+    epochs that omit them.
     """
     epochs = _calibration_epochs()
     if time is None:
@@ -132,7 +137,8 @@ def _invert_radial(z_deg, radial_coeffs, n_iter=8):
 
 
 def _axis_frame(alt, az, t_n, t_e):
-    """Axis-centered polar coordinates (z', A') [deg] of sky points (alt, az)
+    """
+    Axis-centered polar coordinates (z', A') [deg] of sky points (alt, az)
     [deg] for an optical axis tilted off the zenith.
 
     The axis leans eps = hypot(t_n, t_e) deg from the zenith toward azimuth
@@ -164,9 +170,11 @@ def _axis_frame(alt, az, t_n, t_e):
 
 
 def _tangential_delta(u, v, p1, p2, horizon_radius):
-    """Brown-Conrady tangential (decentering) displacement in raw pixels.
+    """
+    Brown-Conrady tangential (decentering) displacement in raw pixels.
 
-    ``u``, ``v`` are pixel offsets from the zenith; ``p1``/``p2`` are
+    ``u``, ``v`` are pixel offsets from the optical-axis pixel
+    ``(xcen, ycen)``; ``p1``/``p2`` are
     dimensionless (normalized by ``horizon_radius``), like the radial k
     coefficients. This is the pix->world displacement the WCS SIP applies
     (see build_alcor_wcs); it is an exact degree-2 polynomial.
@@ -188,10 +196,12 @@ def _predict_pixels(
     tangential_coeffs=(0.0, 0.0),
     axis_tilt=(0.0, 0.0),
 ):
-    """Forward lens model: map altitude/azimuth (deg) to RAW-frame pixel
+    """
+    Forward lens model: map altitude/azimuth (deg) to RAW-frame pixel
     coordinates (x=column, y=row, 0-based).
 
-    The zenith sits at ``(xcen, ycen)``; ``rotation`` is the camera azimuth
+    The optical axis sits at ``(xcen, ycen)`` (the zenith pixel when
+    ``axis_tilt`` is zero); ``rotation`` is the camera azimuth
     zero-point offset (deg). The lens plate solution
     ``z = 90*(k1*rho + k3*rho**3 + k5*rho**5)`` (``rho = r/horizon_radius``,
     ``z = 90 - alt``) is inverted for ``rho`` via Newton's method. The sky's
@@ -337,9 +347,10 @@ def assign_alcor_matches(cat, det, params, tolerance,
     """
     Assign catalog stars to detected sources against a *fixed* geometry.
 
-    This never refits the geometry internally; ``params`` (``xcen``,
-    ``ycen``, ``rotation``, ``radial_coeffs``) are the fixed geometry used for
-    the whole frame. The steps are:
+    This never refits the geometry internally; ``params`` (``xcen``, ``ycen``,
+    ``rotation``, ``radial_coeffs``, and optional ``tangential_coeffs``,
+    ``axis_tilt``, ``horizon_radius``) is the fixed geometry used for the
+    whole frame. The steps are:
 
     1. Predict each catalog star's pixel ``(px, py)`` with :func:`_predict_pixels`
        and build a `~scipy.spatial.cKDTree` of detections and of predicted
@@ -494,7 +505,8 @@ def assign_alcor_matches(cat, det, params, tolerance,
 
 
 def _frame_time(path):
-    """Return the observation Time (UT) from a FITS file's DATE (creation) header.
+    """
+    Return the observation Time (UT) from a FITS file's DATE (creation) header.
 
     For these alcor cameras DATE is the true UT timestamp; the DATE-OBS keyword
     is local time despite its 'UT' label.
@@ -730,7 +742,8 @@ def save_alcor_residual_plot(alt, az, obs_x, obs_y, params, output_file,
        swirl / elliptical) stands out; per-star arrows would saturate the panel.
 
     Bottom row decomposes each residual into a **radial** component (along the
-    zenith->star direction) and a **tangential** component (perpendicular), which
+    direction from the optical-axis pixel ``(xcen, ycen)`` to the star) and a
+    **tangential** component (perpendicular), which
     discriminates the cause of a leftover residual that the radial model cannot
     remove:
 
@@ -795,8 +808,8 @@ def save_alcor_residual_plot(alt, az, obs_x, obs_y, params, output_file,
 
     # Bin the residual vectors onto a grid and average per cell, so coherent
     # structure survives while incoherent (mismatch) scatter cancels out. The raw
-    # frame is not centered on the zenith, so the grid spans the detector extent
-    # implied by the zenith center plus the horizon radius.
+    # frame is not centered on the optical axis, so the grid spans the detector
+    # extent implied by the (xcen, ycen) center plus the horizon radius.
     extent = max(cenx, ceny) + hr
     cell = extent / nbins
     cx_i = np.clip((obs_x / cell).astype(int), 0, nbins - 1)
@@ -817,7 +830,7 @@ def save_alcor_residual_plot(alt, az, obs_x, obs_y, params, output_file,
     amp = (1.5 * cell) / (p90 + 1e-9)  # 90th-pct arrow spans ~1.5 cells
     q = ax_v.quiver(gx, gy, mean_dx, mean_dy, gmag, angles="xy",
                     scale_units="xy", scale=1.0 / amp, cmap="viridis", width=0.004)
-    ax_v.plot(cenx, ceny, "r+", ms=14, label="zenith")
+    ax_v.plot(cenx, ceny, "r+", ms=14, label="optical axis")
     ax_v.set_aspect("equal")
     ax_v.set_xlim(0, extent)
     ax_v.set_ylim(0, extent)
@@ -827,7 +840,7 @@ def save_alcor_residual_plot(alt, az, obs_x, obs_y, params, output_file,
     ax_v.legend(loc="upper right")
     fig.colorbar(q, ax=ax_v, label="mean |residual| (pix)")
 
-    # Radial/tangential decomposition about the zenith.
+    # Radial/tangential decomposition about the optical-axis pixel.
     vx = obs_x - cenx
     vy = obs_y - ceny
     rr = np.hypot(vx, vy)
@@ -879,7 +892,8 @@ def save_alcor_residual_plot(alt, az, obs_x, obs_y, params, output_file,
 
 
 def _sun_altitude(time, location=MMT_LOCATION):
-    """Return the Sun's altitude in degrees at ``time`` and ``location``.
+    """
+    Return the Sun's altitude in degrees at ``time`` and ``location``.
 
     ``time`` must be a scalar `~astropy.time.Time` (the result is returned as a
     Python float). Use :func:`select_dark_frames` for batched filtering.
@@ -889,7 +903,8 @@ def _sun_altitude(time, location=MMT_LOCATION):
 
 
 def _moon_altitude(time, location=MMT_LOCATION):
-    """Return the Moon's altitude in degrees at ``time`` and ``location``.
+    """
+    Return the Moon's altitude in degrees at ``time`` and ``location``.
 
     ``time`` must be a scalar `~astropy.time.Time` (the result is returned as a
     Python float). The Moon's position is computed topocentrically (parallax is
@@ -908,7 +923,8 @@ _MST_TO_UT = timedelta(hours=7)
 
 
 def _filename_ut_datetime(filename):
-    """Return the UT ``datetime`` parsed from an alcor filename, or ``None``.
+    """
+    Return the UT ``datetime`` parsed from an alcor filename, or ``None``.
 
     Filenames are ``YYYY_MM_DD__HH_MM_SS`` in local MST; converting to UT only
     needs the fixed +7h offset, so dark-frame selection can avoid opening (and
@@ -922,7 +938,9 @@ def _filename_ut_datetime(filename):
 
 
 def _read_frame_date(filename):
-    """Return a FITS file's DATE (UT) header string, for dark-frame selection."""
+    """
+    Return a FITS file's DATE (UT) header string, for dark-frame selection.
+    """
     return fits.getheader(filename)["DATE"]
 
 
@@ -943,8 +961,10 @@ def _alcor_frame_calibration(filename):
 
 
 def _alcor_frame_time(filename):
-    """Best-effort observation Time for a frame: filename timestamp, then DATE
-    header, then None (so callers fall back to the latest epoch)."""
+    """
+    Best-effort observation Time for a frame: filename timestamp, then DATE
+    header, then None (so callers fall back to the latest epoch).
+    """
     dt = _filename_ut_datetime(filename)
     if dt is not None:
         return Time(dt)
@@ -998,7 +1018,8 @@ def select_dark_frames(files, sun_alt_max=-18.0, moon_alt_max=-6.0,
 
 def _base_arc_wcs(xcen, ycen, rotation, k1, horizon_radius,
                   axis_tilt=(0.0, 0.0)):
-    """Linear ARC WCS (no SIP) reproducing the raw forward model's linear part.
+    """
+    Linear ARC WCS (no SIP) reproducing the raw forward model's linear part.
 
     crpix is the 1-based optical-axis pixel; the PC matrix is the pure rotation
     (det=+1) that matches ``_predict_pixels`` (the sky/sensor handedness lives in
@@ -1029,7 +1050,9 @@ def _base_arc_wcs(xcen, ycen, rotation, k1, horizon_radius,
 
 
 def _sip_poly_eval(coef, u, v):
-    """Evaluate a SIP coefficient matrix (coef[p, q] * u**p * v**q) at (u, v)."""
+    """
+    Evaluate a SIP coefficient matrix (coef[p, q] * u**p * v**q) at (u, v).
+    """
     out = np.zeros_like(u, dtype=float)
     n = coef.shape[0]
     for p in range(n):
@@ -1072,12 +1095,15 @@ def build_alcor_wcs(xcen=ALCOR_XCEN, ycen=ALCOR_YCEN, rotation=ALCOR_ROTATION,
                     horizon_radius=ALCOR_HORIZON_RADIUS, sip_degree=5,
                     tangential_coeffs=ALCOR_TANGENTIAL_COEFFS,
                     axis_tilt=ALCOR_AXIS_TILT):
-    """Build the raw-frame alt/az ARC WCS for the alcor sensor.
+    """
+    Build the raw-frame alt/az ARC WCS for the alcor sensor.
 
-    The zenith is at pixel ``(xcen, ycen)``; ``rotation`` is the PC rotation
-    matrix (the sky/sensor handedness is in the ``rotation - az`` convention, see
-    ``_predict_pixels``); the radial ``k3``/``k5`` distortion is an exact analytic
-    SIP centered on the zenith. Cached on its hashable args; returns a fresh copy.
+    The optical axis is at pixel ``(xcen, ycen)`` (the zenith pixel when
+    ``axis_tilt`` is zero); ``rotation`` is the PC rotation matrix (the
+    sky/sensor handedness is in the ``rotation - az`` convention, see
+    ``_predict_pixels``); the radial ``k3``/``k5`` distortion is an exact
+    analytic SIP centered on ``(xcen, ycen)``. Cached on its hashable args;
+    returns a fresh copy.
 
     The lens is parametrized as a plate solution that maps the detector directly
     to the sky: ``z = 90*(k1*rho + k3*rho**3 + k5*rho**5)`` with ``rho =
@@ -1089,7 +1115,7 @@ def build_alcor_wcs(xcen=ALCOR_XCEN, ycen=ALCOR_YCEN, rotation=ALCOR_ROTATION,
     (not fitted) and reproduce the plate solution to numerical precision over the
     whole FOV. The radial polynomial is rotation/reflection invariant, so the
     same A/B coefficients hold in the raw frame -- only the SIP reference pixel
-    moves to the zenith.
+    moves to the optical-axis pixel.
 
     ``tangential_coeffs`` (P1, P2) adds Brown-Conrady decentering; its Cartesian
     displacement is an exact degree-2 polynomial (see ``_tangential_delta``), so
@@ -1309,7 +1335,8 @@ _BADPIX_DATE_RE = re.compile(r"alcor_badpix_(\d{4})-(\d{2})-(\d{2})\.fits(\.gz)?
 
 
 def _resolve_badpix_dir(masks_dir=None):
-    """Directory holding the date-stamped bad-pixel masks.
+    """
+    Directory holding the date-stamped bad-pixel masks.
 
     Resolution order: explicit ``masks_dir`` -> ``$ALCOR_BADPIX_DIR`` -> the
     packaged ``skycam_utils/data/badpix/`` (mirroring :func:`load_wcs`).
@@ -1323,8 +1350,10 @@ def _resolve_badpix_dir(masks_dir=None):
 
 
 def _badpix_date_from_dir(day_dir, dark_files):
-    """Mask date: the ``YYYY-MM-DD`` in the day-directory name, else the median
-    dark-frame time's date."""
+    """
+    Mask date: the ``YYYY-MM-DD`` in the day-directory name, else the median
+    dark-frame time's date.
+    """
     match = re.search(r"(\d{4})-(\d{2})-(\d{2})", Path(day_dir).name)
     if match:
         return date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
@@ -1441,7 +1470,8 @@ def alcor_reference_altaz(time, vmag_limit=3.0, min_alt=5.0, refraction=True,
 
 
 def load_alcor_fits(filename, wcs=None, badpix="repair", masks_dir=None):
-    """Load an alcor OMEA 8C FITS file and return ``(cube, wcs, mask)``.
+    """
+    Load an alcor OMEA 8C FITS file and return ``(cube, wcs, mask)``.
 
     The raw ``(3, ny, nx)`` RGB cube is returned in native FITS orientation,
     unmodified except for optional bad-pixel repair: no transpose, trim, rotate,
@@ -1552,8 +1582,9 @@ def alcor_keogram(input_dir, pattern="*.fits.bz2", workers=1, progress=False, pr
     """
     Build a keogram from a directory of alcor OMEA 8C FITS images.
 
-    Each input image is loaded with `load_alcor_fits`, and the center column
-    of the processed RGB image is copied into the next column of the keogram.
+    Each input image is loaded with `load_alcor_fits`, and the zenith column
+    (the column through the WCS alt=90 pixel) of the raw RGB cube is copied
+    into the next column of the keogram.
     The DATE header keyword from each FITS file is collected in the same order
     as the keogram columns.
 
@@ -1572,8 +1603,7 @@ def alcor_keogram(input_dir, pattern="*.fits.bz2", workers=1, progress=False, pr
         Output stream for the progress bar. Defaults to stderr when
         `progress` is True.
     **kwargs
-        Forwarded to `load_alcor_fits` (rotation, xcen, ycen, radius,
-        horizon_radius).
+        Forwarded to `load_alcor_fits` (``wcs``, ``badpix``, ``masks_dir``).
 
     Returns
     -------
@@ -2119,7 +2149,9 @@ def plot_alcor_fits_cli():
 
 
 def _format_calibration_entry(result):
-    """Format a calibration result as a paste-ready ALCOR_CALIBRATIONS entry."""
+    """
+    Format a calibration result as a paste-ready ALCOR_CALIBRATIONS entry.
+    """
     rc = tuple(float(c) for c in result["radial_coeffs"])
     tc = tuple(float(c) for c in result.get("tangential_coeffs", (0.0, 0.0)))
     at = tuple(float(c) for c in result.get("axis_tilt", (0.0, 0.0)))
@@ -2255,7 +2287,9 @@ def create_badpix_mask(day_dir, out_dir=None, min_frames=500, z_thresh=25.0,
 
 
 def create_badpix_mask_cli():
-    """CLI entry point for :func:`create_badpix_mask` (run daily from cron)."""
+    """
+    CLI entry point for :func:`create_badpix_mask` (run daily from cron).
+    """
     parser = argparse.ArgumentParser(
         description="Build a date-stamped alcor bad-pixel mask from a night of frames.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,

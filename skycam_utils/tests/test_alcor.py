@@ -27,6 +27,7 @@ from skycam_utils.alcor import (
     build_alcor_wcs,
     load_alcor_keogram_fits,
     load_alcor_fits,
+    lookup_sloan_photometry,
     plot_alcor_keogram_fits,
     plot_alcor_fits,
     save_alcor_keogram_fits,
@@ -62,6 +63,36 @@ def test_load_alcor_fits_accepts_explicit_wcs():
                         radial_coeffs=(1.0, 0.0, 0.0), horizon_radius=30.0)
     _, wcs, _ = load_alcor_fits(TEST_FITS, wcs=w)
     assert list(wcs.wcs.crpix) == [11.0, 21.0]
+
+
+def test_lookup_sloan_photometry_returns_catalog_dict():
+    info = lookup_sloan_photometry(" vEgA ")
+
+    assert info["NAME"] == "Vega"
+    assert info["HD"] == 172167
+    np.testing.assert_allclose(info["Vmag"], 0.03)
+    np.testing.assert_allclose(info["g_mag"], -0.06)
+    assert isinstance(info, dict)
+
+    jabbah = lookup_sloan_photometry("Jabbah")
+    assert jabbah["NAME"] == "Jabbah"
+    assert jabbah["HD"] == 145502
+
+
+def test_lookup_sloan_photometry_errors_for_missing_and_ambiguous(monkeypatch):
+    from skycam_utils import alcor
+
+    with pytest.raises(KeyError, match="not found"):
+        lookup_sloan_photometry("definitely not a star")
+
+    duplicate = Table({
+        "NAME": ["dupe", "dupe"],
+        "HD": [1, 2],
+        "Vmag": [1.0, 2.0],
+    })
+    monkeypatch.setattr(alcor.Table, "read", lambda *args, **kwargs: duplicate)
+    with pytest.raises(ValueError, match="ambiguous"):
+        lookup_sloan_photometry("dupe")
 
 
 def test_corner_bias_uses_four_corners_per_channel():

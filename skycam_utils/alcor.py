@@ -1498,6 +1498,53 @@ def alcor_named_reference_altaz(time, vmag_limit=5.5, min_alt=20.0,
     return cat
 
 
+def _catalog_value_to_python(value):
+    """
+    Convert an Astropy table scalar to a JSON-friendly Python scalar.
+    """
+    if np.ma.is_masked(value):
+        return None
+    if isinstance(value, bytes):
+        return value.decode().strip()
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def lookup_sloan_photometry(star_name, case_sensitive=False):
+    """
+    Return the ``bright_star_sloan_named.fits`` row for ``star_name`` as a dict.
+
+    Matching is against the catalog ``NAME`` column, with surrounding whitespace
+    ignored. By default matching is case-insensitive. A missing name raises
+    ``KeyError``; an ambiguous name raises ``ValueError`` with the matching HD
+    numbers.
+    """
+    query = str(star_name).strip()
+    if not query:
+        raise ValueError("star_name must not be empty")
+
+    catpath = files(__package__) / "data" / "bright_star_sloan_named.fits"
+    cat = Table.read(str(catpath))
+    names = np.array([str(name).strip() for name in cat["NAME"]])
+    if case_sensitive:
+        match = names == query
+    else:
+        match = np.char.lower(names) == query.lower()
+
+    matches = cat[match]
+    if len(matches) == 0:
+        raise KeyError(f"star {star_name!r} not found in bright_star_sloan_named.fits")
+    if len(matches) > 1:
+        hds = ", ".join(str(_catalog_value_to_python(row["HD"])) for row in matches)
+        raise ValueError(f"star name {star_name!r} is ambiguous; matching HD numbers: {hds}")
+
+    row = matches[0]
+    return {col: _catalog_value_to_python(row[col]) for col in matches.colnames}
+
+
 def _alcor_star_labels(cat):
     """
     Return stable, unique row labels for the named bright-star catalog.

@@ -27,6 +27,7 @@ from skycam_utils.alcor import (
     build_alcor_wcs,
     load_alcor_keogram_fits,
     load_alcor_fits,
+    collect_alcor_photometry,
     lookup_sloan_photometry,
     plot_alcor_keogram_fits,
     plot_alcor_fits,
@@ -288,6 +289,82 @@ def test_alcor_star_photometry_rejects_sunlit_images(monkeypatch, tmp_path, caps
     assert phot.empty
     assert not output.exists()
     assert not loaded["called"]
+
+
+_PHOT_COLUMNS = ("name,altitude,azimuth,xcen,ycen,"
+                 "flux_r,mag_r,background_r,"
+                 "flux_g,mag_g,background_g,"
+                 "flux_b,mag_b,background_b")
+
+
+def _write_phot_csv(path, rows):
+    lines = [_PHOT_COLUMNS]
+    for name, flux in rows:
+        lines.append(f"{name},45.0,180.0,100.0,200.0,"
+                     f"{flux},-10.0,5.0,{flux},-10.0,5.0,{flux},-10.0,5.0")
+    path.write_text("\n".join(lines) + "\n")
+
+
+def test_collect_alcor_photometry_groups_and_sorts(tmp_path):
+    _write_phot_csv(tmp_path / "2024_09_04__20_00_00_phot.csv",
+                    [("Vega", 100.0), ("Arcturus", 50.0)])
+    _write_phot_csv(tmp_path / "2024_09_04__19_36_32_phot.csv",
+                    [("Vega", 200.0)])
+
+    df = collect_alcor_photometry(tmp_path)
+
+    assert list(df["name"]) == ["Arcturus", "Vega", "Vega"]
+    vega = df[df["name"] == "Vega"]
+    # sorted by OBSTIME within each star; filename MST + 7h = UT
+    assert list(vega["OBSTIME"]) == [
+        np.datetime64("2024-09-05T02:36:32"),
+        np.datetime64("2024-09-05T03:00:00"),
+    ]
+    assert list(vega["flux_g"]) == [200.0, 100.0]
+    assert "altitude" in df.columns and "background_b" in df.columns
+
+
+def test_collect_alcor_photometry_accepts_file_list(tmp_path):
+    f1 = tmp_path / "2024_09_04__19_36_32_phot.csv"
+    f2 = tmp_path / "2024_09_04__20_00_00_phot.csv"
+    _write_phot_csv(f1, [("Vega", 1.0)])
+    _write_phot_csv(f2, [("Vega", 2.0)])
+
+    from_dir = collect_alcor_photometry(tmp_path)
+    from_list = collect_alcor_photometry([f1, f2])
+
+    assert from_dir.equals(from_list)
+
+
+def test_collect_alcor_photometry_skips_unparseable_filename(tmp_path, capsys):
+    _write_phot_csv(tmp_path / "2024_09_04__19_36_32_phot.csv",
+                    [("Vega", 1.0)])
+    _write_phot_csv(tmp_path / "oddly_named_phot.csv", [("Deneb", 1.0)])
+
+    df = collect_alcor_photometry(tmp_path)
+
+    assert list(df["name"]) == ["Vega"]
+    assert "oddly_named_phot.csv" in capsys.readouterr().err
+
+
+def test_collect_alcor_photometry_skips_malformed_csv(tmp_path, capsys):
+    _write_phot_csv(tmp_path / "2024_09_04__19_36_32_phot.csv",
+                    [("Vega", 1.0)])
+    (tmp_path / "2024_09_04__20_00_00_phot.csv").write_bytes(b"\x00\x01\x02")
+
+    df = collect_alcor_photometry(tmp_path)
+
+    assert list(df["name"]) == ["Vega"]
+    assert "2024_09_04__20_00_00_phot.csv" in capsys.readouterr().err
+
+
+def test_collect_alcor_photometry_raises_when_nothing_usable(tmp_path):
+    with pytest.raises(ValueError):
+        collect_alcor_photometry(tmp_path)
+
+    _write_phot_csv(tmp_path / "oddly_named_phot.csv", [("Vega", 1.0)])
+    with pytest.raises(ValueError):
+        collect_alcor_photometry(tmp_path)
 
 
 def test_load_alcor_fits_wcs_maps_zenith_and_horizon(alcor_cube_wcs_mask):

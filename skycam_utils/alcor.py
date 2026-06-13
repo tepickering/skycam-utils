@@ -1770,6 +1770,65 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
     return phot, output_file
 
 
+def collect_alcor_photometry(inputs):
+    """
+    Collect per-star photometry from a set of ``*_phot.csv`` files.
+
+    Each input file is one frame's :func:`alcor_star_photometry` output. The
+    observation time is parsed from the file's ``YYYY_MM_DD__HH_MM_SS``
+    filename stamp (local MST, so UT = stamp + 7h); the CSVs carry no time
+    information internally, so files whose names do not parse are skipped with
+    a warning, as are unreadable/malformed CSVs.
+
+    Parameters
+    ----------
+    inputs : str, Path, or iterable of str/Path
+        A directory to glob for ``*_phot.csv``, or the CSV paths themselves.
+
+    Returns
+    -------
+    ~pandas.DataFrame
+        The combined photometry with ``name`` as a regular column and a UT
+        ``OBSTIME`` datetime column, sorted by ``name`` then ``OBSTIME`` so
+        ``df.groupby("name")`` yields each star's time-ordered measurements.
+
+    Raises
+    ------
+    ValueError
+        If no usable input files remain after skipping.
+    """
+    if isinstance(inputs, (str, Path)) and Path(inputs).is_dir():
+        files = sorted(Path(inputs).glob("*_phot.csv"))
+    else:
+        files = [Path(f) for f in inputs]
+
+    frames = []
+    for f in files:
+        obstime = _filename_ut_datetime(f)
+        if obstime is None:
+            print(f"Warning: skipping {f.name}: no parseable timestamp "
+                  "in filename", file=sys.stderr)
+            continue
+        try:
+            phot = pd.read_csv(f)
+        except (OSError, ValueError, UnicodeDecodeError,
+                pd.errors.ParserError) as exc:
+            print(f"Warning: skipping {f.name}: {exc}", file=sys.stderr)
+            continue
+        if "name" not in phot.columns:
+            print(f"Warning: skipping {f.name}: no 'name' column",
+                  file=sys.stderr)
+            continue
+        phot.insert(1, "OBSTIME", pd.Timestamp(obstime))
+        frames.append(phot)
+
+    if not frames:
+        raise ValueError(f"No usable *_phot.csv files in {inputs}.")
+
+    df = pd.concat(frames, ignore_index=True)
+    return df.sort_values(["name", "OBSTIME"], ignore_index=True)
+
+
 def load_alcor_fits(filename, wcs=None, badpix="repair", masks_dir=None):
     """
     Load an alcor OMEA 8C FITS file and return ``(cube, wcs, mask)``.

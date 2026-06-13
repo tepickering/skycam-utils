@@ -18,6 +18,7 @@ os.environ.setdefault("MPLCONFIGDIR", str(_MPLCONFIGDIR))
 
 from skycam_utils.alcor import (
     _aperture_annulus_photometry,
+    _aperture_saturated,
     _alcor_display_rgb,
     _corner_bias,
     _timestamp_edges,
@@ -225,6 +226,60 @@ def test_alcor_star_photometry_skips_nonpositive_channel_flux(tmp_path, monkeypa
     assert np.isfinite(phot.loc["keep", "mag_r"])
     assert np.isfinite(phot.loc["keep", "mag_g"])
     assert np.isfinite(phot.loc["keep", "mag_b"])
+
+
+def test_aperture_saturated_detects_ceiling_pixel():
+    image = np.zeros((20, 20), dtype=float)
+    image[10, 10] = 32767.0
+    assert _aperture_saturated(image, 10.0, 10.0, 3.0, 32767.0) is True
+    assert _aperture_saturated(image, 10.0, 10.0, 3.0, 40000.0) is False
+    # a ceiling pixel outside the aperture does not count
+    assert _aperture_saturated(image, 2.0, 2.0, 3.0, 32767.0) is False
+
+
+def test_alcor_star_photometry_flags_saturation(tmp_path, monkeypatch):
+    from astropy.time import Time
+    from skycam_utils import alcor
+
+    cube = np.zeros((3, 60, 60), dtype=float)
+    yy, xx = np.mgrid[0:60, 0:60]
+    bright = np.hypot(xx - 15.0, yy - 15.0) <= 3.0
+    faint = np.hypot(xx - 40.0, yy - 40.0) <= 3.0
+    cube[:, bright] = 1000.0
+    cube[:, faint] = 1000.0
+    # saturate only the green channel of the bright star
+    cube[1, 15, 15] = 32767.0
+
+    class FakeWCS:
+        def world_to_pixel_values(self, az, alt):
+            return np.array([15.0, 40.0]), np.array([15.0, 40.0])
+
+    cat = Table({
+        "NAME": ["bright", "faint"],
+        "HD": [1, 2],
+        "Alt": [80.0, 81.0],
+        "Az": [10.0, 20.0],
+    })
+    monkeypatch.setattr(alcor, "_alcor_frame_time",
+                        lambda filename: Time("2024-09-05T07:00:00"))
+    monkeypatch.setattr(alcor, "load_alcor_fits",
+                        lambda *args, **kwargs: (cube, FakeWCS(), None))
+    monkeypatch.setattr(alcor, "alcor_named_reference_altaz",
+                        lambda *args, **kwargs: cat)
+
+    phot, _ = alcor_star_photometry(
+        tmp_path / "synthetic.fits",
+        output_file=tmp_path / "synthetic.csv",
+        aperture_radius=3.0,
+        annulus_width=1.0,
+    )
+
+    for channel in ("r", "g", "b"):
+        assert f"sat_{channel}" in phot.columns
+    assert bool(phot.loc["bright", "sat_g"]) is True
+    assert bool(phot.loc["bright", "sat_r"]) is False
+    assert bool(phot.loc["bright", "sat_b"]) is False
+    assert bool(phot.loc["faint", "sat_g"]) is False
 
 
 def test_alcor_star_photometry_default_vmag_limit_is_5p5(monkeypatch, tmp_path):

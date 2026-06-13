@@ -40,6 +40,8 @@ from .astrometry import MMT_LOCATION
 # display-crop half-width for plot_alcor_fits.
 ALCOR_RADIUS = 680
 ALCOR_HORIZON_RADIUS = 747
+# Raw-ADU ceiling: the OMEA 8C delivers 15-bit data, so pixels peg at 2**15 - 1.
+ALCOR_SATURATION = 32767
 
 # Time-indexed lens calibrations. Each epoch holds the raw-frame geometry as
 # absolutes: the optical-axis pixel (xcen, ycen) in the raw FITS frame (the
@@ -1628,6 +1630,28 @@ def _aperture_annulus_photometry(image, xcen, ycen, aperture_radius,
     return flux, background
 
 
+def _aperture_saturated(image, xcen, ycen, aperture_radius, saturation):
+    """
+    Return True if any pixel within the circular aperture reaches ``saturation``.
+
+    Operates on the raw image (the saturation ceiling is a raw-ADU value), so
+    callers pass the unmodified cube channel rather than the bias-subtracted
+    data.
+    """
+    ny, nx = image.shape
+    x0 = max(0, int(np.floor(xcen - aperture_radius)))
+    x1 = min(nx, int(np.ceil(xcen + aperture_radius)) + 1)
+    y0 = max(0, int(np.floor(ycen - aperture_radius)))
+    y1 = min(ny, int(np.ceil(ycen + aperture_radius)) + 1)
+    if x0 >= x1 or y0 >= y1:
+        return False
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    aperture = np.hypot(xx - xcen, yy - ycen) <= aperture_radius
+    if not aperture.any():
+        return False
+    return bool(np.any(image[y0:y1, x0:x1][aperture] >= saturation))
+
+
 def _default_alcor_photometry_output(filename):
     stem = str(filename)
     for ext in (".fits.bz2", ".fits.gz", ".fits"):
@@ -1668,7 +1692,7 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
                           annulus_width=1.0, min_altitude=20.0,
                           vmag_limit=5.5, refraction=True, masks_dir=None,
                           check_plot=False, check_radius=680,
-                          sun_alt_max=-12.0):
+                          sun_alt_max=-12.0, saturation=ALCOR_SATURATION):
     """
     Measure fixed-position aperture photometry for bright named stars.
 
@@ -1677,14 +1701,17 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
     image corners. Catalog stars from ``bright_star_sloan_named.fits`` with
     ``Vmag <= vmag_limit`` and altitude above ``min_altitude`` are projected
     into the raw image via the frame WCS. Each channel is measured with a
-    circular aperture and a surrounding annulus.
+    circular aperture and a surrounding annulus. Each channel also carries a
+    ``sat_*`` flag, True when any raw pixel inside the aperture reaches
+    ``saturation`` (the 15-bit ceiling by default), so saturated measurements
+    can be filtered downstream without discarding the unsaturated channels.
 
     Returns
     -------
     phot : `pandas.DataFrame`
         Rows indexed by star name. Columns are ``altitude``, ``azimuth``,
         ``xcen``, ``ycen`` and per-channel ``flux_*``, ``mag_*``,
-        ``background_*`` for ``r``, ``g``, ``b``. Rows are sorted by
+        ``background_*``, ``sat_*`` for ``r``, ``g``, ``b``. Rows are sorted by
         descending ``flux_g``. Empty when the frame is rejected.
     output_file : `~pathlib.Path` or None
         CSV path written, or None when the frame is rejected.
@@ -1696,7 +1723,8 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
     channels = ("r", "g", "b")
     columns = ["altitude", "azimuth", "xcen", "ycen"]
     for channel in channels:
-        columns += [f"flux_{channel}", f"mag_{channel}", f"background_{channel}"]
+        columns += [f"flux_{channel}", f"mag_{channel}",
+                    f"background_{channel}", f"sat_{channel}"]
     empty = pd.DataFrame(columns=columns)
     empty.index.name = "name"
 
@@ -1743,6 +1771,8 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
             fluxes.append(flux)
             row[f"flux_{channel}"] = flux
             row[f"background_{channel}"] = background
+            row[f"sat_{channel}"] = _aperture_saturated(
+                cube[channel_index], x, y, aperture_radius, saturation)
         if any((not np.isfinite(flux)) or flux <= 0.0 for flux in fluxes):
             continue
         for channel, flux in zip(channels, fluxes):
@@ -2593,6 +2623,8 @@ def alcor_star_photometry_cli():
                         help="Bad-pixel mask directory (default: $ALCOR_BADPIX_DIR, then packaged masks).")
     parser.add_argument("--sun-alt-max", type=float, default=-12.0,
                         help="Reject images with Sun altitude greater than this (deg).")
+    parser.add_argument("--saturation", type=float, default=ALCOR_SATURATION,
+                        help="Raw-ADU level at/above which an aperture pixel flags the channel saturated.")
     parser.add_argument("--check-plot", action="store_true",
                         help="Write an aperture-overlay check plot as <input>_phot.pdf.")
     parser.add_argument("--check-radius", type=int, default=680,
@@ -2611,6 +2643,7 @@ def alcor_star_photometry_cli():
         check_plot=args.check_plot,
         check_radius=args.check_radius,
         sun_alt_max=args.sun_alt_max,
+        saturation=args.saturation,
     )
     if output_file is not None:
         print(output_file)

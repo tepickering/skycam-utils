@@ -17,6 +17,7 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 os.environ.setdefault("MPLCONFIGDIR", str(_MPLCONFIGDIR))
 
 from skycam_utils.alcor import (
+    _annulus_background,
     _aperture_annulus_photometry,
     _aperture_saturated,
     _alcor_display_rgb,
@@ -127,6 +128,26 @@ def test_aperture_annulus_photometry_subtracts_local_background():
 
     assert background == 5.0  # median background ignores the annulus outlier
     np.testing.assert_allclose(flux, 10.0 * aperture.sum())
+
+
+def test_annulus_background_is_median_of_annulus():
+    yy, xx = np.mgrid[0:21, 0:21]
+    image = np.full((21, 21), 5.0)
+    rr = np.hypot(xx - 10.0, yy - 10.0)
+    annulus = (rr > 4.0) & (rr <= 6.0)   # inner = ar+1 = 4, outer = 4+2 = 6
+    image[annulus] = 5.0
+    image[10, 16] = 500.0                # annulus outlier, killed by the median
+
+    bg = _annulus_background(image, 10.0, 10.0, aperture_radius=3.0,
+                             annulus_width=2.0)
+
+    assert bg == 5.0
+
+
+def test_annulus_background_returns_nan_when_off_image():
+    image = np.zeros((10, 10))
+    assert np.isnan(_annulus_background(image, -50.0, -50.0,
+                                        aperture_radius=3.0, annulus_width=2.0))
 
 
 def test_alcor_display_rgb_subtracts_channel_bias_before_scaling():

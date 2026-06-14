@@ -1602,10 +1602,13 @@ def _corner_bias(cube, size=10):
     return np.median(pixels, axis=1)
 
 
-def _aperture_annulus_photometry(image, xcen, ycen, aperture_radius,
-                                 annulus_width):
+def _annulus_background(image, xcen, ycen, aperture_radius, annulus_width):
     """
-    Circular aperture flux with a local median annulus background.
+    Median background in the circular annulus around ``(xcen, ycen)``.
+
+    The annulus runs from ``aperture_radius + 1`` to
+    ``aperture_radius + 1 + annulus_width``. Returns NaN when the annulus falls
+    entirely outside the image.
     """
     ny, nx = image.shape
     annulus_inner = aperture_radius + 1.0
@@ -1615,18 +1618,36 @@ def _aperture_annulus_photometry(image, xcen, ycen, aperture_radius,
     y0 = max(0, int(np.floor(ycen - outer)))
     y1 = min(ny, int(np.ceil(ycen + outer)) + 1)
     if x0 >= x1 or y0 >= y1:
-        return np.nan, np.nan
-
+        return np.nan
     yy, xx = np.mgrid[y0:y1, x0:x1]
     rr = np.hypot(xx - xcen, yy - ycen)
-    aperture = rr <= aperture_radius
     annulus = (rr > annulus_inner) & (rr <= outer)
-    if not aperture.any() or not annulus.any():
-        return np.nan, np.nan
+    if not annulus.any():
+        return np.nan
+    return float(np.median(image[y0:y1, x0:x1][annulus]))
 
-    cutout = image[y0:y1, x0:x1]
-    background = float(np.median(cutout[annulus]))
-    flux = float(np.sum(cutout[aperture] - background))
+
+def _aperture_annulus_photometry(image, xcen, ycen, aperture_radius,
+                                 annulus_width):
+    """
+    Circular aperture flux with a local median annulus background.
+    """
+    background = _annulus_background(image, xcen, ycen, aperture_radius,
+                                     annulus_width)
+    if not np.isfinite(background):
+        return np.nan, np.nan
+    ny, nx = image.shape
+    x0 = max(0, int(np.floor(xcen - aperture_radius)))
+    x1 = min(nx, int(np.ceil(xcen + aperture_radius)) + 1)
+    y0 = max(0, int(np.floor(ycen - aperture_radius)))
+    y1 = min(ny, int(np.ceil(ycen + aperture_radius)) + 1)
+    if x0 >= x1 or y0 >= y1:
+        return np.nan, np.nan
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    aperture = np.hypot(xx - xcen, yy - ycen) <= aperture_radius
+    if not aperture.any():
+        return np.nan, np.nan
+    flux = float(np.sum(image[y0:y1, x0:x1][aperture] - background))
     return flux, background
 
 

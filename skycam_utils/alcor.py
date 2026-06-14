@@ -1859,7 +1859,9 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
                           annulus_width=1.0, min_altitude=20.0,
                           vmag_limit=5.5, refraction=True, masks_dir=None,
                           check_plot=False, check_radius=680,
-                          sun_alt_max=-12.0, saturation=ALCOR_SATURATION):
+                          sun_alt_max=-12.0, saturation=ALCOR_SATURATION,
+                          gaussian=False,
+                          mask_threshold=ALCOR_NONLINEAR_THRESHOLD):
     """
     Measure fixed-position aperture photometry for bright named stars.
 
@@ -1872,6 +1874,14 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
     ``sat_*`` flag, True when any raw pixel inside the aperture reaches
     ``saturation`` (the 15-bit ceiling by default), so saturated measurements
     can be filtered downstream without discarding the unsaturated channels.
+
+    When ``gaussian`` is True, photometry instead fits a circular Gaussian whose
+    center and width are pinned from a luminance (channel-summed) fit with the
+    non-linear core masked (raw pixels at/above ``mask_threshold`` excluded), and
+    recovers each channel's amplitude from the linear wings. The reported flux is
+    the analytic Gaussian integral, which is robust to the CMOS non-linearity
+    that suppresses aperture-sum flux for bright stars before saturation. The
+    luminance FWHM is reported in the ``fwhm`` column (NaN in aperture mode).
 
     Returns
     -------
@@ -1888,7 +1898,7 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
     if annulus_width <= 0:
         raise ValueError("annulus_width must be positive")
     channels = ("r", "g", "b")
-    columns = ["altitude", "azimuth", "xcen", "ycen"]
+    columns = ["altitude", "azimuth", "xcen", "ycen", "fwhm"]
     for channel in channels:
         columns += [f"flux_{channel}", f"mag_{channel}",
                     f"background_{channel}", f"sat_{channel}"]
@@ -1924,22 +1934,43 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
     rows = []
     labels = []
     cat_labels = _alcor_star_labels(cat)
+    lum_frame = data.sum(axis=0) if gaussian else None
     for i, (x, y) in enumerate(zip(xcen, ycen)):
         row = {
             "altitude": float(cat["Alt"][i]),
             "azimuth": float(cat["Az"][i]),
             "xcen": float(x),
             "ycen": float(y),
+            "fwhm": np.nan,
         }
-        fluxes = []
-        for channel_index, channel in enumerate(channels):
-            flux, background = _aperture_annulus_photometry(
-                data[channel_index], x, y, aperture_radius, annulus_width)
-            fluxes.append(flux)
-            row[f"flux_{channel}"] = flux
-            row[f"background_{channel}"] = background
-            row[f"sat_{channel}"] = _aperture_saturated(
-                cube[channel_index], x, y, aperture_radius, saturation)
+        if gaussian:
+            fit = _gaussian_psf_photometry(
+                data, cube, lum_frame, x, y, aperture_radius, annulus_width,
+                mask_threshold)
+            if fit is None:
+                continue
+            row["xcen"] = fit["xcen"]
+            row["ycen"] = fit["ycen"]
+            row["fwhm"] = fit["fwhm"]
+            fluxes = []
+            for channel_index, channel in enumerate(channels):
+                flux = fit[f"flux_{channel}"]
+                fluxes.append(flux)
+                row[f"flux_{channel}"] = flux
+                row[f"background_{channel}"] = fit[f"background_{channel}"]
+                row[f"sat_{channel}"] = _aperture_saturated(
+                    cube[channel_index], fit["xcen"], fit["ycen"],
+                    aperture_radius, saturation)
+        else:
+            fluxes = []
+            for channel_index, channel in enumerate(channels):
+                flux, background = _aperture_annulus_photometry(
+                    data[channel_index], x, y, aperture_radius, annulus_width)
+                fluxes.append(flux)
+                row[f"flux_{channel}"] = flux
+                row[f"background_{channel}"] = background
+                row[f"sat_{channel}"] = _aperture_saturated(
+                    cube[channel_index], x, y, aperture_radius, saturation)
         if any((not np.isfinite(flux)) or flux <= 0.0 for flux in fluxes):
             continue
         for channel, flux in zip(channels, fluxes):

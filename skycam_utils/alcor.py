@@ -42,6 +42,11 @@ ALCOR_RADIUS = 680
 ALCOR_HORIZON_RADIUS = 747
 # Raw-ADU ceiling: the OMEA 8C delivers 15-bit data, so pixels peg at 2**15 - 1.
 ALCOR_SATURATION = 32767
+ALCOR_NONLINEAR_THRESHOLD = 15000   # raw ADU; per-pixel non-linearity onset
+
+# minimum unmasked pixel counts for the Gaussian fits
+_GAUSS_MIN_LUM_PIXELS = 8            # 4-parameter luminance shape fit
+_GAUSS_MIN_CHANNEL_PIXELS = 3        # 1-parameter per-channel amplitude
 
 # Time-indexed lens calibrations. Each epoch holds the raw-frame geometry as
 # absolutes: the optical-axis pixel (xcen, ycen) in the raw FITS frame (the
@@ -1671,6 +1676,147 @@ def _aperture_saturated(image, xcen, ycen, aperture_radius, saturation):
     if not aperture.any():
         return False
     return bool(np.any(image[y0:y1, x0:x1][aperture] >= saturation))
+
+
+def _gaussian_channel_amplitude(data, background, profile, fit_mask):
+    """
+    Linear least-squares amplitude of ``data - background`` projected onto a
+    fixed unit-Gaussian ``profile`` over ``fit_mask``.
+
+    With the PSF shape held fixed, the best-fit amplitude is the closed-form
+    projection ``sum(g*d) / sum(g*g)`` over the unmasked pixels, so the linear
+    wings (the only unmasked pixels for a bright star) set the amplitude and the
+    suppressed core does not bias it. Returns NaN when the projection is
+    degenerate (no profile weight in the mask).
+    """
+    g = profile[fit_mask]
+    denom = float(np.sum(g * g))
+    if denom <= 0.0:
+        return np.nan
+    d = data[fit_mask] - background
+    return float(np.sum(g * d) / denom)
+
+
+def _gaussian_psf_photometry(data, cube, lum_frame, xcen, ycen,
+                             aperture_radius, annulus_width, mask_threshold):
+    """
+    Constrained-Gaussian PSF photometry for one star.
+
+    Pins the PSF center and width from a luminance (channel-summed) fit with the
+    non-linear core masked, then recovers each channel's amplitude as the linear
+    projection of the background-subtracted, masked aperture data onto the fixed
+    unit-Gaussian profile. Flux is the analytic Gaussian integral
+    ``2*pi*A*sigma**2``.
+
+    Parameters
+    ----------
+    data : (3, ny, nx) float `~numpy.ndarray`
+        Bias-subtracted RGB cube.
+    cube : (3, ny, nx) `~numpy.ndarray`
+        Raw RGB cube; the linearity mask is computed on it because the threshold
+        is a raw-ADU level.
+    lum_frame : (ny, nx) `~numpy.ndarray`
+        Precomputed luminance frame ``data.sum(axis=0)``.
+    xcen, ycen : float
+        WCS-predicted pixel position; the fit seed.
+    aperture_radius, annulus_width : float
+    mask_threshold : float
+        Raw-ADU level at/above which a pixel is excluded from the fit.
+
+    Returns
+    -------
+    dict or None
+        Keys ``xcen``, ``ycen``, ``fwhm`` and per-channel ``flux_<ch>`` and
+        ``background_<ch>``. None if the fit cannot be trusted.
+    """
+    ny, nx = data.shape[1:]
+    # Box generous enough to hold the aperture around any allowed fitted center
+    # (the center may drift up to aperture_radius from the seed).
+    box_r = int(np.ceil(2.0 * aperture_radius)) + 1
+    xi = int(np.floor(xcen))
+    yi = int(np.floor(ycen))
+    x0 = max(0, xi - box_r)
+    x1 = min(nx, xi + box_r + 1)
+    y0 = max(0, yi - box_r)
+    y1 = min(ny, yi + box_r + 1)
+    if x0 >= x1 or y0 >= y1:
+        return None
+
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    raw_box = cube[:, y0:y1, x0:x1]
+
+    # --- luminance shape fit (amp, center, sigma) over the linear core+wings ---
+    rr_seed = np.hypot(xx - xcen, yy - ycen)
+    in_aperture = rr_seed <= aperture_radius
+    lum_linear = np.all(raw_box < mask_threshold, axis=0)
+    lum_mask = in_aperture & lum_linear
+    if int(lum_mask.sum()) < _GAUSS_MIN_LUM_PIXELS:
+        return None
+
+    lum_bkg = _annulus_background(lum_frame, xcen, ycen, aperture_radius,
+                                  annulus_width)
+    if not np.isfinite(lum_bkg):
+        return None
+    lum_sub = lum_frame[y0:y1, x0:x1] - lum_bkg
+
+    xf = xx[lum_mask].astype(float)
+    yf = yy[lum_mask].astype(float)
+    zf = lum_sub[lum_mask]
+    amp0 = float(np.max(zf))
+    if not np.isfinite(amp0) or amp0 <= 0.0:
+        amp0 = 1.0
+    sigma0 = aperture_radius / 2.0
+
+    def residual(p):
+        amp, cx, cy, sigma = p
+        model = amp * np.exp(-((xf - cx) ** 2 + (yf - cy) ** 2)
+                             / (2.0 * sigma ** 2))
+        return model - zf
+
+    lower = [0.0, xcen - aperture_radius, ycen - aperture_radius, 1e-3]
+    upper = [np.inf, xcen + aperture_radius, ycen + aperture_radius,
+             aperture_radius]
+    try:
+        result = least_squares(residual, [amp0, xcen, ycen, sigma0],
+                               bounds=(lower, upper), max_nfev=200)
+    except (ValueError, RuntimeError):
+        return None
+    if not result.success:
+        return None
+    _, cx, cy, sigma = result.x
+    if not np.all(np.isfinite([cx, cy, sigma])):
+        return None
+    if sigma <= 0.0 or sigma >= aperture_radius:
+        return None
+    if np.hypot(cx - xcen, cy - ycen) > aperture_radius:
+        return None
+
+    # --- per-channel amplitude from the linear wings, shape fixed ------------
+    rr_fit = np.hypot(xx - cx, yy - cy)
+    in_aperture_fit = rr_fit <= aperture_radius
+    profile = np.exp(-rr_fit ** 2 / (2.0 * sigma ** 2))
+    norm = 2.0 * np.pi * sigma ** 2
+
+    out = {
+        "xcen": float(cx),
+        "ycen": float(cy),
+        "fwhm": float(2.0 * np.sqrt(2.0 * np.log(2.0)) * sigma),
+    }
+    for idx, channel in enumerate(("r", "g", "b")):
+        ch_bkg = _annulus_background(data[idx], cx, cy, aperture_radius,
+                                     annulus_width)
+        if not np.isfinite(ch_bkg):
+            return None
+        ch_mask = in_aperture_fit & (raw_box[idx] < mask_threshold)
+        if int(ch_mask.sum()) < _GAUSS_MIN_CHANNEL_PIXELS:
+            return None
+        amp_ch = _gaussian_channel_amplitude(
+            data[idx, y0:y1, x0:x1], ch_bkg, profile, ch_mask)
+        if not np.isfinite(amp_ch):
+            return None
+        out[f"flux_{channel}"] = amp_ch * norm
+        out[f"background_{channel}"] = float(ch_bkg)
+    return out
 
 
 def _default_alcor_photometry_output(filename):

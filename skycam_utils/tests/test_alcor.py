@@ -22,6 +22,8 @@ from skycam_utils.alcor import (
     _aperture_saturated,
     _alcor_display_rgb,
     _corner_bias,
+    _gaussian_channel_amplitude,
+    _gaussian_psf_photometry,
     _timestamp_edges,
     alcor_keogram,
     alcor_proc_fits,
@@ -36,6 +38,7 @@ from skycam_utils.alcor import (
     save_alcor_keogram_fits,
     save_alcor_keogram_plot,
 )
+from skycam_utils.alcor import ALCOR_NONLINEAR_THRESHOLD
 
 
 TEST_FITS = Path(__file__).with_name("test.fits.bz2")
@@ -148,6 +151,31 @@ def test_annulus_background_returns_nan_when_off_image():
     image = np.zeros((10, 10))
     assert np.isnan(_annulus_background(image, -50.0, -50.0,
                                         aperture_radius=3.0, annulus_width=2.0))
+
+
+def test_nonlinear_threshold_default_is_15000():
+    assert ALCOR_NONLINEAR_THRESHOLD == 15000
+
+
+def test_gaussian_channel_amplitude_recovers_known_amplitude():
+    yy, xx = np.mgrid[0:11, 0:11]
+    sigma = 1.5
+    profile = np.exp(-((xx - 5.0) ** 2 + (yy - 5.0) ** 2) / (2.0 * sigma ** 2))
+    amp_true = 1234.0
+    background = 50.0
+    data = amp_true * profile + background
+    fit_mask = np.hypot(xx - 5.0, yy - 5.0) <= 4.0
+
+    amp = _gaussian_channel_amplitude(data, background, profile, fit_mask)
+
+    np.testing.assert_allclose(amp, amp_true, rtol=1e-6)
+
+
+def test_gaussian_channel_amplitude_returns_nan_on_degenerate_profile():
+    data = np.ones((5, 5))
+    profile = np.zeros((5, 5))
+    fit_mask = np.ones((5, 5), dtype=bool)
+    assert np.isnan(_gaussian_channel_amplitude(data, 0.0, profile, fit_mask))
 
 
 def test_alcor_display_rgb_subtracts_channel_bias_before_scaling():

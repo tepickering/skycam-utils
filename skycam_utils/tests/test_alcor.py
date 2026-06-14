@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import sys
 from io import StringIO
 import tempfile
 from pathlib import Path
@@ -28,6 +29,7 @@ from skycam_utils.alcor import (
     alcor_keogram,
     alcor_proc_fits,
     alcor_star_photometry,
+    alcor_star_photometry_cli,
     build_alcor_wcs,
     load_alcor_keogram_fits,
     load_alcor_fits,
@@ -433,6 +435,45 @@ def test_alcor_star_photometry_gaussian_drops_signal_free_star(
 
     assert len(phot) == 0
     assert output_file.exists()
+
+
+def test_alcor_star_photometry_cli_passes_gaussian_flags(monkeypatch):
+    from skycam_utils import alcor
+
+    captured = {}
+
+    def fake_photometry(*args, **kwargs):
+        captured.update(kwargs)
+        return None, None
+
+    monkeypatch.setattr(alcor, "alcor_star_photometry", fake_photometry)
+    monkeypatch.setattr(sys, "argv",
+                        ["alcor_star_photometry", "frame.fits",
+                         "--gaussian", "--mask-threshold", "12000"])
+
+    alcor.alcor_star_photometry_cli()
+
+    assert captured["gaussian"] is True
+    assert captured["mask_threshold"] == 12000.0
+
+
+def test_alcor_star_photometry_cli_defaults_to_aperture(monkeypatch):
+    from skycam_utils import alcor
+
+    captured = {}
+
+    def fake_photometry(*args, **kwargs):
+        captured.update(kwargs)
+        return None, None
+
+    monkeypatch.setattr(alcor, "alcor_star_photometry", fake_photometry)
+    monkeypatch.setattr(sys, "argv",
+                        ["alcor_star_photometry", "frame.fits"])
+
+    alcor.alcor_star_photometry_cli()
+
+    assert captured["gaussian"] is False
+    assert captured["mask_threshold"] == alcor.ALCOR_NONLINEAR_THRESHOLD
 
 
 def test_alcor_star_photometry_default_vmag_limit_is_5p5(monkeypatch, tmp_path):

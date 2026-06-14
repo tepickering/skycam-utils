@@ -2808,7 +2808,7 @@ def alcor_star_photometry_cli():
         help="Output CSV path (default: <input>_phot.csv).",
     )
     parser.add_argument("--aperture-radius", type=float, default=4.0,
-                        help="Circular aperture radius in pixels.")
+                        help="Circular aperture radius in pixels (also the Gaussian fit window).")
     parser.add_argument("--annulus-width", type=float, default=1.0,
                         help="Background annulus width in pixels.")
     parser.add_argument("--min-altitude", type=float, default=20.0,
@@ -2823,6 +2823,11 @@ def alcor_star_photometry_cli():
                         help="Reject images with Sun altitude greater than this (deg).")
     parser.add_argument("--saturation", type=float, default=ALCOR_SATURATION,
                         help="Raw-ADU level at/above which an aperture pixel flags the channel saturated.")
+    parser.add_argument("--gaussian", action="store_true",
+                        help="Use constrained-Gaussian PSF photometry instead of aperture sums.")
+    parser.add_argument("--mask-threshold", type=float,
+                        default=ALCOR_NONLINEAR_THRESHOLD,
+                        help="Raw-ADU level at/above which a pixel is excluded from the Gaussian fit.")
     parser.add_argument("--check-plot", action="store_true",
                         help="Write an aperture-overlay check plot as <input>_phot.pdf.")
     parser.add_argument("--check-radius", type=int, default=680,
@@ -2842,6 +2847,8 @@ def alcor_star_photometry_cli():
         check_radius=args.check_radius,
         sun_alt_max=args.sun_alt_max,
         saturation=args.saturation,
+        gaussian=args.gaussian,
+        mask_threshold=args.mask_threshold,
     )
     if output_file is not None:
         print(output_file)

@@ -235,7 +235,7 @@ def test_alcor_star_photometry_writes_named_csv(tmp_path):
     assert np.all(np.isfinite(phot["ycen"]))
 
 
-def test_alcor_star_photometry_skips_nonpositive_channel_flux(tmp_path, monkeypatch):
+def test_alcor_star_photometry_retains_nonpositive_channel_flux(tmp_path, monkeypatch):
     from astropy.time import Time
     from skycam_utils import alcor
 
@@ -252,7 +252,7 @@ def test_alcor_star_photometry_skips_nonpositive_channel_flux(tmp_path, monkeypa
             return np.array([15.0, 40.0]), np.array([15.0, 40.0])
 
     cat = Table({
-        "NAME": ["keep", "skip"],
+        "NAME": ["full", "noG"],
         "HD": [1, 2],
         "Alt": [80.0, 81.0],
         "Az": [10.0, 20.0],
@@ -273,13 +273,21 @@ def test_alcor_star_photometry_skips_nonpositive_channel_flux(tmp_path, monkeypa
 
     assert output_file.exists()
     text = output_file.read_text()
-    assert "keep" in text
-    assert "skip" not in text
-    assert list(phot.index) == ["keep"]
-    assert phot.loc["keep", "flux_g"] > 0.0
-    assert np.isfinite(phot.loc["keep", "mag_r"])
-    assert np.isfinite(phot.loc["keep", "mag_g"])
-    assert np.isfinite(phot.loc["keep", "mag_b"])
+    # both expected stars are present every frame, even the non-detection
+    assert "full" in text
+    assert "noG" in text
+    assert set(phot.index) == {"full", "noG"}
+    # the green-channel non-detection is recorded as flux 0 / mag NaN, not dropped
+    assert phot.loc["noG", "flux_g"] == 0.0
+    assert np.isnan(phot.loc["noG", "mag_g"])
+    # the channels that did see signal are unaffected
+    assert phot.loc["noG", "flux_r"] > 0.0
+    assert phot.loc["noG", "flux_b"] > 0.0
+    assert np.isfinite(phot.loc["noG", "mag_r"])
+    assert np.isfinite(phot.loc["noG", "mag_b"])
+    # WCS-predicted position is always finite, even for the non-detection
+    assert np.isfinite(phot.loc["noG", "xcen"])
+    assert np.isfinite(phot.loc["noG", "ycen"])
 
 
 def test_aperture_saturated_detects_ceiling_pixel():
@@ -427,7 +435,7 @@ def test_alcor_star_photometry_aperture_mode_fwhm_is_nan(tmp_path, monkeypatch):
     assert phot["fwhm"].isna().all()
 
 
-def test_alcor_star_photometry_gaussian_drops_signal_free_star(
+def test_alcor_star_photometry_gaussian_retains_signal_free_star(
         tmp_path, monkeypatch):
     cube = np.full((3, 60, 60), 100.0)      # flat field, no star
     _patch_single_star(monkeypatch, cube, px=30.0, py=30.0)
@@ -436,8 +444,12 @@ def test_alcor_star_photometry_gaussian_drops_signal_free_star(
         tmp_path / "flat.fits", output_file=tmp_path / "flat.csv",
         gaussian=True, aperture_radius=5.0, annulus_width=2.0)
 
-    assert len(phot) == 0
+    # the expected star is kept even when the Gaussian fit finds no signal
+    assert len(phot) == 1
     assert output_file.exists()
+    for channel in "rgb":
+        assert phot.iloc[0][f"flux_{channel}"] == 0.0
+        assert np.isnan(phot.iloc[0][f"mag_{channel}"])
 
 
 def test_alcor_star_photometry_cli_passes_gaussian_flags(monkeypatch):

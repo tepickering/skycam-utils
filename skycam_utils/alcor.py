@@ -1909,9 +1909,18 @@ def _alcor_display_rgb(cube, powerstretch=0.75, contrast=0.35,
     return stretch(rgb)
 
 
-def _valid_fluxes(fluxes):
-    """True when every channel flux is finite and positive."""
-    return all(np.isfinite(flux) and flux > 0.0 for flux in fluxes)
+def _flux_mag(flux):
+    """Map a measured flux to ``(flux, mag)`` with the non-detection convention.
+
+    A finite, positive flux yields ``(float(flux), -2.5*log10(flux))``. Any
+    non-finite or non-positive flux is treated as a non-detection and recorded
+    as ``(0.0, nan)`` so the star still appears in the output: a catalog star
+    that is above the horizon but invisible (e.g. behind cloud) is itself a
+    strong extinction signal, so it must not be silently dropped.
+    """
+    if np.isfinite(flux) and flux > 0.0:
+        return float(flux), float(-2.5 * np.log10(flux))
+    return 0.0, np.nan
 
 
 def _aperture_measure(data, cube, x, y, aperture_radius, annulus_width,
@@ -2112,13 +2121,23 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
     that suppresses aperture-sum flux for bright stars before saturation. The
     luminance FWHM is reported in the ``fwhm`` column (NaN in aperture mode).
 
+    Every catalog star above ``min_altitude`` produces a row in every frame,
+    even when it is not detected: a star that is above the horizon but invisible
+    (e.g. behind cloud) carries ``flux = 0`` and ``mag = NaN`` per channel rather
+    than being dropped, because that non-detection is itself a strong extinction
+    signal (and the measured ``background_*`` is still recorded). The only stars
+    absent from the output are those below ``min_altitude`` or fainter than
+    ``vmag_limit``. The per-channel ``background_*`` is finite for a measurable
+    position even at a non-detection, and NaN only when the position is off-frame.
+
     When ``both`` is True, every star is measured with *both* methods in a single
     pass and written to one combined CSV: the aperture columns are suffixed
     ``_ap`` and the Gaussian columns ``_gauss``, alongside the shared
     WCS-predicted ``xcen``/``ycen`` and the Gaussian-fitted
-    ``xcen_gauss``/``ycen_gauss``/``fwhm``. A star is kept when *either* method
-    yields finite positive flux in all channels, with the failed method's columns
-    NaN; rows sort by ``flux_g_ap``. ``both`` takes precedence over ``gaussian``.
+    ``xcen_gauss``/``ycen_gauss``/``fwhm``. The aperture flux is 0 at a
+    non-detection; the Gaussian columns are NaN when the fit cannot run at all
+    (a structural failure, distinct from a measured zero). Rows sort by
+    ``flux_g_ap``. ``both`` takes precedence over ``gaussian``.
 
     Every measured magnitude is calibrated to the catalog system via
     :func:`alcor_calibrate_photometry` (using the frame time to resolve the
@@ -2134,8 +2153,10 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
         Rows indexed by star name. Columns are ``altitude``, ``azimuth``,
         ``xcen``, ``ycen`` and per-channel ``flux_*``, ``mag_*``, ``cal_*``,
         ``ext_*``, ``background_*``, ``sat_*`` for ``r``, ``g``, ``b`` (suffixed
-        ``_ap``/``_gauss`` in ``both`` mode). Rows are sorted by descending
-        ``flux_g``. Empty when the frame is rejected.
+        ``_ap``/``_gauss`` in ``both`` mode). One row per catalog star above
+        ``min_altitude``; non-detections carry ``flux = 0`` / ``mag = NaN``. Rows
+        are sorted by descending ``flux_g``. Empty only when the frame is
+        rejected (Sun above ``sun_alt_max``).
     output_file : `~pathlib.Path` or None
         CSV path written, or None when the frame is rejected.
     """
@@ -2202,35 +2223,33 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
         if both:
             ap = _aperture_measure(data, cube, x, y, aperture_radius,
                                    annulus_width, saturation, channels)
-            ap_ok = _valid_fluxes(ap[f"flux_{c}"] for c in channels)
             gfit = _gaussian_measure(data, cube, lum_frame, x, y,
                                      aperture_radius, annulus_width,
                                      mask_threshold, saturation, channels)
-            g_ok = gfit is not None and _valid_fluxes(
-                gfit[f"flux_{c}"] for c in channels)
-            if not (ap_ok or g_ok):
-                continue
             row = dict(base, xcen=float(x), ycen=float(y))
             for channel in channels:
-                flux = ap[f"flux_{channel}"]
+                flux, mag = _flux_mag(ap[f"flux_{channel}"])
                 row[f"flux_{channel}_ap"] = flux
+                row[f"mag_{channel}_ap"] = mag
                 row[f"background_{channel}_ap"] = ap[f"background_{channel}"]
                 row[f"sat_{channel}_ap"] = ap[f"sat_{channel}"]
-                row[f"mag_{channel}_ap"] = (float(-2.5 * np.log10(flux))
-                                            if ap_ok else np.nan)
             if gfit is not None:
                 row["xcen_gauss"] = gfit["xcen"]
                 row["ycen_gauss"] = gfit["ycen"]
                 row["fwhm"] = gfit["fwhm"]
                 for channel in channels:
-                    flux = gfit[f"flux_{channel}"]
+                    flux, mag = _flux_mag(gfit[f"flux_{channel}"])
                     row[f"flux_{channel}_gauss"] = flux
+                    row[f"mag_{channel}_gauss"] = mag
                     row[f"background_{channel}_gauss"] = \
                         gfit[f"background_{channel}"]
                     row[f"sat_{channel}_gauss"] = gfit[f"sat_{channel}"]
-                    row[f"mag_{channel}_gauss"] = (float(-2.5 * np.log10(flux))
-                                                   if g_ok else np.nan)
             else:
+                # the Gaussian fit could not run: no estimate for this method,
+                # so its columns are NaN (the aperture flux above still carries
+                # the detection / non-detection). A genuinely empty frame yields
+                # a degenerate fit with flux 0, not a None fit, so this branch is
+                # a structural failure, not the cloud non-detection signal.
                 row["xcen_gauss"] = np.nan
                 row["ycen_gauss"] = np.nan
                 row["fwhm"] = np.nan
@@ -2243,29 +2262,34 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
             gfit = _gaussian_measure(data, cube, lum_frame, x, y,
                                      aperture_radius, annulus_width,
                                      mask_threshold, saturation, channels)
-            if gfit is None or not _valid_fluxes(
-                    gfit[f"flux_{c}"] for c in channels):
-                continue
-            row = dict(base, xcen=gfit["xcen"], ycen=gfit["ycen"],
-                       fwhm=gfit["fwhm"])
-            for channel in channels:
-                flux = gfit[f"flux_{channel}"]
-                row[f"flux_{channel}"] = flux
-                row[f"background_{channel}"] = gfit[f"background_{channel}"]
-                row[f"sat_{channel}"] = gfit[f"sat_{channel}"]
-                row[f"mag_{channel}"] = float(-2.5 * np.log10(flux))
+            if gfit is None:
+                # the fit could not run: keep the star at its WCS-predicted
+                # position with NaN measurements (no estimate available).
+                row = dict(base, xcen=float(x), ycen=float(y), fwhm=np.nan)
+                for channel in channels:
+                    row[f"flux_{channel}"] = np.nan
+                    row[f"mag_{channel}"] = np.nan
+                    row[f"background_{channel}"] = np.nan
+                    row[f"sat_{channel}"] = np.nan
+            else:
+                row = dict(base, xcen=gfit["xcen"], ycen=gfit["ycen"],
+                           fwhm=gfit["fwhm"])
+                for channel in channels:
+                    flux, mag = _flux_mag(gfit[f"flux_{channel}"])
+                    row[f"flux_{channel}"] = flux
+                    row[f"mag_{channel}"] = mag
+                    row[f"background_{channel}"] = gfit[f"background_{channel}"]
+                    row[f"sat_{channel}"] = gfit[f"sat_{channel}"]
         else:
             ap = _aperture_measure(data, cube, x, y, aperture_radius,
                                    annulus_width, saturation, channels)
-            if not _valid_fluxes(ap[f"flux_{c}"] for c in channels):
-                continue
             row = dict(base, xcen=float(x), ycen=float(y), fwhm=np.nan)
             for channel in channels:
-                flux = ap[f"flux_{channel}"]
+                flux, mag = _flux_mag(ap[f"flux_{channel}"])
                 row[f"flux_{channel}"] = flux
+                row[f"mag_{channel}"] = mag
                 row[f"background_{channel}"] = ap[f"background_{channel}"]
                 row[f"sat_{channel}"] = ap[f"sat_{channel}"]
-                row[f"mag_{channel}"] = float(-2.5 * np.log10(flux))
         rows.append(row)
         labels.append(cat_labels[i])
 

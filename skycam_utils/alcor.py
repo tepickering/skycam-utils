@@ -1855,13 +1855,60 @@ def _alcor_display_rgb(cube, powerstretch=0.75, contrast=0.35,
     return stretch(rgb)
 
 
+def _valid_fluxes(fluxes):
+    """True when every channel flux is finite and positive."""
+    return all(np.isfinite(flux) and flux > 0.0 for flux in fluxes)
+
+
+def _aperture_measure(data, cube, x, y, aperture_radius, annulus_width,
+                      saturation, channels):
+    """Per-channel aperture flux/background/saturation at ``(x, y)``.
+
+    Returns a dict with ``flux_<ch>``, ``background_<ch>`` and ``sat_<ch>`` for
+    each channel (raw measurements; magnitudes and validity are the caller's
+    decision).
+    """
+    cols = {}
+    for index, channel in enumerate(channels):
+        flux, background = _aperture_annulus_photometry(
+            data[index], x, y, aperture_radius, annulus_width)
+        cols[f"flux_{channel}"] = flux
+        cols[f"background_{channel}"] = background
+        cols[f"sat_{channel}"] = _aperture_saturated(
+            cube[index], x, y, aperture_radius, saturation)
+    return cols
+
+
+def _gaussian_measure(data, cube, lum_frame, x, y, aperture_radius,
+                      annulus_width, mask_threshold, saturation, channels):
+    """Constrained-Gaussian per-channel measurement at ``(x, y)``.
+
+    Returns a dict with the fitted ``xcen``, ``ycen``, ``fwhm`` and per-channel
+    ``flux_<ch>``, ``background_<ch>`` and ``sat_<ch>`` (the saturation flag is
+    evaluated at the fitted center), or None when the luminance fit fails.
+    """
+    fit = _gaussian_psf_photometry(
+        data, cube, lum_frame, x, y, aperture_radius, annulus_width,
+        mask_threshold)
+    if fit is None:
+        return None
+    cols = {"xcen": fit["xcen"], "ycen": fit["ycen"], "fwhm": fit["fwhm"]}
+    for index, channel in enumerate(channels):
+        cols[f"flux_{channel}"] = fit[f"flux_{channel}"]
+        cols[f"background_{channel}"] = fit[f"background_{channel}"]
+        cols[f"sat_{channel}"] = _aperture_saturated(
+            cube[index], fit["xcen"], fit["ycen"], aperture_radius, saturation)
+    return cols
+
+
 def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
                           annulus_width=1.0, min_altitude=20.0,
                           vmag_limit=5.5, refraction=True, masks_dir=None,
                           check_plot=False, check_radius=680,
                           sun_alt_max=-12.0, saturation=ALCOR_SATURATION,
                           gaussian=False,
-                          mask_threshold=ALCOR_NONLINEAR_THRESHOLD):
+                          mask_threshold=ALCOR_NONLINEAR_THRESHOLD,
+                          both=False):
     """
     Measure fixed-position aperture photometry for bright named stars.
 
@@ -1883,6 +1930,14 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
     that suppresses aperture-sum flux for bright stars before saturation. The
     luminance FWHM is reported in the ``fwhm`` column (NaN in aperture mode).
 
+    When ``both`` is True, every star is measured with *both* methods in a single
+    pass and written to one combined CSV: the aperture columns are suffixed
+    ``_ap`` and the Gaussian columns ``_gauss``, alongside the shared
+    WCS-predicted ``xcen``/``ycen`` and the Gaussian-fitted
+    ``xcen_gauss``/``ycen_gauss``/``fwhm``. A star is kept when *either* method
+    yields finite positive flux in all channels, with the failed method's columns
+    NaN; rows sort by ``flux_g_ap``. ``both`` takes precedence over ``gaussian``.
+
     Returns
     -------
     phot : `pandas.DataFrame`
@@ -1898,10 +1953,22 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
     if annulus_width <= 0:
         raise ValueError("annulus_width must be positive")
     channels = ("r", "g", "b")
-    columns = ["altitude", "azimuth", "xcen", "ycen", "fwhm"]
-    for channel in channels:
-        columns += [f"flux_{channel}", f"mag_{channel}",
-                    f"background_{channel}", f"sat_{channel}"]
+    if both:
+        columns = ["altitude", "azimuth", "xcen", "ycen"]
+        for channel in channels:
+            columns += [f"flux_{channel}_ap", f"mag_{channel}_ap",
+                        f"background_{channel}_ap", f"sat_{channel}_ap"]
+        columns += ["xcen_gauss", "ycen_gauss", "fwhm"]
+        for channel in channels:
+            columns += [f"flux_{channel}_gauss", f"mag_{channel}_gauss",
+                        f"background_{channel}_gauss", f"sat_{channel}_gauss"]
+        sort_key = "flux_g_ap"
+    else:
+        columns = ["altitude", "azimuth", "xcen", "ycen", "fwhm"]
+        for channel in channels:
+            columns += [f"flux_{channel}", f"mag_{channel}",
+                        f"background_{channel}", f"sat_{channel}"]
+        sort_key = "flux_g"
     empty = pd.DataFrame(columns=columns)
     empty.index.name = "name"
 
@@ -1934,53 +2001,83 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
     rows = []
     labels = []
     cat_labels = _alcor_star_labels(cat)
-    lum_frame = data.sum(axis=0) if gaussian else None
+    lum_frame = data.sum(axis=0) if (gaussian or both) else None
     for i, (x, y) in enumerate(zip(xcen, ycen)):
-        row = {
-            "altitude": float(cat["Alt"][i]),
-            "azimuth": float(cat["Az"][i]),
-            "xcen": float(x),
-            "ycen": float(y),
-            "fwhm": np.nan,
-        }
-        if gaussian:
-            fit = _gaussian_psf_photometry(
-                data, cube, lum_frame, x, y, aperture_radius, annulus_width,
-                mask_threshold)
-            if fit is None:
+        base = {"altitude": float(cat["Alt"][i]),
+                "azimuth": float(cat["Az"][i])}
+        if both:
+            ap = _aperture_measure(data, cube, x, y, aperture_radius,
+                                   annulus_width, saturation, channels)
+            ap_ok = _valid_fluxes(ap[f"flux_{c}"] for c in channels)
+            gfit = _gaussian_measure(data, cube, lum_frame, x, y,
+                                     aperture_radius, annulus_width,
+                                     mask_threshold, saturation, channels)
+            g_ok = gfit is not None and _valid_fluxes(
+                gfit[f"flux_{c}"] for c in channels)
+            if not (ap_ok or g_ok):
                 continue
-            row["xcen"] = fit["xcen"]
-            row["ycen"] = fit["ycen"]
-            row["fwhm"] = fit["fwhm"]
-            fluxes = []
-            for channel_index, channel in enumerate(channels):
-                flux = fit[f"flux_{channel}"]
-                fluxes.append(flux)
+            row = dict(base, xcen=float(x), ycen=float(y))
+            for channel in channels:
+                flux = ap[f"flux_{channel}"]
+                row[f"flux_{channel}_ap"] = flux
+                row[f"background_{channel}_ap"] = ap[f"background_{channel}"]
+                row[f"sat_{channel}_ap"] = ap[f"sat_{channel}"]
+                row[f"mag_{channel}_ap"] = (float(-2.5 * np.log10(flux))
+                                            if ap_ok else np.nan)
+            if gfit is not None:
+                row["xcen_gauss"] = gfit["xcen"]
+                row["ycen_gauss"] = gfit["ycen"]
+                row["fwhm"] = gfit["fwhm"]
+                for channel in channels:
+                    flux = gfit[f"flux_{channel}"]
+                    row[f"flux_{channel}_gauss"] = flux
+                    row[f"background_{channel}_gauss"] = \
+                        gfit[f"background_{channel}"]
+                    row[f"sat_{channel}_gauss"] = gfit[f"sat_{channel}"]
+                    row[f"mag_{channel}_gauss"] = (float(-2.5 * np.log10(flux))
+                                                   if g_ok else np.nan)
+            else:
+                row["xcen_gauss"] = np.nan
+                row["ycen_gauss"] = np.nan
+                row["fwhm"] = np.nan
+                for channel in channels:
+                    row[f"flux_{channel}_gauss"] = np.nan
+                    row[f"mag_{channel}_gauss"] = np.nan
+                    row[f"background_{channel}_gauss"] = np.nan
+                    row[f"sat_{channel}_gauss"] = np.nan
+        elif gaussian:
+            gfit = _gaussian_measure(data, cube, lum_frame, x, y,
+                                     aperture_radius, annulus_width,
+                                     mask_threshold, saturation, channels)
+            if gfit is None or not _valid_fluxes(
+                    gfit[f"flux_{c}"] for c in channels):
+                continue
+            row = dict(base, xcen=gfit["xcen"], ycen=gfit["ycen"],
+                       fwhm=gfit["fwhm"])
+            for channel in channels:
+                flux = gfit[f"flux_{channel}"]
                 row[f"flux_{channel}"] = flux
-                row[f"background_{channel}"] = fit[f"background_{channel}"]
-                row[f"sat_{channel}"] = _aperture_saturated(
-                    cube[channel_index], fit["xcen"], fit["ycen"],
-                    aperture_radius, saturation)
+                row[f"background_{channel}"] = gfit[f"background_{channel}"]
+                row[f"sat_{channel}"] = gfit[f"sat_{channel}"]
+                row[f"mag_{channel}"] = float(-2.5 * np.log10(flux))
         else:
-            fluxes = []
-            for channel_index, channel in enumerate(channels):
-                flux, background = _aperture_annulus_photometry(
-                    data[channel_index], x, y, aperture_radius, annulus_width)
-                fluxes.append(flux)
+            ap = _aperture_measure(data, cube, x, y, aperture_radius,
+                                   annulus_width, saturation, channels)
+            if not _valid_fluxes(ap[f"flux_{c}"] for c in channels):
+                continue
+            row = dict(base, xcen=float(x), ycen=float(y), fwhm=np.nan)
+            for channel in channels:
+                flux = ap[f"flux_{channel}"]
                 row[f"flux_{channel}"] = flux
-                row[f"background_{channel}"] = background
-                row[f"sat_{channel}"] = _aperture_saturated(
-                    cube[channel_index], x, y, aperture_radius, saturation)
-        if any((not np.isfinite(flux)) or flux <= 0.0 for flux in fluxes):
-            continue
-        for channel, flux in zip(channels, fluxes):
-            row[f"mag_{channel}"] = float(-2.5 * np.log10(flux))
+                row[f"background_{channel}"] = ap[f"background_{channel}"]
+                row[f"sat_{channel}"] = ap[f"sat_{channel}"]
+                row[f"mag_{channel}"] = float(-2.5 * np.log10(flux))
         rows.append(row)
         labels.append(cat_labels[i])
 
     phot = pd.DataFrame(rows, index=labels, columns=columns)
     phot.index.name = "name"
-    phot = phot.sort_values("flux_g", ascending=False, na_position="last")
+    phot = phot.sort_values(sort_key, ascending=False, na_position="last")
     output_file = (_default_alcor_photometry_output(filename)
                    if output_file is None else Path(output_file))
     phot.to_csv(output_file)
@@ -2825,6 +2922,9 @@ def alcor_star_photometry_cli():
                         help="Raw-ADU level at/above which an aperture pixel flags the channel saturated.")
     parser.add_argument("--gaussian", action="store_true",
                         help="Use constrained-Gaussian PSF photometry instead of aperture sums.")
+    parser.add_argument("--both", action="store_true",
+                        help="Measure both aperture and Gaussian in one pass into a single "
+                             "combined CSV (columns suffixed _ap / _gauss). Overrides --gaussian.")
     parser.add_argument("--mask-threshold", type=float,
                         default=ALCOR_NONLINEAR_THRESHOLD,
                         help="Raw-ADU level at/above which a pixel is excluded from the Gaussian fit.")
@@ -2849,6 +2949,7 @@ def alcor_star_photometry_cli():
         saturation=args.saturation,
         gaussian=args.gaussian,
         mask_threshold=args.mask_threshold,
+        both=args.both,
     )
     if output_file is not None:
         print(output_file)

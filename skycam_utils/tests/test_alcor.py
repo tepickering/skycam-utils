@@ -457,6 +457,105 @@ def test_alcor_star_photometry_cli_passes_gaussian_flags(monkeypatch):
     assert captured["mask_threshold"] == 12000.0
 
 
+def test_alcor_star_photometry_both_writes_combined_schema(tmp_path, monkeypatch):
+    cx, cy, sigma = 40.3, 39.7, 1.3
+    amps = (4000.0, 6000.0, 3000.0)
+    cube = _gaussian_star_cube(cx=cx, cy=cy, sigma=sigma, amps=amps)
+    _patch_single_star(monkeypatch, cube, px=40.0, py=40.0)
+
+    phot, output_file = alcor_star_photometry(
+        tmp_path / "s.fits", output_file=tmp_path / "out.csv",
+        both=True, aperture_radius=5.0, annulus_width=2.0)
+
+    for ch in "rgb":
+        for key in ("flux", "mag", "background", "sat"):
+            assert f"{key}_{ch}_ap" in phot.columns
+            assert f"{key}_{ch}_gauss" in phot.columns
+    assert {"xcen", "ycen", "xcen_gauss", "ycen_gauss", "fwhm"} <= set(phot.columns)
+    # no un-suffixed measurement columns leak through in combined mode
+    assert "flux_g" not in phot.columns
+    for idx, ch in enumerate("rgb"):
+        expected = amps[idx] * 2.0 * np.pi * sigma ** 2
+        np.testing.assert_allclose(
+            phot.loc["star", f"flux_{ch}_gauss"], expected, rtol=0.05)
+        assert phot.loc["star", f"flux_{ch}_ap"] > 0
+    np.testing.assert_allclose(
+        phot.loc["star", "fwhm"],
+        2.0 * np.sqrt(2.0 * np.log(2.0)) * sigma, rtol=0.05)
+    assert output_file.exists()
+
+
+def test_alcor_star_photometry_both_matches_single_modes(tmp_path, monkeypatch):
+    cube = _gaussian_star_cube(cx=40.0, cy=40.0, sigma=1.3,
+                               amps=(4000.0, 6000.0, 3000.0))
+    _patch_single_star(monkeypatch, cube, px=40.0, py=40.0)
+    phot_both, _ = alcor_star_photometry(
+        tmp_path / "b.fits", output_file=tmp_path / "b.csv",
+        both=True, aperture_radius=5.0, annulus_width=2.0)
+    _patch_single_star(monkeypatch, cube, px=40.0, py=40.0)
+    phot_ap, _ = alcor_star_photometry(
+        tmp_path / "a.fits", output_file=tmp_path / "a.csv",
+        gaussian=False, aperture_radius=5.0, annulus_width=2.0)
+    _patch_single_star(monkeypatch, cube, px=40.0, py=40.0)
+    phot_g, _ = alcor_star_photometry(
+        tmp_path / "g.fits", output_file=tmp_path / "g.csv",
+        gaussian=True, aperture_radius=5.0, annulus_width=2.0)
+
+    for ch in "rgb":
+        np.testing.assert_allclose(phot_both.loc["star", f"flux_{ch}_ap"],
+                                   phot_ap.loc["star", f"flux_{ch}"])
+        np.testing.assert_allclose(phot_both.loc["star", f"mag_{ch}_ap"],
+                                   phot_ap.loc["star", f"mag_{ch}"])
+        assert bool(phot_both.loc["star", f"sat_{ch}_ap"]) == \
+            bool(phot_ap.loc["star", f"sat_{ch}"])
+        np.testing.assert_allclose(phot_both.loc["star", f"flux_{ch}_gauss"],
+                                   phot_g.loc["star", f"flux_{ch}"])
+        np.testing.assert_allclose(phot_both.loc["star", f"mag_{ch}_gauss"],
+                                   phot_g.loc["star", f"mag_{ch}"])
+    np.testing.assert_allclose(phot_both.loc["star", "fwhm"],
+                               phot_g.loc["star", "fwhm"])
+    np.testing.assert_allclose(phot_both.loc["star", "xcen_gauss"],
+                               phot_g.loc["star", "xcen"])
+
+
+def test_alcor_star_photometry_both_keeps_aperture_when_gaussian_fails(
+        tmp_path, monkeypatch):
+    from skycam_utils import alcor
+    cube = _gaussian_star_cube(cx=40.0, cy=40.0, sigma=1.3,
+                               amps=(4000.0, 6000.0, 3000.0))
+    _patch_single_star(monkeypatch, cube, px=40.0, py=40.0)
+    monkeypatch.setattr(alcor, "_gaussian_psf_photometry",
+                        lambda *a, **k: None)
+
+    phot, _ = alcor_star_photometry(
+        tmp_path / "b.fits", output_file=tmp_path / "b.csv",
+        both=True, aperture_radius=5.0, annulus_width=2.0)
+
+    assert "star" in phot.index
+    assert phot.loc["star", "flux_g_ap"] > 0
+    assert np.isnan(phot.loc["star", "flux_g_gauss"])
+    assert np.isnan(phot.loc["star", "fwhm"])
+    assert np.isnan(phot.loc["star", "xcen_gauss"])
+
+
+def test_alcor_star_photometry_cli_passes_both_flag(monkeypatch):
+    from skycam_utils import alcor
+
+    captured = {}
+
+    def fake_photometry(*args, **kwargs):
+        captured.update(kwargs)
+        return None, None
+
+    monkeypatch.setattr(alcor, "alcor_star_photometry", fake_photometry)
+    monkeypatch.setattr(sys, "argv",
+                        ["alcor_star_photometry", "frame.fits", "--both"])
+
+    alcor.alcor_star_photometry_cli()
+
+    assert captured["both"] is True
+
+
 def test_alcor_star_photometry_cli_defaults_to_aperture(monkeypatch):
     from skycam_utils import alcor
 
@@ -473,6 +572,7 @@ def test_alcor_star_photometry_cli_defaults_to_aperture(monkeypatch):
     alcor.alcor_star_photometry_cli()
 
     assert captured["gaussian"] is False
+    assert captured["both"] is False
     assert captured["mask_threshold"] == alcor.ALCOR_NONLINEAR_THRESHOLD
 
 

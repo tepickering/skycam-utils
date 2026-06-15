@@ -44,6 +44,13 @@ ALCOR_HORIZON_RADIUS = 747
 ALCOR_SATURATION = 32767
 ALCOR_NONLINEAR_THRESHOLD = 15000   # raw ADU; per-pixel non-linearity onset
 
+# Adopted photometric calibration (see ALCOR_ZEROPOINTS). A single achromatic
+# extinction term applies to all three bands, and instrument magnitudes brighter
+# than the bright cut are in the CMOS non-linear regime where the calibration is
+# invalid. Both were established in docs/scripts/zeropoint_calib.py.
+ALCOR_AIRMASS_TERM = 0.40   # mag/airmass, single term for R/G/B
+ALCOR_BRIGHT_CUT = -11.5    # instr mag; brighter is non-linear, calibration void
+
 # minimum unmasked pixel counts for the Gaussian fits
 _GAUSS_MIN_LUM_PIXELS = 8            # 4-parameter luminance shape fit
 _GAUSS_MIN_CHANNEL_PIXELS = 3        # 1-parameter per-channel amplitude
@@ -123,6 +130,53 @@ ALCOR_YCEN = _LATEST_CALIBRATION["ycen"]
 ALCOR_RADIAL_COEFFS = _LATEST_CALIBRATION["radial_coeffs"]
 ALCOR_TANGENTIAL_COEFFS = _LATEST_CALIBRATION["tangential_coeffs"]
 ALCOR_AXIS_TILT = _LATEST_CALIBRATION["axis_tilt"]
+
+
+# Time-indexed photometric zeropoints calibrated on clear dark nights. They map
+# instrument R/G/B aperture magnitudes to catalog Johnson R/V/B via
+#   cat_mag = (instr_mag - ALCOR_AIRMASS_TERM*airmass) + zp + color_coeff*(B-V)
+# with the channel->catalog assignment G->V, R->R, B->B (see
+# ALCOR_ZEROPOINT_BANDS). G->V is essentially color-flat; R and B carry sizeable
+# B-V color terms set by the instrument bandpasses. The zeropoints were fit with
+# ALCOR_AIRMASS_TERM held fixed, so the term and the zeropoints are a matched
+# set. They are stable to ~0.03 mag across the two epochs (~21 months); add a new
+# epoch like ALCOR_CALIBRATIONS and the nearest epoch in time is used (see
+# alcor_zeropoint). Derived by docs/scripts/zeropoint_calib.py. `epoch` is the
+# calibration night (UT, not local night -- do not "fix" it).
+ALCOR_ZEROPOINTS = [
+    {"epoch": "2024-09-05",
+     "r": {"zp": 14.670, "color_coeff": -0.323},
+     "g": {"zp": 15.438, "color_coeff": -0.023},
+     "b": {"zp": 14.988, "color_coeff": 0.479}},
+    {"epoch": "2026-05-19",
+     "r": {"zp": 14.639, "color_coeff": -0.343},
+     "g": {"zp": 15.423, "color_coeff": -0.038},
+     "b": {"zp": 15.015, "color_coeff": 0.470}},
+]
+# instrument channel -> catalog Johnson band measured against
+ALCOR_ZEROPOINT_BANDS = {"r": "R", "g": "V", "b": "B"}
+
+
+def alcor_zeropoint(time=None):
+    """
+    Return the photometric-zeropoint dict whose epoch is nearest ``time``.
+
+    Mirrors :func:`alcor_calibration`: ``time`` is an astropy ``Time`` (an exact
+    tie resolves to the more recent epoch), and ``time=None`` returns the most
+    recent epoch. The returned dict is a deep-enough copy that its per-band
+    sub-dicts may be mutated freely without corrupting the table.
+    """
+    epochs = [(Time(z["epoch"], scale="utc"), z) for z in ALCOR_ZEROPOINTS]
+    if time is None:
+        chosen = max(epochs, key=lambda e: e[0].jd)[1]
+    else:
+        jds = np.array([e[0].jd for e in epochs])
+        dt = np.abs(jds - Time(time).jd)
+        # primary: smallest |dt|; tie-break: largest jd (more recent)
+        order = np.lexsort((-jds, dt))
+        chosen = epochs[order[0]][1]
+    return {key: (dict(value) if isinstance(value, dict) else value)
+            for key, value in chosen.items()}
 
 
 def _invert_radial(z_deg, radial_coeffs, n_iter=8):
@@ -1901,6 +1955,134 @@ def _gaussian_measure(data, cube, lum_frame, x, y, aperture_radius,
     return cols
 
 
+def _airmass(altitude_deg):
+    """
+    Kasten-Young airmass for an apparent altitude in degrees (scalar or array).
+    """
+    alt = np.asarray(altitude_deg, dtype=float)
+    return 1.0 / (np.sin(np.radians(alt))
+                  + 0.50572 * (alt + 6.07995) ** -1.6364)
+
+
+def _catalog_calibration_map():
+    """
+    Map each named-catalog star label to its catalog colors and magnitudes.
+
+    Keyed by the same labels :func:`_alcor_star_labels` assigns to photometry
+    rows, so the map joins directly against a photometry DataFrame. Each value is
+    a dict with ``BV`` (the B-V color) and the catalog Johnson magnitudes ``R``
+    (= V-(V-R)), ``V`` (= Vmag) and ``B`` (= V+(B-V)); any entry whose catalog
+    color is missing is ``nan``.
+    """
+    catpath = files(__package__) / "data" / "bright_star_sloan_named.fits"
+    cat = Table.read(str(catpath))
+    labels = _alcor_star_labels(cat)
+    out = {}
+    for label, row in zip(labels, cat):
+        def _value(name):
+            value = _catalog_value_to_python(row[name])
+            return np.nan if value is None else float(value)
+        v = _value("Vmag")
+        bv = _value("B-V")
+        vr = _value("V-R")
+        out[label] = {"BV": bv, "V": v, "R": v - vr, "B": v + bv}
+    return out
+
+
+def _zeropoint_row_params(df, time):
+    """
+    Per-row ``(zp, color_coeff)`` arrays for each band.
+
+    The zeropoint epoch is resolved from ``time`` when given, else per row from
+    an ``OBSTIME`` column when present, else the most recent epoch. Returns
+    ``(zp, color)`` where each is a ``{band: ndarray}`` aligned to ``df``'s rows.
+    """
+    n = len(df)
+    epoch_jds = np.array([Time(z["epoch"], scale="utc").jd
+                          for z in ALCOR_ZEROPOINTS])
+    if time is not None:
+        row_jd = np.full(n, Time(time).jd)
+    elif n and "OBSTIME" in df.columns:
+        row_jd = Time(np.asarray(df["OBSTIME"], dtype="datetime64[ns]")).jd
+        row_jd = np.atleast_1d(np.asarray(row_jd, dtype=float))
+    else:
+        row_jd = np.full(n, epoch_jds.max())
+    # nearest epoch per row; iterate ascending jd so a tie resolves to the more
+    # recent epoch (matching alcor_zeropoint / alcor_calibration).
+    pick = np.zeros(n, dtype=int)
+    best = np.full(n, np.inf)
+    for k in np.argsort(epoch_jds):
+        dist = np.abs(row_jd - epoch_jds[k])
+        take = dist <= best
+        pick[take] = k
+        best[take] = dist[take]
+    zp, color = {}, {}
+    for band in ALCOR_ZEROPOINT_BANDS:
+        zp_vals = np.array([z[band]["zp"] for z in ALCOR_ZEROPOINTS])
+        cc_vals = np.array([z[band]["color_coeff"] for z in ALCOR_ZEROPOINTS])
+        zp[band] = zp_vals[pick]
+        color[band] = cc_vals[pick]
+    return zp, color
+
+
+def alcor_calibrate_photometry(df, time=None):
+    """
+    Add calibrated catalog-system magnitudes and cloud-extinction offsets.
+
+    For every instrument magnitude column in ``df`` (``mag_{r,g,b}`` and any
+    ``_ap``/``_gauss`` suffixed variants) this adds two columns:
+
+    ``cal_{band}[suffix]``
+        the magnitude on the catalog system,
+        ``(instr_mag - ALCOR_AIRMASS_TERM*airmass) + zp + color_coeff*(B-V)``,
+        ``nan`` where the instrument mag is non-finite or brighter than
+        ``ALCOR_BRIGHT_CUT`` (the CMOS non-linear regime, where the calibration
+        is invalid).
+    ``ext_{band}[suffix]``
+        ``cal - catalog_mag``: the offset from the star's catalog magnitude --
+        the line-of-sight extinction (e.g. cloud attenuation) in magnitudes,
+        positive when the star is dimmer than catalog.
+
+    Zeropoints come from :func:`alcor_zeropoint`; the epoch is resolved from
+    ``time`` when given, else per row from an ``OBSTIME`` column when present,
+    else the most recent epoch. Star names come from a ``name`` column when
+    present, else the index. ``B-V`` and the catalog Johnson R/V/B are looked up
+    by name (channel->catalog G->V, R->R, B->B); stars absent from the catalog or
+    lacking the needed color get ``nan``. Requires an ``altitude`` column.
+    Returns a new DataFrame.
+    """
+    if "altitude" not in df.columns:
+        raise ValueError(
+            "alcor_calibrate_photometry requires an 'altitude' column")
+    df = df.copy()
+    names = (df["name"] if "name" in df.columns
+             else df.index.to_series()).astype(str)
+    cmap = _catalog_calibration_map()
+    bv = names.map(lambda name: cmap.get(name, {}).get("BV", np.nan)).to_numpy(
+        dtype=float)
+    catmag = {
+        band: names.map(
+            lambda name, cat=cat: cmap.get(name, {}).get(cat, np.nan)
+        ).to_numpy(dtype=float)
+        for band, cat in ALCOR_ZEROPOINT_BANDS.items()
+    }
+    airmass = _airmass(df["altitude"].to_numpy(dtype=float))
+    zp, color = _zeropoint_row_params(df, time)
+    for band in ALCOR_ZEROPOINT_BANDS:
+        for col in (f"mag_{band}", f"mag_{band}_ap", f"mag_{band}_gauss"):
+            if col not in df.columns:
+                continue
+            suffix = col[len(f"mag_{band}"):]
+            instr = df[col].to_numpy(dtype=float)
+            cal = (instr - ALCOR_AIRMASS_TERM * airmass
+                   + zp[band] + color[band] * bv)
+            cal = np.where(np.isfinite(instr) & (instr > ALCOR_BRIGHT_CUT),
+                           cal, np.nan)
+            df[f"cal_{band}{suffix}"] = cal
+            df[f"ext_{band}{suffix}"] = cal - catmag[band]
+    return df
+
+
 def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
                           annulus_width=1.0, min_altitude=20.0,
                           vmag_limit=5.5, refraction=True, masks_dir=None,
@@ -1938,13 +2120,22 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
     yields finite positive flux in all channels, with the failed method's columns
     NaN; rows sort by ``flux_g_ap``. ``both`` takes precedence over ``gaussian``.
 
+    Every measured magnitude is calibrated to the catalog system via
+    :func:`alcor_calibrate_photometry` (using the frame time to resolve the
+    zeropoint epoch), adding per-channel ``cal_*`` (calibrated catalog-system
+    magnitude: G->V, R->R, B->B) and ``ext_*`` (the calibrated-minus-catalog
+    offset, i.e. the line-of-sight cloud extinction in magnitudes). Both are NaN
+    for measurements brighter than ``ALCOR_BRIGHT_CUT`` (CMOS non-linear regime)
+    or for stars lacking a catalog color.
+
     Returns
     -------
     phot : `pandas.DataFrame`
         Rows indexed by star name. Columns are ``altitude``, ``azimuth``,
-        ``xcen``, ``ycen`` and per-channel ``flux_*``, ``mag_*``,
-        ``background_*``, ``sat_*`` for ``r``, ``g``, ``b``. Rows are sorted by
-        descending ``flux_g``. Empty when the frame is rejected.
+        ``xcen``, ``ycen`` and per-channel ``flux_*``, ``mag_*``, ``cal_*``,
+        ``ext_*``, ``background_*``, ``sat_*`` for ``r``, ``g``, ``b`` (suffixed
+        ``_ap``/``_gauss`` in ``both`` mode). Rows are sorted by descending
+        ``flux_g``. Empty when the frame is rejected.
     output_file : `~pathlib.Path` or None
         CSV path written, or None when the frame is rejected.
     """
@@ -1957,16 +2148,19 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
         columns = ["altitude", "azimuth", "xcen", "ycen"]
         for channel in channels:
             columns += [f"flux_{channel}_ap", f"mag_{channel}_ap",
+                        f"cal_{channel}_ap", f"ext_{channel}_ap",
                         f"background_{channel}_ap", f"sat_{channel}_ap"]
         columns += ["xcen_gauss", "ycen_gauss", "fwhm"]
         for channel in channels:
             columns += [f"flux_{channel}_gauss", f"mag_{channel}_gauss",
+                        f"cal_{channel}_gauss", f"ext_{channel}_gauss",
                         f"background_{channel}_gauss", f"sat_{channel}_gauss"]
         sort_key = "flux_g_ap"
     else:
         columns = ["altitude", "azimuth", "xcen", "ycen", "fwhm"]
         for channel in channels:
             columns += [f"flux_{channel}", f"mag_{channel}",
+                        f"cal_{channel}", f"ext_{channel}",
                         f"background_{channel}", f"sat_{channel}"]
         sort_key = "flux_g"
     empty = pd.DataFrame(columns=columns)
@@ -2077,6 +2271,7 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
 
     phot = pd.DataFrame(rows, index=labels, columns=columns)
     phot.index.name = "name"
+    phot = alcor_calibrate_photometry(phot, time=time)
     phot = phot.sort_values(sort_key, ascending=False, na_position="last")
     output_file = (_default_alcor_photometry_output(filename)
                    if output_file is None else Path(output_file))

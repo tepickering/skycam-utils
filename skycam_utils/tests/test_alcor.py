@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 from astropy.io import fits
 from astropy.table import Table
@@ -30,6 +31,8 @@ from skycam_utils.alcor import (
     alcor_proc_fits,
     alcor_star_photometry,
     alcor_star_photometry_cli,
+    alcor_calibrate_photometry,
+    alcor_zeropoint,
     build_alcor_wcs,
     load_alcor_keogram_fits,
     load_alcor_fits,
@@ -554,6 +557,121 @@ def test_alcor_star_photometry_cli_passes_both_flag(monkeypatch):
     alcor.alcor_star_photometry_cli()
 
     assert captured["both"] is True
+
+
+def test_alcor_zeropoint_resolves_nearest_epoch():
+    from astropy.time import Time
+    from skycam_utils.alcor import ALCOR_ZEROPOINTS
+
+    early = alcor_zeropoint(Time("2024-09-10T00:00:00"))
+    assert early["epoch"] == "2024-09-05"
+    late = alcor_zeropoint(Time("2026-05-01T00:00:00"))
+    assert late["epoch"] == "2026-05-19"
+    # time=None resolves to the most recent epoch
+    assert alcor_zeropoint()["epoch"] == max(z["epoch"] for z in ALCOR_ZEROPOINTS)
+    # each band carries a zeropoint and a color coefficient
+    for band in "rgb":
+        assert "zp" in late[band] and "color_coeff" in late[band]
+    # the returned dict is a copy: mutating it does not corrupt the table
+    early["g"]["zp"] = -999.0
+    assert alcor_zeropoint(Time("2024-09-10T00:00:00"))["g"]["zp"] != -999.0
+
+
+def test_alcor_calibrate_photometry_adds_calibrated_and_offset(monkeypatch):
+    from astropy.time import Time
+    from skycam_utils import alcor
+    from skycam_utils.alcor import ALCOR_AIRMASS_TERM, _airmass
+
+    cmap = {"teststar": {"BV": 0.6, "V": 3.0, "R": 2.6, "B": 3.6}}
+    monkeypatch.setattr(alcor, "_catalog_calibration_map", lambda: cmap)
+    df = pd.DataFrame(
+        {"altitude": [60.0], "mag_r": [-9.0], "mag_g": [-9.2], "mag_b": [-8.5]},
+        index=pd.Index(["teststar"], name="name"))
+
+    time = Time("2024-09-06T00:00:00")
+    out = alcor_calibrate_photometry(df, time=time)
+    zp = alcor_zeropoint(time)
+    airmass = _airmass(60.0)
+    for band, catband in (("r", "R"), ("g", "V"), ("b", "B")):
+        instr = float(df[f"mag_{band}"].iloc[0])
+        expected_cal = (instr - ALCOR_AIRMASS_TERM * airmass
+                        + zp[band]["zp"] + zp[band]["color_coeff"] * 0.6)
+        assert out[f"cal_{band}"].iloc[0] == pytest.approx(expected_cal)
+        assert out[f"ext_{band}"].iloc[0] == pytest.approx(
+            expected_cal - cmap["teststar"][catband])
+
+
+def test_alcor_calibrate_photometry_handles_both_suffixes(monkeypatch):
+    from astropy.time import Time
+    from skycam_utils import alcor
+
+    monkeypatch.setattr(alcor, "_catalog_calibration_map",
+                        lambda: {"s": {"BV": 0.0, "V": 2.0, "R": 2.0, "B": 2.0}})
+    df = pd.DataFrame(
+        {"altitude": [80.0],
+         "mag_r_ap": [-9.0], "mag_g_ap": [-9.0], "mag_b_ap": [-9.0],
+         "mag_r_gauss": [-9.1], "mag_g_gauss": [-9.1], "mag_b_gauss": [-9.1]},
+        index=pd.Index(["s"], name="name"))
+
+    out = alcor_calibrate_photometry(df, time=Time("2026-05-20T00:00:00"))
+    for band in "rgb":
+        for suffix in ("_ap", "_gauss"):
+            assert f"cal_{band}{suffix}" in out.columns
+            assert f"ext_{band}{suffix}" in out.columns
+            assert np.isfinite(out[f"cal_{band}{suffix}"].iloc[0])
+
+
+def test_alcor_calibrate_photometry_nans_bright_and_unknown(monkeypatch):
+    from astropy.time import Time
+    from skycam_utils import alcor
+    from skycam_utils.alcor import ALCOR_BRIGHT_CUT
+
+    monkeypatch.setattr(alcor, "_catalog_calibration_map",
+                        lambda: {"known": {"BV": 0.5, "V": 3.0, "R": 2.7, "B": 3.5}})
+    df = pd.DataFrame(
+        {"altitude": [70.0, 70.0, 70.0],
+         "mag_g": [ALCOR_BRIGHT_CUT - 1.0, -9.0, -9.0]},
+        index=pd.Index(["known", "known", "unknown"], name="name"))
+
+    out = alcor_calibrate_photometry(df, time=Time("2024-09-06T00:00:00"))
+    # row 0: known star but brighter than the cut -> non-linear -> NaN
+    assert np.isnan(out["cal_g"].iloc[0])
+    # row 1: known star, linear regime -> finite calibrated mag and offset
+    assert np.isfinite(out["cal_g"].iloc[1])
+    assert np.isfinite(out["ext_g"].iloc[1])
+    # row 2: star absent from the catalog (no color) -> NaN
+    assert np.isnan(out["cal_g"].iloc[2])
+
+
+def test_alcor_star_photometry_includes_calibrated_columns(tmp_path, monkeypatch):
+    from skycam_utils import alcor
+    from skycam_utils.alcor import ALCOR_AIRMASS_TERM, _airmass
+
+    cube = _gaussian_star_cube(cx=40.3, cy=39.7, sigma=1.3,
+                               amps=(800.0, 1200.0, 600.0))
+    _patch_single_star(monkeypatch, cube, px=40.0, py=40.0)
+    cmap = {"star": {"BV": 0.5, "V": 3.0, "R": 2.7, "B": 3.5}}
+    monkeypatch.setattr(alcor, "_catalog_calibration_map", lambda: cmap)
+
+    phot, output_file = alcor_star_photometry(
+        tmp_path / "s.fits", output_file=tmp_path / "s.csv",
+        aperture_radius=5.0, annulus_width=2.0)
+
+    for band in "rgb":
+        assert f"cal_{band}" in phot.columns
+        assert f"ext_{band}" in phot.columns
+        assert np.isfinite(phot.loc["star", f"cal_{band}"])
+        assert np.isfinite(phot.loc["star", f"ext_{band}"])
+    # the calibrated G maps to catalog V via the resolved zeropoint
+    zp = alcor_zeropoint(alcor._alcor_frame_time(tmp_path / "s.fits"))["g"]
+    instr = float(phot.loc["star", "mag_g"])
+    airmass = _airmass(float(phot.loc["star", "altitude"]))
+    expected = instr - ALCOR_AIRMASS_TERM * airmass + zp["zp"] + zp["color_coeff"] * 0.5
+    assert phot.loc["star", "cal_g"] == pytest.approx(expected)
+    assert phot.loc["star", "ext_g"] == pytest.approx(expected - 3.0)
+    # columns survive the round trip to disk
+    disk = pd.read_csv(output_file)
+    assert {"cal_g", "ext_g", "cal_r", "ext_b"} <= set(disk.columns)
 
 
 def test_alcor_star_photometry_cli_defaults_to_aperture(monkeypatch):

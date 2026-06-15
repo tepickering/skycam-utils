@@ -47,9 +47,14 @@ ALCOR_NONLINEAR_THRESHOLD = 15000   # raw ADU; per-pixel non-linearity onset
 # Adopted photometric calibration (see ALCOR_ZEROPOINTS). A single achromatic
 # extinction term applies to all three bands, and instrument magnitudes brighter
 # than the bright cut are in the CMOS non-linear regime where the calibration is
-# invalid. Both were established in docs/scripts/zeropoint_calib.py.
+# invalid. The airmass term was established in docs/scripts/zeropoint_calib.py.
+# The bright cut is set by docs/scripts/nonlin_binned.py: with intra-pixel jitter
+# averaged out (15-min per-star medians), the bright-star magnitude deficit onsets
+# near -11.5 but stays small and ~linear out to -12.5, then accelerates steeply.
+# -12.5 is the linear-regime cutoff; brighter than that is sparse/inconclusive and
+# dropped pending more calibration nights.
 ALCOR_AIRMASS_TERM = 0.40   # mag/airmass, single term for R/G/B
-ALCOR_BRIGHT_CUT = -11.5    # instr mag; brighter is non-linear, calibration void
+ALCOR_BRIGHT_CUT = -12.5    # instr mag; brighter is non-linear, calibration void
 
 # minimum unmasked pixel counts for the Gaussian fits
 _GAUSS_MIN_LUM_PIXELS = 8            # 4-parameter luminance shape fit

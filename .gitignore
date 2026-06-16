@@ -110,6 +110,7 @@ venv.bak/
 data/
 
 *.png
-!docs/gplots/*.png   # reference calibration figures, kept in the repo on purpose
+# reference calibration figures, kept in the repo on purpose
+!docs/gplots/*.png
 .DS_Store
 latest_movie.sh~

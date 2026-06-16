@@ -2214,7 +2214,13 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
         time, vmag_limit=vmag_limit, min_alt=min_altitude,
         refraction=refraction,
     )
-    xcen, ycen = wcs.world_to_pixel_values(cat["Az"], cat["Alt"])
+    # all_world2pix with quiet=True returns the best (possibly unconverged)
+    # estimate instead of warning: the iterative SIP/radial inverse fails its
+    # tight tolerance for stars at alt <~ 1 deg (largest radii, steepest radial
+    # distortion), but the returned pixel is still good to well under a pixel and
+    # those horizon stars are the least critical. Equivalent to world_to_pixel_values
+    # otherwise (verified byte-identical above the horizon).
+    xcen, ycen = wcs.all_world2pix(cat["Az"], cat["Alt"], 0, quiet=True)
     xcen = np.asarray(xcen, dtype=float)
     ycen = np.asarray(ycen, dtype=float)
 

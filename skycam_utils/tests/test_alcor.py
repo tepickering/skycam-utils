@@ -251,6 +251,9 @@ def test_alcor_star_photometry_retains_nonpositive_channel_flux(tmp_path, monkey
         def world_to_pixel_values(self, az, alt):
             return np.array([15.0, 40.0]), np.array([15.0, 40.0])
 
+        def all_world2pix(self, az, alt, origin, quiet=False):
+            return self.world_to_pixel_values(az, alt)
+
     cat = Table({
         "NAME": ["full", "noG"],
         "HD": [1, 2],
@@ -316,6 +319,9 @@ def test_alcor_star_photometry_flags_saturation(tmp_path, monkeypatch):
         def world_to_pixel_values(self, az, alt):
             return np.array([15.0, 40.0]), np.array([15.0, 40.0])
 
+        def all_world2pix(self, az, alt, origin, quiet=False):
+            return self.world_to_pixel_values(az, alt)
+
     cat = Table({
         "NAME": ["bright", "faint"],
         "HD": [1, 2],
@@ -361,6 +367,9 @@ def _patch_single_star(monkeypatch, cube, px, py):
     class FakeWCS:
         def world_to_pixel_values(self, az, alt):
             return np.array([float(px)]), np.array([float(py)])
+
+        def all_world2pix(self, az, alt, origin, quiet=False):
+            return self.world_to_pixel_values(az, alt)
 
     cat = Table({"NAME": ["star"], "HD": [1], "Alt": [80.0], "Az": [10.0]})
     monkeypatch.setattr(alcor, "_alcor_frame_time",
@@ -713,6 +722,9 @@ def test_alcor_star_photometry_default_vmag_limit_is_5p5(monkeypatch, tmp_path):
     class FakeWCS:
         def world_to_pixel_values(self, az, alt):
             return np.array([10.0]), np.array([10.0])
+
+        def all_world2pix(self, az, alt, origin, quiet=False):
+            return self.world_to_pixel_values(az, alt)
 
     seen = {}
     monkeypatch.setattr(alcor, "_alcor_frame_time",

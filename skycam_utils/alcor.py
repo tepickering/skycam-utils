@@ -1483,6 +1483,68 @@ def _apply_badpix_repair(data, mask, ksize=5):
     return out
 
 
+_HORIZON_DATE_RE = re.compile(r"alcor_horizon_(\d{4})-(\d{2})-(\d{2})\.fits(\.gz)?$")
+
+
+def _resolve_horizon_dir(masks_dir=None):
+    """
+    Directory holding the date-stamped horizon (sky / not-sky) pixel masks.
+
+    Resolution order: explicit ``masks_dir`` -> ``$ALCOR_HORIZON_DIR`` -> the
+    packaged ``skycam_utils/data/horizon/`` (mirroring :func:`_resolve_badpix_dir`).
+    """
+    if masks_dir is not None:
+        return Path(masks_dir)
+    env = os.environ.get("ALCOR_HORIZON_DIR")
+    if env:
+        return Path(env)
+    return Path(str(files(__package__) / "data" / "horizon"))
+
+
+def load_alcor_horizon_mask(time, masks_dir=None):
+    """
+    Return ``(mask, date)`` for the horizon mask nearest in date to ``time``.
+
+    ``mask`` is a ``(ny, nx)`` bool array in the raw camera frame where ``True``
+    marks **not-sky** pixels -- obstructions above the horizon (terrain, the
+    buildings, the lightning rod) together with everything at or below altitude
+    0 -- so the valid sky region is ``~mask``. ``(None, None)`` if no masks are
+    found. ``time`` may be a `~astropy.time.Time`, ``datetime``, or ``date``.
+
+    Unlike the per-channel bad-pixel mask this is a single achromatic 2-D plane
+    (the horizon is the same for R/G/B), and it is an *exclusion* mask -- it is
+    not used to repair pixels, only to select valid sky for sky-background /
+    cloud-extinction maps. It is built offline by
+    ``claude_docs/scripts/horizon_floodfill.py`` (a Sobel-edge flood-fill of a
+    cloudy-night median, with the SW->W building sector filled from the
+    undetected-star patch) and is resolved by date the same way as the
+    calibration and bad-pixel assets, so a camera move is handled by adding a
+    new epoch.
+    """
+    directory = Path(str(_resolve_horizon_dir(masks_dir)))
+    if not directory.is_dir():
+        return None, None
+    candidates = []
+    for p in directory.iterdir():
+        m = _HORIZON_DATE_RE.match(p.name)
+        if m:
+            candidates.append(
+                (date(int(m.group(1)), int(m.group(2)), int(m.group(3))), p))
+    if not candidates:
+        return None, None
+
+    if isinstance(time, Time):
+        target = time.to_datetime().date()
+    elif isinstance(time, datetime):
+        target = time.date()
+    else:
+        target = time
+    best_date, best_path = min(candidates,
+                               key=lambda dp: (abs((dp[0] - target).days), dp[0]))
+    mask = np.asarray(fits.getdata(best_path)).astype(bool)
+    return mask, best_date
+
+
 ALCOR_PRESSURE = 760 * u.hPa        # ~0.75 atm at the MMT 2600 m elevation
 ALCOR_TEMPERATURE = 10 * u.deg_C
 ALCOR_HUMIDITY = 0.2

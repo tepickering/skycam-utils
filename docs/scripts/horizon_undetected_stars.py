@@ -1,23 +1,41 @@
-"""Overlay undetected catalog-star positions on the night luminance co-add.
+"""Overlay detected/undetected catalog-star density on the night luminance co-add.
 
-A new probe for the Alcor horizon map: instead of inferring the obstruction
-boundary from the star-trail / coverage field (which follows sky structure, not
-the building), use the catalog stars themselves. `alcor_star_photometry` predicts
-every bright star's raw pixel from the WCS and measures fixed-position photometry
-down to alt 0; a star is "undetected" when its aperture flux is 0 (blocked by the
-building/terrain, below the horizon, or lost in cloud). Accumulated over a whole
-night, the undetected positions trace the obstruction silhouette directly, because
-the building blocks each star as its arc sweeps behind the roofline.
+A probe for the Alcor horizon map: instead of inferring the obstruction boundary
+from the star-trail / coverage field (which follows sky structure, not the
+building), use the catalog stars themselves. `alcor_star_photometry` predicts every
+bright star's raw pixel from the WCS and measures fixed-position photometry down to
+alt 0; accumulated over a night the positions trace the geometry directly, because
+each star's arc sweeps behind the roofline.
 
-All nights' non-detections are combined onto one co-add. The WCS is stable to
-~1 px across the 2024 and 2026 epochs, so the raw pixel positions are stacked
-directly (no reprojection). For definition the points are rendered as a smoothed
-2D-density heatmap with a low threshold, which sharpens the obstruction edges and
-suppresses the sparse interior speckle (faint-limit / transient-cloud misses).
+Two photometry methods give two discriminants (the CSVs are produced with --both):
+
+- *aperture* (``flux_g_ap``): a detection is any positive aperture sum. Sensitive,
+  but reflected light off the buildings leaks into the aperture and registers as a
+  spurious detection, so the obstruction holes in the detected map are not fully
+  dark.
+- *Gaussian* (``flux_g_gauss``): a detection requires a compact PSF to fit within
+  bounds and project to positive amplitude. Diffuse reflected building light fails
+  this (the width hits the aperture bound, or the amplitude is ~0/negative), so a
+  successful Gaussian fit is a stronger "real star" flag and the obstruction holes
+  come out cleaner.
+
+For each method both senses are rendered: *undetected* density traces where stars
+go missing (the obstruction silhouette, contaminated by transient cloud and the
+faint limit), and *detected* density traces where stars are seen (a fixed
+obstruction is a hole; an intermittently-blocked area still accumulates detections,
+so it appears in both). Comparing senses and methods discriminates real obstruction
+from "sometimes seen, sometimes not" and from aperture reflection artifacts.
+
+All nights' positions are combined onto one co-add. The WCS is stable to ~1 px
+across the 2024 and 2026 epochs, so the raw pixel positions are stacked directly
+(no reprojection). Points are rendered as a smoothed 2D-density heatmap with a low
+threshold, which sharpens the edges and suppresses sparse interior speckle. Density
+uses the shared WCS-predicted ``xcen``/``ycen`` for every map, so the geometry is
+identical across methods.
 
 In the raw frame as displayed (origin="lower"): N up, E left, S down, W right.
 
-Writes one figure to ../gplots. Not part of the installed package.
+Writes four figures to ../gplots. Not part of the installed package.
 """
 import glob
 import os
@@ -47,7 +65,7 @@ NIGHTS = [
 ]
 TARGET = "2026-05-18"   # co-add to display (WCS ~1 px stable between epochs)
 
-USECOLS = ["xcen", "ycen", "flux_g_ap"]
+USECOLS = ["xcen", "ycen", "flux_g_ap", "flux_g_gauss"]
 
 # ---- tunables ----
 BIN_PX = 2.5      # density bin size, native px
@@ -55,8 +73,8 @@ SMOOTH = 1.0      # gaussian smoothing of the density, in bins
 THR = 2.0         # mask density below this (counts) -> kills interior speckle
 
 
-def collect_undetected(night_dir):
-    """WCS-predicted pixel positions of undetected stars (G aperture flux <= 0)."""
+def collect_night(night_dir):
+    """Concatenated photometry (USECOLS) for one night, with a detection summary."""
     frames = sorted(glob.glob(os.path.join(night_dir, "*_phot.csv")))
     parts = []
     for f in frames:
@@ -65,11 +83,44 @@ def collect_undetected(night_dir):
         except Exception as exc:
             print(f"  skip {os.path.basename(f)}: {exc}")
     df = pd.concat(parts, ignore_index=True)
-    undet = df["flux_g_ap"] <= 0
-    print(f"  {len(frames)} frames, {len(df)} measurements, "
-          f"{undet.sum()} undetected ({100 * undet.mean():.1f}%)")
-    sub = df.loc[undet, ["xcen", "ycen"]]
-    return sub["xcen"].to_numpy(), sub["ycen"].to_numpy()
+    n = len(df)
+    ap = int((df["flux_g_ap"] > 0).sum())
+    gz = int((df["flux_g_gauss"] > 0).sum())
+    print(f"  {len(frames)} frames, {n} measurements: "
+          f"aperture {ap} det ({100*(n-ap)/n:.1f}% undet), "
+          f"Gaussian {gz} det ({100*(n-gz)/n:.1f}% undet)")
+    return df
+
+
+def render_density(px, py, sub, al, geom, label, title, out):
+    """Render one smoothed-density heatmap over the co-add crop and save it."""
+    xs, ys, w, h = geom
+    nbx, nby = int(w / BIN_PX), int(h / BIN_PX)
+    H, _, _ = np.histogram2d(px, py, bins=[nbx, nby],
+                             range=[[xs, xs + w], [ys, ys + h]])
+    H = ndi.gaussian_filter(H, SMOOTH)
+    dens = np.ma.masked_less(H.T, THR)   # transpose: histogram2d is [x, y]
+
+    fig, ax = plt.subplots(figsize=(13, 13))
+    norm = ImageNormalize(sub, interval=PercentileInterval(99.3),
+                          stretch=AsinhStretch(a=0.02))
+    ax.imshow(sub, origin="lower", cmap="gray", norm=norm, extent=[0, w, 0, h])
+    im = ax.imshow(dens, origin="lower", cmap="inferno", alpha=0.78,
+                   norm=PowerNorm(0.5), extent=[0, w, 0, h])
+    ax.contour(al, levels=[0, 10, 20], colors="cyan", linewidths=0.4, alpha=0.6)
+    ax.contour(al, levels=[25], colors="yellow", linewidths=0.8, alpha=0.8)
+    for fx, fy, lab in [(0.5, 0.985, "N"), (0.5, 0.015, "S"),
+                        (0.015, 0.5, "E"), (0.985, 0.5, "W")]:
+        ax.text(fx, fy, lab, transform=ax.transAxes, color="yellow",
+                fontsize=15, ha="center", va="center", weight="bold")
+    cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
+    cb.set_label(label)
+    ax.set_title(title)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    fig.savefig(out, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+    print("wrote", out)
 
 
 def main():
@@ -87,15 +138,16 @@ def main():
     world = wcs.all_pix2world(np.column_stack([xx.ravel(), yy.ravel()]), 0)
     alt = world[:, 1].reshape(ny, nx)
 
-    xs_all, ys_all = [], []
+    dfs = []
     for night, ddir in NIGHTS:
         print(night)
-        ux, uy = collect_undetected(ddir)
-        xs_all.append(ux)
-        ys_all.append(uy)
-    ux = np.concatenate(xs_all)
-    uy = np.concatenate(ys_all)
-    print(f"combined undetected positions: {len(ux)}")
+        dfs.append(collect_night(ddir))
+    df = pd.concat(dfs, ignore_index=True)
+    x, y = df["xcen"].to_numpy(), df["ycen"].to_numpy()
+    ap_det = (df["flux_g_ap"] > 0).to_numpy()
+    gauss_det = (df["flux_g_gauss"] > 0).to_numpy()   # NaN (fit failed) -> False
+    print(f"combined {len(df)} measurements: "
+          f"aperture {ap_det.sum()} det, Gaussian {gauss_det.sum()} det")
 
     zp = wcs.all_world2pix([[0.0, 90.0]], 0)[0]
     half = int(cal["horizon_radius"] * 1.02)
@@ -103,38 +155,23 @@ def main():
     xs, ys = max(0, x0 - half), max(0, y0 - half)
     xe, ye = min(nx, x0 + half), min(ny, y0 + half)
     sub, al = coadd[ys:ye, xs:xe], alt[ys:ye, xs:xe]
-    w, h = xe - xs, ye - ys
+    geom = (xs, ys, xe - xs, ye - ys)
 
-    nbx, nby = int(w / BIN_PX), int(h / BIN_PX)
-    H, _, _ = np.histogram2d(ux, uy, bins=[nbx, nby],
-                             range=[[xs, xe], [ys, ye]])
-    H = ndi.gaussian_filter(H, SMOOTH)
-    dens = np.ma.masked_less(H.T, THR)   # transpose: histogram2d is [x, y]
-
-    fig, ax = plt.subplots(figsize=(13, 13))
-    norm = ImageNormalize(sub, interval=PercentileInterval(99.3),
-                          stretch=AsinhStretch(a=0.02))
-    ax.imshow(sub, origin="lower", cmap="gray", norm=norm,
-              extent=[0, w, 0, h])
-    im = ax.imshow(dens, origin="lower", cmap="inferno", alpha=0.78,
-                   norm=PowerNorm(0.5), extent=[0, w, 0, h])
-    ax.contour(al, levels=[0, 10, 20], colors="cyan", linewidths=0.4, alpha=0.6)
-    ax.contour(al, levels=[25], colors="yellow", linewidths=0.8, alpha=0.8)
-    for fx, fy, lab in [(0.5, 0.985, "N"), (0.5, 0.015, "S"),
-                        (0.015, 0.5, "E"), (0.985, 0.5, "W")]:
-        ax.text(fx, fy, lab, transform=ax.transAxes, color="yellow",
-                fontsize=15, ha="center", va="center", weight="bold")
-    cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
-    cb.set_label("undetected-star density (both nights)")
     nights_label = " + ".join(n for n, _ in NIGHTS)
-    ax.set_title(f"Undetected catalog stars, {nights_label} combined "
-                 f"({len(ux)} positions)  on {TARGET} co-add")
-    ax.set_xticks([])
-    ax.set_yticks([])
-    out = f"{OUT}/alcor_undetected_stars.png"
-    fig.savefig(out, dpi=120, bbox_inches="tight")
-    plt.close(fig)
-    print("wrote", out)
+    nn = len(NIGHTS)
+    combos = [
+        ("undetected", "aperture", ~ap_det, "alcor_undetected_stars.png"),
+        ("detected", "aperture", ap_det, "alcor_detected_stars.png"),
+        ("undetected", "Gaussian", ~gauss_det, "alcor_undetected_stars_gauss.png"),
+        ("detected", "Gaussian", gauss_det, "alcor_detected_stars_gauss.png"),
+    ]
+    for sense, method, mask, fname in combos:
+        render_density(
+            x[mask], y[mask], sub, al, geom,
+            label=f"{sense}-star density, {method} ({nn} nights)",
+            title=f"{sense.capitalize()} catalog stars ({method}), {nights_label} "
+                  f"combined ({int(mask.sum())} positions)  on {TARGET} co-add",
+            out=f"{OUT}/{fname}")
 
 
 if __name__ == "__main__":

@@ -44,6 +44,18 @@ ALCOR_HORIZON_RADIUS = 747
 ALCOR_SATURATION = 32767
 ALCOR_NONLINEAR_THRESHOLD = 15000   # raw ADU; per-pixel non-linearity onset
 
+# Photometric-calibration reference exposure. The zeropoints (ALCOR_ZEROPOINTS)
+# were derived from frames taken at the dark-condition default of 20 s, so the
+# instrumental fluxes are effectively counts/(20 s). Counts are linear in
+# exposure, so raw counts from a frame at a different EXPOSURE are scaled to this
+# reference before the zeropoint is applied (see plot_alcor_sky_brightness).
+ALCOR_CALIB_EXPTIME = 20.0   # seconds
+# Sky-brightness saturation / strong-non-linearity ceiling: raw pixels at or
+# above this are clipped or badly non-linear and are masked in surface-brightness
+# maps. Lower than the 15-bit hard ceiling ALCOR_SATURATION used for star sat_*
+# flags, because the per-pixel response departs from linear well before clipping.
+ALCOR_SB_SATURATION = 25000   # raw ADU
+
 # Adopted photometric calibration (see ALCOR_ZEROPOINTS). A single achromatic
 # extinction term applies to all three bands, and instrument magnitudes brighter
 # than the bright cut are in the CMOS non-linear regime where the calibration is
@@ -1009,6 +1021,22 @@ def _read_frame_date(filename):
     Return a FITS file's DATE (UT) header string, for dark-frame selection.
     """
     return fits.getheader(filename)["DATE"]
+
+
+def _read_frame_exposure(filename, default=ALCOR_CALIB_EXPTIME):
+    """
+    Return a frame's EXPOSURE (seconds) header value, ``default`` if absent or
+    unreadable. Used to scale raw counts to the calibration reference exposure.
+    """
+    try:
+        value = fits.getheader(filename).get("EXPOSURE", default)
+    except (KeyError, OSError):
+        return float(default)
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    return value if value > 0 else float(default)
 
 
 def _alcor_frame_calibration(filename):
@@ -2857,6 +2885,83 @@ def _parse_timestamps(timestamps):
         return None
 
 
+def _alcor_zenith_crop_bounds(wcs, ny, nx, radius):
+    """
+    Integer crop bounds for a ``radius``-pixel square around the WCS zenith.
+
+    Returns ``(xz, yz, xl, xu, yl, yu)``: the 0-based zenith pixel and the crop
+    slice limits clipped to the ``(ny, nx)`` image.
+    """
+    zx, zy = wcs.world_to_pixel_values(0.0, 90.0)
+    xz = int(round(float(zx)))
+    yz = int(round(float(zy)))
+    yl, yu = max(0, yz - radius), min(ny, yz + radius)
+    xl, xu = max(0, xz - radius), min(nx, xz + radius)
+    return xz, yz, xl, xu, yl, yu
+
+
+def _add_alcor_alt_az_grid(fig, wcs, xz, yz, radius, color="white",
+                           label_color="silver", grid_color=None,
+                           grid_alpha=0.5):
+    """
+    Overlay an altitude/azimuth polar grid on an alcor crop figure.
+
+    ``(xz, yz)`` is the zenith pixel and ``radius`` the crop half-width, so r=1
+    on the polar axes is ``radius`` pixels from the zenith. Altitude-ring radii
+    are mapped through the WCS so they track the real (distorted) geometry. The
+    polar axes is added at the default 111 position, matching a full-figure image
+    axes created by ``plt.subplots``. ``color`` is the altitude-label colour (the
+    rings sit inside the FOV), ``label_color`` the azimuth-label colour (those sit
+    outside the FOV), and ``grid_color`` (when given) the grid-line colour.
+    """
+    pax = fig.add_subplot(111, polar=True, label="polar")
+    pax.set_facecolor("None")
+    pax.set_theta_zero_location("N")
+    tick_alts = np.array([75, 60, 45, 30, 15])
+    px, py = wcs.world_to_pixel_values(np.zeros_like(tick_alts, dtype=float),
+                                       tick_alts.astype(float))
+    yticks = np.hypot(px - xz, py - yz) / radius
+    ylabels = [f" {a}°" for a in tick_alts]
+    pax.set_yticks(yticks, labels=ylabels, color=color, alpha=0.5, fontsize=16)
+    pax.set_rlabel_position(90)
+    grid_kw = {"grid_alpha": grid_alpha}
+    if grid_color is not None:
+        grid_kw["grid_color"] = grid_color
+    pax.tick_params(**grid_kw)
+    pax.tick_params(axis="x", labelsize=16, labelcolor=label_color, pad=10)
+    return pax
+
+
+def _alcor_pixel_solid_angle(az_deg, alt_deg):
+    """
+    Per-pixel solid angle [arcsec^2] from (azimuth, altitude) grids in degrees.
+
+    The pixel->sky map is differentiated numerically: each pixel's sky direction
+    becomes a unit vector and the solid angle is the magnitude of the cross
+    product of the per-pixel tangent vectors d(vec)/dx and d(vec)/dy (1-pixel
+    spacing). Working in unit-vector space rather than on the angles makes this
+    exact for the ARC projection's zenith->horizon plate-scale change and the SIP
+    distortion, and immune to the azimuth wrap at north. NaN propagates from any
+    pixel the WCS does not project (off the sky).
+    """
+    lam = np.radians(np.asarray(az_deg, dtype=float))
+    phi = np.radians(np.asarray(alt_deg, dtype=float))
+    cphi = np.cos(phi)
+    vx = cphi * np.cos(lam)
+    vy = cphi * np.sin(lam)
+    vz = np.sin(phi)
+    dvx_dy, dvx_dx = np.gradient(vx)
+    dvy_dy, dvy_dx = np.gradient(vy)
+    dvz_dy, dvz_dx = np.gradient(vz)
+    # |(dvec/dx) x (dvec/dy)| = area subtended per unit pixel area = solid angle
+    cx = dvy_dx * dvz_dy - dvz_dx * dvy_dy
+    cy = dvz_dx * dvx_dy - dvx_dx * dvz_dy
+    cz = dvx_dx * dvy_dy - dvy_dx * dvx_dy
+    omega_sr = np.sqrt(cx * cx + cy * cy + cz * cz)
+    arcsec_per_rad = 180.0 * 3600.0 / np.pi
+    return omega_sr * arcsec_per_rad * arcsec_per_rad
+
+
 def plot_alcor_fits(filename, outimage=None, outfig=None, radius=680,
                     powerstretch=0.75, contrast=0.35, gscale=0.7, bscale=1.7,
                     figsize=12):
@@ -2898,12 +3003,8 @@ def plot_alcor_fits(filename, outimage=None, outfig=None, radius=680,
     rgb = _alcor_display_rgb(cube, powerstretch=powerstretch, contrast=contrast,
                              gscale=gscale, bscale=bscale)
 
-    zx, zy = wcs.world_to_pixel_values(0.0, 90.0)
-    xz = int(round(float(zx)))                            # 0-based zenith
-    yz = int(round(float(zy)))
     ny, nx = rgb.shape[:2]
-    yl, yu = max(0, yz - radius), min(ny, yz + radius)
-    xl, xu = max(0, xz - radius), min(nx, xz + radius)
+    xz, yz, xl, xu, yl, yu = _alcor_zenith_crop_bounds(wcs, ny, nx, radius)
     crop = rgb[yl:yu, xl:xu, :]
     cx, cy = xz - xl, yz - yl                              # zenith in crop coords
 
@@ -2918,23 +3019,162 @@ def plot_alcor_fits(filename, outimage=None, outfig=None, radius=680,
     im_plot = ax.imshow(crop, origin="lower")
     im_plot.set_clip_path(circle)
 
-    pax = fig.add_subplot(111, polar=True, label='polar')
-    pax.set_facecolor("None")
-    pax.set_theta_zero_location("N")
-    # Use the WCS to map altitude ticks to the correct radial fraction. The polar
-    # overlay spans the figure region, so r=1 corresponds to `radius` pixels from zenith.
-    tick_alts = np.array([75, 60, 45, 30, 15])
-    px, py = wcs.world_to_pixel_values(np.zeros_like(tick_alts, dtype=float),
-                                       tick_alts.astype(float))
-    yticks = np.hypot(px - xz, py - yz) / radius
-    ylabels = [f" {a}°" for a in tick_alts]
-    pax.set_yticks(yticks, labels=ylabels, color="white", alpha=0.5, fontsize=16)
-    pax.set_rlabel_position(90)
-    pax.tick_params(grid_alpha=0.5)
-    pax.tick_params(axis='x', labelsize=16, labelcolor='silver', pad=10)
+    # Altitude/azimuth polar overlay (r=1 -> `radius` px from zenith).
+    _add_alcor_alt_az_grid(fig, wcs, xz, yz, radius)
 
     if outfig is not None:
         plt.savefig(outfig, transparent=True, bbox_inches='tight', pad_inches=0)
+
+    return fig
+
+
+def plot_alcor_sky_brightness(filename, outimage=None, outfig=None,
+                              radius=ALCOR_RADIUS, fov_altitude=-2.0,
+                              horizon_mask=False, saturation=ALCOR_SB_SATURATION,
+                              vmin=None, vmax=None, cmap="cividis_r", figsize=12):
+    """
+    Render an alcor frame as a V-band sky-surface-brightness map.
+
+    The green channel is converted to V magnitudes per square arcsecond using the
+    G->V photometric calibration (see :data:`ALCOR_ZEROPOINTS`). Per pixel, the
+    corner-bias-subtracted G counts are scaled to the calibration's reference
+    exposure (:data:`ALCOR_CALIB_EXPTIME`, 20 s, the dark-condition default; the
+    frame's ``EXPOSURE`` header sets the actual time and counts are linear in it),
+    divided by the per-pixel solid angle, and converted with the G zeropoint::
+
+        mu = -2.5 * log10(g20 / omega_arcsec2) + zp_g
+
+    where ``g20`` is counts/(20 s) and ``omega_arcsec2`` is the pixel solid angle
+    derived from the WCS, so the ARC projection's zenith->horizon plate-scale
+    change and the SIP distortion are both accounted for exactly. No airmass term
+    is applied: the map is the *observed* sky brightness, so horizon light domes,
+    airglow and Milky-Way gradients, and scattered moonlight all show as real
+    structure. The G band is essentially color-flat (G~=V), so no color term is
+    used; the absolute scale inherits the zeropoint's ~0.03 mag epoch stability.
+
+    Masking: pixels with raw G at or above ``saturation`` are clipped/non-linear
+    and are blanked, as are non-sky pixels -- by default everything below
+    ``fov_altitude`` degrees, or, when ``horizon_mask`` is True, the
+    obstruction/terrain mask from :func:`load_alcor_horizon_mask` (which already
+    includes below-horizon). The map is cropped to a ``radius``-pixel square
+    around the WCS zenith and rendered north-up (``origin="lower"``) with an
+    alt/az grid and a colorbar in V mag / arcsec^2. The upper-right corner is
+    annotated with the sigma-clipped median zenith brightness (the cap above
+    altitude 85 deg).
+
+    Parameters
+    ----------
+    filename : str
+        FITS filename of an alcor OMEA 8C frame (gz/bz2 allowed).
+    outimage : str, optional
+        If set, save the colour-mapped cropped surface-brightness array here.
+    outfig : str, optional
+        If set, save the annotated figure (extension picks the backend).
+    radius : float (default ALCOR_RADIUS)
+        Half-width (pixels) of the display crop around the zenith.
+    fov_altitude : float (default -2.0)
+        Sky cutoff in degrees: pixels below this altitude are masked. Ignored
+        when ``horizon_mask`` is True.
+    horizon_mask : bool (default False)
+        Use the full horizon/obstruction mask instead of the altitude cutoff.
+    saturation : int (default ALCOR_SB_SATURATION)
+        Raw-ADU level at/above which G pixels are masked as non-linear.
+    vmin, vmax : float, optional
+        Colorbar limits in mag/arcsec^2 (default: robust autoscale of the sky).
+    cmap : str (default "cividis_r")
+        Matplotlib colormap (perceptually uniform, colour-blind friendly); the
+        reversed default renders bright sky light and dark sky dark.
+    figsize : float (default 12)
+        matplotlib figure size in inches.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+    """
+    cube, wcs, _ = load_alcor_fits(filename)
+    time = _alcor_frame_time(filename)
+    exposure = _read_frame_exposure(filename)
+
+    g_raw = np.asarray(cube[1], dtype=float)
+    bias = _corner_bias(cube)[1]
+    # Counts scaled to the calibration's reference exposure (counts/20 s).
+    g20 = (g_raw - bias) * (ALCOR_CALIB_EXPTIME / exposure)
+
+    ny, nx = g_raw.shape
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    az, alt = wcs.pixel_to_world_values(xx.astype(float), yy.astype(float))
+    omega = _alcor_pixel_solid_angle(az, alt)
+    zp_g = alcor_zeropoint(time)["g"]["zp"]
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        surf = g20 / omega
+        mu = np.where(surf > 0, -2.5 * np.log10(surf) + zp_g, np.nan)
+
+    blank = ~np.isfinite(mu) | ~np.isfinite(alt) | (g_raw >= saturation)
+    if horizon_mask:
+        hmask, _ = load_alcor_horizon_mask(time)
+        blank |= (np.asarray(hmask, dtype=bool) if hmask is not None
+                  else (alt < fov_altitude))
+    else:
+        blank |= (alt < fov_altitude)
+    mu = np.where(blank, np.nan, mu)
+
+    # Sigma-clipped median zenith brightness from the cap above altitude 85 deg.
+    zen = mu[np.isfinite(mu) & (alt > 85.0)]
+    zenith_mu = float(sigma_clipped_stats(zen)[1]) if zen.size else float("nan")
+
+    xz, yz, xl, xu, yl, yu = _alcor_zenith_crop_bounds(wcs, ny, nx, radius)
+    mu_crop = mu[yl:yu, xl:xu]
+    cx, cy = xz - xl, yz - yl
+
+    finite = mu_crop[np.isfinite(mu_crop)]
+    if vmin is None:
+        vmin = float(np.percentile(finite, 1)) if finite.size else None
+    if vmax is None:
+        vmax = float(np.percentile(finite, 99)) if finite.size else None
+
+    if outimage is not None:
+        plt.imsave(outimage, np.flipud(mu_crop), cmap=cmap, vmin=vmin, vmax=vmax)
+
+    cmap_obj = plt.get_cmap(cmap).copy()
+    cmap_obj.set_bad(alpha=0.0)
+
+    fig, ax = plt.subplots(figsize=(figsize, figsize))
+    circle = Circle((cx, cy), radius, facecolor="none", edgecolor=(0, 0, 0),
+                    linewidth=1, alpha=0.5)
+    ax.add_patch(circle)
+    ax.axis("off")
+    im_plot = ax.imshow(mu_crop, origin="lower", cmap=cmap_obj,
+                        vmin=vmin, vmax=vmax)
+    im_plot.set_clip_path(circle)
+
+    # Annotation that sits *inside* the FOV (altitude rings, grid lines) is dark
+    # so it reads against the light sky; annotation *outside* the FOV (azimuth
+    # labels, colorbar) is white because the transparent figure shows on a dark
+    # background.
+    inside_color = "0.2"
+    outside_color = "white"
+    # Dedicated colorbar axes on the far-right margin, clear of the west (270deg)
+    # azimuth label; the main image axes stays at its 111 position so the polar
+    # alt/az overlay aligns with it.
+    cax = fig.add_axes([0.97, 0.28, 0.018, 0.44])
+    cbar = fig.colorbar(im_plot, cax=cax)
+    cbar.ax.invert_yaxis()   # dark (faint sky) at the bottom, bright at the top
+    cbar.set_label("$m_{V}$ (mag arcsec$^{-2}$)", fontsize=14,
+                   color=outside_color)
+    cbar.ax.tick_params(colors=outside_color)
+    cbar.outline.set_edgecolor(outside_color)
+
+    _add_alcor_alt_az_grid(fig, wcs, xz, yz, radius, color=inside_color,
+                           label_color=outside_color, grid_color="0.1",
+                           grid_alpha=0.6)
+
+    fig.text(0.90, 0.95,
+             f"$m_{{V}}$(zenith) = {zenith_mu:.2f} mag arcsec$^{{-2}}$",
+             ha="right", va="top", color=outside_color, fontsize=15)
+
+    if outfig is not None:
+        plt.savefig(outfig, transparent=True, bbox_inches="tight", pad_inches=0)
 
     return fig
 
@@ -3177,6 +3417,62 @@ def plot_alcor_fits_cli():
         contrast=args.contrast,
         gscale=args.gscale,
         bscale=args.bscale,
+        figsize=args.figsize,
+    )
+    print(outfig)
+
+
+def plot_alcor_sky_brightness_cli():
+    """
+    CLI entry point for `plot_alcor_sky_brightness`. Writes a V mag/arcsec^2
+    sky-brightness map, named after the input file with the extension replaced
+    by `.pdf` unless `-o` is given.
+    """
+    parser = argparse.ArgumentParser(
+        description="Render an alcor OMEA 8C frame as a V mag/arcsec^2 sky-surface-brightness map.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("filename", help="Input alcor FITS file.")
+    parser.add_argument(
+        "-o", "--outfig", default=None,
+        help="Output figure path (default: <input>.pdf). Format inferred from extension."
+    )
+    parser.add_argument("--outimage", default=None,
+                        help="If set, also write the colour-mapped surface-brightness image to this path.")
+    parser.add_argument("--radius", type=int, default=ALCOR_RADIUS,
+                        help="Half-width (pixels) of the display crop around the zenith.")
+    parser.add_argument("--fov-altitude", type=float, default=-2.0,
+                        help="Mask pixels below this altitude (deg). Ignored with --horizon-mask.")
+    parser.add_argument("--horizon-mask", action="store_true",
+                        help="Mask non-sky with the full horizon/obstruction mask instead of the altitude cutoff.")
+    parser.add_argument("--saturation", type=int, default=ALCOR_SB_SATURATION,
+                        help="Mask raw G pixels at or above this ADU level (clipped/non-linear).")
+    parser.add_argument("--vmin", type=float, default=None, help="Colorbar lower limit (mag/arcsec^2).")
+    parser.add_argument("--vmax", type=float, default=None, help="Colorbar upper limit (mag/arcsec^2).")
+    parser.add_argument("--cmap", default="cividis_r", help="Matplotlib colormap.")
+    parser.add_argument("--figsize", type=float, default=12, help="Matplotlib figure size in inches.")
+    args = parser.parse_args()
+
+    outfig = args.outfig
+    if outfig is None:
+        stem = str(args.filename)
+        for ext in (".fits.bz2", ".fits.gz", ".fits"):
+            if stem.endswith(ext):
+                stem = stem[: -len(ext)]
+                break
+        outfig = stem + "_skybright.pdf"
+
+    plot_alcor_sky_brightness(
+        args.filename,
+        outimage=args.outimage,
+        outfig=outfig,
+        radius=args.radius,
+        fov_altitude=args.fov_altitude,
+        horizon_mask=args.horizon_mask,
+        saturation=args.saturation,
+        vmin=args.vmin,
+        vmax=args.vmax,
+        cmap=args.cmap,
         figsize=args.figsize,
     )
     print(outfig)

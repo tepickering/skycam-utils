@@ -9,8 +9,8 @@ building/terrain, below the horizon, or lost in cloud). Accumulated over a whole
 night, the undetected positions trace the obstruction silhouette directly, because
 the building blocks each star as its arc sweeps behind the roofline.
 
-Both nights' non-detections are combined onto one co-add. The WCS is stable to
-~1 px between the 2024 and 2026 epochs, so the raw pixel positions are stacked
+All nights' non-detections are combined onto one co-add. The WCS is stable to
+~1 px across the 2024 and 2026 epochs, so the raw pixel positions are stacked
 directly (no reprojection). For definition the points are rendered as a smoothed
 2D-density heatmap with a low threshold, which sharpens the obstruction edges and
 suppresses the sparse interior speckle (faint-limit / transient-cloud misses).
@@ -40,7 +40,10 @@ OUT = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "gplots"))
 
 NIGHTS = [
     ("2024-09-04", os.path.expanduser("~/MMT/skycam_data/2024-09-04")),
+    ("2026-01-11", "/Volumes/Samsung_4TB/skycam/2026-01-11"),
+    ("2026-03-11", "/Volumes/Samsung_4TB/skycam/2026-03-11"),
     ("2026-05-18", "/Volumes/Samsung_4TB/skycam/2026-05-18"),
+    ("2026-06-09", "/Volumes/Samsung_4TB/skycam/2026-06-09"),
 ]
 TARGET = "2026-05-18"   # co-add to display (WCS ~1 px stable between epochs)
 
@@ -123,7 +126,8 @@ def main():
                 fontsize=15, ha="center", va="center", weight="bold")
     cb = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
     cb.set_label("undetected-star density (both nights)")
-    ax.set_title(f"Undetected catalog stars, 2024-09-04 + 2026-05-18 combined "
+    nights_label = " + ".join(n for n, _ in NIGHTS)
+    ax.set_title(f"Undetected catalog stars, {nights_label} combined "
                  f"({len(ux)} positions)  on {TARGET} co-add")
     ax.set_xticks([])
     ax.set_yticks([])

@@ -111,6 +111,6 @@ data/
 
 *.png
 # reference calibration figures, kept in the repo on purpose
-!docs/gplots/*.png
+!claude_docs/gplots/*.png
 .DS_Store
 latest_movie.sh~

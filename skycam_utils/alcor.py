@@ -2597,7 +2597,7 @@ def alcor_keogram(input_dir, pattern="*.fits.bz2", workers=1, progress=False, pr
     ----------
     input_dir : str or `~pathlib.Path`
         Directory containing alcor FITS images.
-    pattern : str (default="*.fits.bz2")
+    pattern : str (default ``"*.fits.bz2"``)
         Glob pattern used to select files from `input_dir`.
     workers : int or None (default=1)
         Number of worker processes used to load center columns. A value of 1

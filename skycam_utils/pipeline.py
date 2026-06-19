@@ -64,7 +64,7 @@ def stellacam_strip_image(rootdir, writefile=True, outfile=None, compressed=True
             If writefile=True, specify output filename. If none, will default to strip_<rootdir>.fits.
 
         compressed : bool
-            Toggle processing compressed *.fits.gz files if True or *.fits if False.
+            Toggle processing compressed ``*.fits.gz`` files if True or ``*.fits`` if False.
 
         year : int (default=2021)
             Year the data was taken. Used to determine how to parse image header.

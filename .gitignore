@@ -70,6 +70,8 @@ instance/
 
 # Sphinx documentation
 docs/_build/
+# automodapi autosummary stubs, regenerated on every build
+docs/api/
 
 # PyBuilder
 target/
@@ -112,5 +114,7 @@ data/
 *.png
 # reference calibration figures, kept in the repo on purpose
 !claude_docs/gplots/*.png
+# documentation figures shipped to Read the Docs
+!docs/images/*.png
 .DS_Store
 latest_movie.sh~

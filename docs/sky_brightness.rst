@@ -3,18 +3,23 @@ Sky Brightness
 ##############
 
 The same WCS geometry and photometric zeropoints that calibrate point sources
-(see :doc:`wcs_calibration` and :doc:`photometry`) also turn an Alcor frame into
+(see :doc:`wcs_calibration` and :doc:`photometry`) also turn an Alcor OMEA frame into
 a calibrated **surface-brightness map** in V mag/arcsec². This is what
 :func:`~skycam_utils.alcor.plot_alcor_sky_brightness` produces, and it is the
-natural tool for seeing horizon light domes, airglow, and Milky-Way gradients.
+natural tool for quantifying airglow as well as light pollution, both overall and
+in specific regions affected by localized sources.
 
 What it measures
 ================
 
 The map converts the corner-bias-subtracted **G** channel to an **observed**
-V mag/arcsec², with **no airmass term** — so airmass-correlated structure
-(light domes, airglow, the Milky Way) is left *in* as the signal rather than
-removed. The conversion chain has no free parameters:
+V mag/arcsec². There is **no airmass term** applied because it is only appropriate
+for signals that originate from outside the atmosphere. Light pollution comes from
+below most of the atmosphere and is reflected light. Airglow occurs at different altitudes
+within the atmosphere and the Milky Way, of course, comes from outside the atmosphere, but they need
+to be treated as observed brightnesses to compare directly with light pollution.
+
+The conversion chain has no free parameters:
 
 1. **Exposure-normalize** the raw counts to the calibration's 20 s reference
    (``ALCOR_CALIB_EXPTIME``, read from the ``EXPOSURE`` header — counts are

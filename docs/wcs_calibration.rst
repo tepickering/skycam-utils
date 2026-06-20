@@ -2,11 +2,11 @@
 WCS Calibration
 ################
 
-The Alcor all-sky camera images the whole visible sky onto a single RGB CMOS
-sensor. To do anything quantitative with that frame — measure a named star,
-mask the horizon, build a sky-brightness map — every pixel must map to a
-direction on the sky. ``skycam_utils`` solves this once, by attaching a full
-:class:`~astropy.wcs.WCS` to the raw frame that maps **pixel ↔ (azimuth,
+The Alcor OMEA all-sky camera images the whole visible sky onto a single RGB CMOS
+sensor. To do anything quantitative with that frame — measure a known star,
+mask the horizon, build a sky-brightness map — the mapping between pixels and sky
+must be known accurately. ``skycam_utils`` solves this by attaching a full
+:class:`~astropy.wcs.WCS` to the raw frames that maps **pixel ↔ (azimuth,
 altitude)**. The WCS *is* the geometry; nothing downstream re-derives it.
 
 The geometric model
@@ -103,8 +103,8 @@ On clean dark frames the fit matches ~80 stars per frame. With the full model
 (``k5`` + ``P1``/``P2`` + axis tilt) a healthy fit reaches a **matched fraction
 near 0.7** and a **pooled RMS of ~0.35 px**. The residual floor is *not* noise:
 it is a smooth, azimuthally-symmetric ~0.6 px peak-to-peak radial wiggle, the
-signature of truncating the ``k3``/``k5`` radial polynomial. It is not worth
-chasing with more terms.
+signature of truncating the ``k3``/``k5`` radial polynomial. It was not deemed
+to be worth chasing with more terms.
 
 The figure below overlays the WCS-predicted positions of catalog bright stars
 on a real dark frame. Tight agreement across the full field — from zenith to

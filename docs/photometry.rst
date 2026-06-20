@@ -13,7 +13,7 @@ Measuring instrumental magnitudes
 =================================
 
 :func:`~skycam_utils.alcor.alcor_star_photometry` performs fixed-position,
-per-channel (R/G/B) photometry of named stars from ``bright_star_sloan_named.fits``
+per-channel (R/G/B) photometry of named, non-variable stars from ``bright_star_sloan_named.fits``
 (``Vmag <= --vmag-limit``, default 5.5; above ``--min-altitude``, default 20°).
 Key behaviours:
 
@@ -101,9 +101,13 @@ Colour terms
 The colour terms are where the per-channel structure of the calibration shows
 up most clearly. Each channel's response is fit as ``catalog − (m_inst − 0.4·X)``
 regressed against the catalog colour ``B−V``: the intercept is the zeropoint and
-the **slope is the colour coefficient**. The prediction is that the green
-channel tracks Johnson *V* closely (small slope) while R and B, with bandpasses
-offset from V, carry real colour terms.
+the **slope is the colour coefficient**. Based on published photometric behavior of
+similar on-sensor colour (OSC) CMOS cameras (the OMEA 8C uses a ZWO ASI294MC), the
+prediction is that the green channel tracks Johnson *V* closely (small slope)
+while R and B carry real colour terms. These colour terms are due to differences
+between the camera's bandpass shapes and the standard Johnson system, specifically
+leaks well away from the effective center wavelengths. These terms are expected
+to be stable over time, but infrastructure is in place to add new epochs if they're needed.
 
 .. figure:: images/zeropoint_calib.png
    :width: 100%
@@ -119,9 +123,7 @@ offset from V, carry real colour terms.
    RMS drops from ~0.63 to ~0.24 mag).
 
 The zeropoints are **stable to ~0.03 mag across the 2024 and 2026 epochs**,
-mirroring the geometric stability documented in :doc:`wcs_calibration`. This
-stability across ~21 months, with no camera intervention, is what justifies
-treating a single calibration as effectively stationary.
+mirroring the geometric stability documented in :doc:`wcs_calibration`.
 
 CMOS non-linearity and the bright cut
 =====================================

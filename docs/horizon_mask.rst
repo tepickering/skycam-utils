@@ -3,8 +3,8 @@ Horizon Mask
 ############
 
 Sky-background and cloud-extinction maps need to know which pixels are actually
-sky and which are obstructed — terrain, buildings, and the observatory's
-lightning rod. ``skycam_utils`` ships a date-indexed **horizon mask** for this:
+sky and which are obstructed — terrain, buildings, trees, lightning rods, etc. ``skycam_utils``
+ships a date-indexed **horizon mask** for this for the MMT's Alcor OMEA camera:
 :func:`~skycam_utils.alcor.load_alcor_horizon_mask` returns ``(mask, date)``,
 where ``mask`` is a 2-D boolean raw-frame array with ``True`` = **not-sky**
 (obstructions above the horizon plus everything at or below altitude 0). Valid

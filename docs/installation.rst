@@ -38,8 +38,11 @@ must be installed separately:
 - **astrometry.net** — :func:`skycam_utils.astrometry.solve_field` invokes
   ``solve-field`` (used by the ASI pipeline on a central image cutout). It
   requires the ``solve-field`` binary on ``PATH`` plus appropriate index files.
+  This is only used by the ASI pipeline, so it is not a hard dependency of the package.
 - **redis** — only needed by the operational publishers under ``scripts/`` (TCS
-  state and weather telemetry), not by the photometry pipeline.
+  state and weather telemetry), not by the photometry pipeline. This is used in
+  operational scripts that run on the MMT's internal network, so it is not a hard
+  dependency of the package.
 
 Calibration assets
 ==================

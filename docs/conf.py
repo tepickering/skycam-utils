@@ -5,9 +5,9 @@ import sys
 from importlib.metadata import metadata
 
 try:
-    from sphinx_astropy.conf.v1 import *  # noqa: F401,F403
+    from sphinx_astropy.conf.v3 import *  # noqa: F401,F403
 except ImportError:
-    print("ERROR: the documentation requires the sphinx-astropy package to be installed")
+    print("ERROR: the documentation requires the sphinx-astropy[confv3] package to be installed")
     sys.exit(1)
 
 _meta = metadata("skycam_utils")
@@ -24,25 +24,26 @@ highlight_language = "python3"
 exclude_patterns.append("_templates")  # noqa: F405
 rst_epilog += "\n"  # noqa: F405
 
-html_theme_options = {
-    "logotext1": "skycam_utils",
-    "logotext2": "",
-    "logotext3": ":docs",
-}
 html_title = f"{project} v{release}"
-htmlhelp_basename = project + "doc"
 
-latex_documents = [
-    ("index", project + ".tex", project + " Documentation", author, "manual"),
-]
-man_pages = [
-    ("index", project.lower(), project + " Documentation", [author], 1),
-]
+html_static_path = ["_static"]
 
-extensions += ["sphinx_astropy.ext.edit_on_github"]  # noqa: F405
-edit_on_github_project = GITHUB_PROJECT
-edit_on_github_branch = "main"
-edit_on_github_source_root = ""
-edit_on_github_doc_root = "docs"
+# The trimmed grey MMT logo reads on both the light and dark theme, so use the
+# one image for both modes.
+html_logo = "_static/mmt_logo.png"
 
-github_issues_url = f"https://github.com/{GITHUB_PROJECT}/issues/"
+# MMT favicon (from mmto.org) in place of the theme's astropy default.
+html_favicon = "_static/mmt_favicon.ico"
+
+# astropy-unified is a pydata-based theme; wire up the GitHub link and the
+# "Edit on GitHub" button. v3 deletes the inherited theme options.
+html_theme_options = {
+    "github_url": f"https://github.com/{GITHUB_PROJECT}",
+    "use_edit_page_button": True,
+}
+html_context = {
+    "github_user": GITHUB_PROJECT.split("/")[0],
+    "github_repo": GITHUB_PROJECT.split("/")[1],
+    "github_version": "main",
+    "doc_path": "docs",
+}

@@ -30,7 +30,7 @@ Homepage = "https://github.com/tepickering/skycam-utils"
 
 [project.optional-dependencies]
 docs = [
-    "sphinx-astropy",
+    "sphinx-astropy[confv3]>=1.11",
 ]
 test = [
     "pytest",

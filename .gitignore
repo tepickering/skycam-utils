@@ -116,5 +116,7 @@ data/
 !claude_docs/gplots/*.png
 # documentation figures shipped to Read the Docs
 !docs/images/*.png
+# documentation static assets (logo, etc.)
+!docs/_static/*.png
 .DS_Store
 latest_movie.sh~

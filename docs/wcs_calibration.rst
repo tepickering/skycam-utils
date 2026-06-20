@@ -86,12 +86,18 @@ night's UT date) to add to ``alcor.py`` and commit.
   contested stars is trusted) — there is no per-frame geometry refit. The match
   tolerance tightens over several rounds from ~12 px down to ``--tolerance``
   (~3 px).
+- **Radial order** — by default only the cubic ``k3`` is fit; pass ``--fit-k5``
+  to also fit the quintic ``k5``. The committed calibrations use the full ``k5``
+  model: without it, ``k3`` runs away trying to absorb the quintic curvature and
+  the high-zenith residual balloons. The difference is large — on 2026-05-18 the
+  pooled RMS drops from **~1.44 px (k3 only)** to **~0.33 px (k3 + k5)** over the
+  same matched-star set — so ``--fit-k5`` is required to reproduce them.
 
 .. code-block:: bash
 
-   # Aggregate a night and print an ALCOR_CALIBRATIONS epoch dict
+   # Aggregate a night and print an ALCOR_CALIBRATIONS epoch dict (full k5 model)
    fit_alcor_wcs <skycam_datadir>/2026-05-18 \
-       --vmag-limit 4 --tolerance 3 --residual-plot 2026-05-18_resid.png
+       --vmag-limit 4 --fit-k5 --tolerance 3 --residual-plot 2026-05-18_resid.png
 
    # Per-frame load/detect is parallelized; --quiet silences per-file disposition
    fit_alcor_wcs <night-dir> --workers 8 --quiet
@@ -101,23 +107,43 @@ Fit quality
 
 On clean dark frames the fit matches ~80 stars per frame. With the full model
 (``k5`` + ``P1``/``P2`` + axis tilt) a healthy fit reaches a **matched fraction
-near 0.7** and a **pooled RMS of ~0.35 px**. The residual floor is *not* noise:
-it is a smooth, azimuthally-symmetric ~0.6 px peak-to-peak radial wiggle, the
-signature of truncating the ``k3``/``k5`` radial polynomial. It was not deemed
-to be worth chasing with more terms.
+near 0.7** and a **pooled RMS of ~0.35 px** (0.33 px over ~76,000 matched stars
+on 2026-05-18, sub-pixel across the whole field). The residual floor is *not*
+noise: it is a smooth, azimuthally-symmetric ~0.6 px peak-to-peak radial wiggle,
+the signature of truncating the ``k3``/``k5`` radial polynomial, and was not
+deemed worth chasing with more terms.
 
-The figure below overlays the WCS-predicted positions of catalog bright stars
-on a real dark frame. Tight agreement across the full field — from zenith to
-horizon, and at all azimuths — is the visual confirmation that the projection,
-distortion, and tilt terms are all pulling their weight.
+The first figure overlays the WCS-predicted positions of catalog bright stars on
+a real dark frame: the apertures land on the stars from the zenith out toward
+the horizon and at every azimuth — the direct visual confirmation that the
+projection, distortion, and tilt terms are all pulling their weight.
 
-.. figure:: images/alcor_detected_stars.png
+.. figure:: images/alcor_wcs_overlay.png
    :width: 100%
-   :alt: Catalog bright stars matched to their WCS-predicted pixel positions.
+   :alt: WCS-predicted bright-star apertures overlaid on a real Alcor frame.
 
-   Bright-star catalog positions predicted by the fitted WCS, overlaid on a
-   dark Alcor frame. Agreement holds from the zenith out to the horizon and at
-   every azimuth.
+   Named bright-star positions predicted by the fitted WCS (aperture + annulus
+   markers) overlaid on a dark 2026-05-18 frame, north-up. The predicted
+   positions track the visible stars across the whole field.
+
+The second figure is the quantitative residual diagnostic emitted by
+``fit_alcor_wcs --fit-k5 --residual-plot`` — six panels of the matched-star
+residuals. Panel 1 (residual vs zenith angle) shows the refined residuals are
+sub-pixel across the **entire** zenith range; panel 3 bins the residual vectors
+over the detector and shows no coherent left-over structure; and the bottom row
+decomposes each residual into radial and tangential components, confirming the
+only leftover signal is the small azimuthally-symmetric radial wiggle (the
+``k3``/``k5`` truncation floor) rather than a missed 2-D decenter/tilt term.
+
+.. figure:: images/alcor_wcs_residuals.png
+   :width: 100%
+   :alt: Six-panel WCS residual diagnostic for matched bright stars.
+
+   WCS residual diagnostic (2026-05-18, full night, ~76,000 matched stars,
+   pooled RMS 0.33 px). Refined residuals (orange, panel 1) are sub-pixel across
+   the whole field; the binned vector field (panel 3) leaves no coherent
+   structure, and the bottom-right panel shows the residual floor is the small
+   ~0.6 px p-p radial wiggle from radial-polynomial truncation.
 
 Cross-epoch stability
 =====================

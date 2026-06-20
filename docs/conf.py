@@ -27,6 +27,7 @@ rst_epilog += "\n"  # noqa: F405
 html_title = f"{project} v{release}"
 
 html_static_path = ["_static"]
+html_css_files = ["custom.css"]
 
 # The trimmed grey MMT logo reads on both the light and dark theme, so use the
 # one image for both modes.

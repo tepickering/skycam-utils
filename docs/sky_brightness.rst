@@ -47,6 +47,7 @@ validates the whole exposure → solid-angle → zeropoint chain end to end.
 
 .. figure:: images/skybright_test.png
    :width: 100%
+   :class: transparent-bg
    :alt: Alcor G-channel sky-brightness map in V mag/arcsec^2.
 
    An Alcor sky-brightness map: the G channel converted to observed

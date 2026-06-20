@@ -120,11 +120,13 @@ projection, distortion, and tilt terms are all pulling their weight.
 
 .. figure:: images/alcor_wcs_overlay.png
    :width: 100%
+   :class: transparent-bg
    :alt: WCS-predicted bright-star apertures overlaid on a real Alcor frame.
 
    Named bright-star positions predicted by the fitted WCS (aperture + annulus
    markers) overlaid on a dark 2026-05-18 frame, north-up. The predicted
-   positions track the visible stars across the whole field.
+   positions track the visible stars across the whole field; the inset zooms on a
+   near-zenith star, showing it centred inside its aperture.
 
 The second figure is the quantitative residual diagnostic emitted by
 ``fit_alcor_wcs --fit-k5 --residual-plot`` — six panels of the matched-star

@@ -99,6 +99,21 @@ fit_alcor_wcs <night-dir> [--pattern ...] [--vmag-limit 4] [--tolerance 3] [--ma
 #   the DATE header.
 #   Per-frame load/detect is parallelized across processes (--workers; default: one per core).
 #   Prints each file's disposition to stderr (Sun-rejected / no stars / used + count); --quiet silences it.
+
+create_badpix_mask <day-dir> [--out-dir DIR] [--min-frames 500] [--z-thresh 25] [--ksize 5] [--sun-alt-max -18] [--moon-alt-max -6] [--max-frames N] [--scratch-dir DIR] [--pattern *.fits.bz2] [--quiet]
+#   Builds a date-stamped per-channel bad-pixel mask from one night of frames and writes
+#   alcor_badpix_YYYY-MM-DD.fits.gz to --out-dir (default: $ALCOR_BADPIX_DIR, then packaged
+#   data/badpix/). Prints the output path, or "# no mask written" when fewer than
+#   --min-frames dark frames (Sun < --sun-alt-max AND Moon < --moon-alt-max, default -18/-6)
+#   are available — the existing nearest mask keeps applying.
+#   Selects dark frames, builds a trail-free per-pixel night-MEDIAN stack (RAM-bounded via a
+#   disk memmap + row tiles; --max-frames strided-caps it), then flags hot pixels per channel
+#   with a --ksize (5px) median high-pass and a robust z > --z-thresh (25) cut, keeping only
+#   spikes that fire in <=2 of the 3 channels (a 3-channel spike is a real broadband source).
+#   Mask date is the YYYY-MM-DD in the directory name, else the median dark-frame date.
+#   Consumed by load_alcor_fits(badpix="repair") and resolved nearest-in-date (load_alcor_badpix_mask).
+#   Unlike fit_alcor_wcs's effectively-stationary epoch, the hot-pixel set AGES (~half turns over
+#   2024->2026, CMOS aging), so masks are rebuilt regularly (meant to run daily from cron), not once.
 ```
 
 Test coverage is concentrated on the Alcor module (`test_alcor.py`, `test_alcor_wcs.py`, `test_alcor_badpix.py`, `test_alcor_horizon.py`, `test_alcor_skybright.py`, run against the bundled `test.fits.bz2` frame and synthetic geometry). The Stellacam pipeline and photometry/astrometry modules have no tests — don't assume coverage exists for code you change there.

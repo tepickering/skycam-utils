@@ -169,7 +169,7 @@ calibration against catalog photometry. It is column-agnostic (it only needs
 
    from skycam_utils.alcor import collect_alcor_photometry
 
-   df = collect_alcor_photometry("/Volumes/Samsung_4TB/skycam/2026-05-18")
+   df = collect_alcor_photometry("<skycam_datadir>/2026-05-18")
    for name, lc in df.groupby("name"):
        ...  # lc is one star's time-ordered light curve
 

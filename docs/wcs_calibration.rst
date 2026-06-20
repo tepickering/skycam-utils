@@ -90,7 +90,7 @@ night's UT date) to add to ``alcor.py`` and commit.
 .. code-block:: bash
 
    # Aggregate a night and print an ALCOR_CALIBRATIONS epoch dict
-   fit_alcor_wcs /Volumes/Samsung_4TB/skycam/2026-05-18 \
+   fit_alcor_wcs <skycam_datadir>/2026-05-18 \
        --vmag-limit 4 --tolerance 3 --residual-plot 2026-05-18_resid.png
 
    # Per-frame load/detect is parallelized; --quiet silences per-file disposition

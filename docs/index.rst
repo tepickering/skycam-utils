@@ -41,6 +41,7 @@ the new WCS will be used immediately without any code changes.
    installation
    wcs_calibration
    photometry
+   bad_pixel_masks
    horizon_mask
    sky_brightness
 

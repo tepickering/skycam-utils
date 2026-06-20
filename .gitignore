@@ -120,3 +120,4 @@ data/
 !docs/_static/*.png
 .DS_Store
 latest_movie.sh~
+.codegraph/

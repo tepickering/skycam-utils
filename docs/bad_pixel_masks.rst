@@ -2,10 +2,11 @@
 Bad-pixel Masks
 ###############
 
-CMOS sensors carry hot and warm pixels — fixed-location pixels that read high
-regardless of illumination. Left in place they masquerade as point sources
-(which wrecks star detection during the :doc:`WCS fit <wcs_calibration>` and
-biases :doc:`photometry`) and inflate :doc:`sky_brightness` maps.
+CMOS sensors, even actively cooled ones, have hot and warm
+pixels — fixed-location pixels that read high regardless of illumination.
+Left in place they masquerade as point sources (which affects star detection
+during the :doc:`WCS fit <wcs_calibration>` and
+biases :doc:`photometry`) and pollute :doc:`sky_brightness` maps.
 ``skycam_utils`` ships a date-indexed **bad-pixel mask** for the Alcor OMEA
 camera and, by default, repairs the flagged pixels as each frame is loaded.
 
@@ -19,7 +20,7 @@ Properties
 - **Per-channel** — one plane each for R/G/B (contrast the achromatic
   :doc:`horizon mask <horizon_mask>`). A defect that affects only one channel is
   flagged only in that channel, so the other two are measured normally.
-- **A repair mask, not an exclusion mask** — flagged pixels are *replaced* with
+- **A repair mask, by default, not an exclusion mask** — flagged pixels are *replaced* with
   their local median (see below), not merely skipped. The horizon mask, by
   contrast, only selects valid sky and is never used to fill pixels.
 - **Date-resolved** — loaded by nearest date (overridable with
@@ -83,9 +84,9 @@ of centre) than those in the vignetted outer annulus (~41%), where hot pixels ar
 ~3× denser and mostly fall at or below the horizon anyway.
 
 The consequence is the date-indexed design: masks are **regenerated regularly
-(daily) and resolved nearest-in-date** to each frame — directly analogous to the
+and resolved nearest-in-date** to each frame — directly analogous to the
 time-indexed ``ALCOR_CALIBRATIONS`` geometry, but stored as files rather than an
-in-code table because they are large arrays. The package ships validated baseline
+in-code table because they are large, but sparse, arrays. The package ships validated baseline
 masks for **2024-09-04** and **2026-05-18** so it resolves correctly out of the
 box, while an operational daily cron accumulates fresh masks into
 ``$ALCOR_BADPIX_DIR``.

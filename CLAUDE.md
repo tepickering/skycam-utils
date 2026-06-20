@@ -81,11 +81,16 @@ alcor_star_photometry <input.fits> [-o OUT.csv] [--aperture-radius 4] [--annulus
 #   overrides --gaussian. collect_alcor_photometry is column-agnostic so the
 #   combined schema flows through unchanged.
 
-fit_alcor_wcs <night-dir> [--pattern ...] [--vmag-limit 4] [--tolerance 3] [--max-detections 200] [--sun-alt-max -18] [--moon-alt-max -6] [--residual-plot OUT.png] [--max-frames N] [--workers N] [--quiet]
+fit_alcor_wcs <night-dir> [--pattern ...] [--vmag-limit 4] [--tolerance 3] [--fit-k5] [--max-detections 200] [--sun-alt-max -18] [--moon-alt-max -6] [--residual-plot OUT.png] [--max-frames N] [--workers N] [--quiet]
 #   Aggregates bright-star matches across dark frames across a night and prints
 #   a ready-to-paste ALCOR_CALIBRATIONS epoch dict (absolute raw-frame constants —
 #   xcen, ycen, rotation, radial_coeffs, tangential_coeffs, axis_tilt, horizon_radius — stamped with the night's
 #   UT date) to add to alcor.py and commit.
+#   --fit-k5 is REQUIRED to reproduce the committed calibrations: by default only the
+#   cubic k3 radial term is fit, but every committed epoch uses the full quintic (k5)
+#   model. Without --fit-k5, k3 runs away absorbing the quintic curvature and the
+#   high-zenith residual balloons (pooled RMS ~1.44px k3-only vs ~0.33px k3+k5 on
+#   2026-05-18; --residual-plot makes this obvious in the residual-vs-zenith panel).
 #   Detections are capped to the brightest --max-detections per frame; matching is
 #   seeded by the nearest epoch and done with assign_alcor_matches (cKDTree candidate
 #   search, local-asterism pattern verification, and a local relative-brightness

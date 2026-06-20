@@ -2901,7 +2901,7 @@ def _alcor_zenith_crop_bounds(wcs, ny, nx, radius):
 
 
 def _add_alcor_alt_az_grid(fig, wcs, xz, yz, radius, color="white",
-                           label_color="silver", grid_color=None,
+                           label_color="0.5", grid_color=None,
                            grid_alpha=0.5):
     """
     Overlay an altitude/azimuth polar grid on an alcor crop figure.
@@ -3148,12 +3148,12 @@ def plot_alcor_sky_brightness(filename, outimage=None, outfig=None,
                         vmin=vmin, vmax=vmax)
     im_plot.set_clip_path(circle)
 
-    # Annotation that sits *inside* the FOV (altitude rings, grid lines) is dark
-    # so it reads against the light sky; annotation *outside* the FOV (azimuth
-    # labels, colorbar) is white because the transparent figure shows on a dark
-    # background.
+    # Annotation inside the FOV (altitude rings, grid lines) is dark so it reads
+    # against the light sky colormap. Annotation outside the FOV (azimuth labels,
+    # colorbar, zenith readout) sits on the transparent background, so use a
+    # medium-dark grey that reads on a light page (matches plot_alcor_fits).
     inside_color = "0.2"
-    outside_color = "white"
+    outside_color = "0.5"
     # Dedicated colorbar axes on the far-right margin, clear of the west (270deg)
     # azimuth label; the main image axes stays at its 111 position so the polar
     # alt/az overlay aligns with it.

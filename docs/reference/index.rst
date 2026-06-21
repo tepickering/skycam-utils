@@ -16,6 +16,7 @@ mask, and sky-brightness mapping.
 .. automodapi:: skycam_utils.alcor
    :no-inheritance-diagram:
    :skip: as_completed
+   :skip: disk
    :skip: files
    :skip: get_body
    :skip: get_sun
@@ -23,7 +24,9 @@ mask, and sky-brightness mapping.
    :skip: least_squares
    :skip: lru_cache
    :skip: median_filter
+   :skip: opening
    :skip: sigma_clipped_stats
+   :skip: sobel
 
 Stellacam pipeline
 ==================

@@ -17,12 +17,13 @@ Properties
   mask).
 - **An exclusion mask, not a repair mask** — it is never used to fill pixels,
   only to *select* valid sky for downstream maps.
-- **Date-resolved** — loaded by nearest date (overridable with
-  ``$ALCOR_HORIZON_DIR``) from
-  ``skycam_utils/data/horizon/alcor_horizon_YYYY-MM-DD.fits.gz``, exactly like
-  the calibration and bad-pixel assets. It is stable across epochs for the same
-  reason the geometry is (see :doc:`wcs_calibration`): one epoch covers
-  2024–2026, and a new epoch is added only if the camera moves.
+- **Date-resolved** — the masks ship as **package data** and are resolved
+  automatically from the installed package by
+  :func:`~skycam_utils.alcor.load_alcor_horizon_mask` (nearest date, overridable
+  with ``$ALCOR_HORIZON_DIR``); callers never reference a repository path. The
+  mask is stable across epochs for the same reason the geometry is (see
+  :doc:`wcs_calibration`): one epoch covers 2024–2026, and a new epoch is added
+  only if the camera moves.
 
 .. code-block:: python
 
@@ -34,9 +35,23 @@ Properties
 How the mask is built
 =====================
 
-There is **no packaged build CLI** — by design, the regeneration path is the
-reference script ``claude_docs/scripts/horizon_floodfill.py``, run offline. The
-method is a **Sobel-edge flood-fill of a cloudy-night median**:
+The mask is regenerated with two packaged CLIs (the reference script
+``claude_docs/scripts/horizon_floodfill.py`` now only re-renders the diagnostic
+figures below). First median-stack a **cloudy/overcast** night, then flood-fill
+the obstructions:
+
+.. code-block:: bash
+
+   # 1. Build the cloudy-night luminance median (Sobel walls come from its edges)
+   alcor_median_stack <skycam_datadir>/2026-02-18 -o 2026-02-18_median.fits
+
+   # 2. Flood-fill the horizon mask; --phot-nights supplies the SW->W patch
+   create_horizon_mask 2026-02-18_median.fits \
+       --phot-nights <skycam_datadir>/2026-01-11 <skycam_datadir>/2026-05-18
+
+Like ``create_badpix_mask``, both require local raw data and write to the
+packaged ``data/horizon/`` directory (or ``$ALCOR_HORIZON_DIR``). The method is a
+**Sobel-edge flood-fill of a cloudy-night median**:
 
 1. Take a median stack of a cloudy/overcast night. The smooth, slowly-varying
    overcast sky leaves only the *sharp* obstruction edges.

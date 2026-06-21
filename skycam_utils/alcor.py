@@ -14,6 +14,10 @@ import pandas as pd
 from scipy.ndimage import median_filter
 from scipy.optimize import least_squares
 from scipy.spatial import cKDTree
+from scipy import ndimage
+from scipy.interpolate import RegularGridInterpolator
+from skimage.filters import sobel
+from skimage.morphology import opening, disk
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
 import matplotlib.dates as mdates
@@ -3864,3 +3868,76 @@ def alcor_median_stack_cli():
         max_frames=args.max_frames, scratch_dir=args.scratch_dir,
         pattern=args.pattern, log=log)
     print(out)
+
+
+def build_alcor_horizon_mask(median_img, wcs, undetected=None, *,
+                             edge_pct=96.0, edge_dilate=1, open_radius=3,
+                             sector=(225.0, 270.0), und_thr=0.5, und_mincount=15,
+                             rim_alt=1.5, rod_area_min=400):
+    """
+    Build the raw-frame horizon (sky / not-sky) mask from a cloudy-night
+    luminance median by flood-filling the sky against the 2-D Sobel edge map.
+
+    Strong ``sobel(log10 median)`` edges (above the ``edge_pct`` percentile
+    within the FOV, dilated ``edge_dilate`` times) are walls; the sky is
+    flood-filled from the WCS zenith and everything unreachable is not-sky. In
+    the ``sector`` azimuth range (the SW->W building sector, where the Sobel wall
+    breaks up) an optional ``undetected`` sampler ``f(az, alt) -> (fraction,
+    count)`` supplies extra walls where the undetected-star fraction is
+    ``>= und_thr`` over ``>= und_mincount`` transits. A morphological opening of
+    radius ``open_radius`` severs thin necks, then a connected-component pass
+    keeps a not-sky blob only if it reaches the rim (``min_alt < rim_alt``) or is
+    rod-sized (``size >= rod_area_min``). Returns a 2-D bool ``(ny, nx)`` array
+    where ``True`` marks not-sky (obstructions above the horizon plus everything
+    at/below altitude 0); valid sky is ``~mask``.
+    """
+    img = np.asarray(median_img, dtype=float)
+    ny, nx = img.shape
+
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    w = wcs.all_pix2world(np.column_stack([xx.ravel(), yy.ravel()]), 0)
+    az = (w[:, 0] % 360.0).reshape(ny, nx)
+    alt = w[:, 1].reshape(ny, nx)
+    in_fov = alt > 0.0
+
+    # 2-D Sobel edges on the log image (suppresses the smooth vignette gradient)
+    E = sobel(ndimage.gaussian_filter(np.log10(np.clip(img, 1, None)), 1.0))
+    thr = np.percentile(E[in_fov], edge_pct)
+    wall = (E > thr) & in_fov
+    if edge_dilate:
+        wall = ndimage.binary_dilation(wall, iterations=edge_dilate)
+
+    undet_obstruction = np.zeros((ny, nx), dtype=bool)
+    if undetected is not None:
+        fr_pix, ct_pix = undetected(az, alt)
+        sec_lo, sec_hi = sector
+        in_sector = (az >= sec_lo) & (az <= sec_hi)
+        undet_obstruction = (in_sector & in_fov
+                             & (fr_pix >= und_thr) & (ct_pix >= und_mincount))
+
+    # flood-fill the sky: free = inside FOV, not a wall, not undetected-blocked
+    free = in_fov & ~wall & ~undet_obstruction
+    lbl, _ = ndimage.label(free, structure=np.ones((3, 3)))
+    zp = wcs.all_world2pix([[0.0, 90.0]], 0)[0]
+    zx, zy = int(round(zp[0])), int(round(zp[1]))
+    if not (0 <= zy < ny and 0 <= zx < nx and free[zy, zx]):  # nudge to nearest free
+        fy, fx = np.where(free)
+        k = np.argmin((fx - zx) ** 2 + (fy - zy) ** 2)
+        zx, zy = int(fx[k]), int(fy[k])
+    sky = lbl == lbl[zy, zx]
+    notsky_raw = in_fov & ~sky
+
+    notsky_open = opening(notsky_raw, disk(open_radius)) if open_radius else notsky_raw
+
+    # drop spurious open-sky pockets: keep a not-sky blob only if it reaches the
+    # rim or is large enough to be the lightning rod
+    nlab, nn = ndimage.label(notsky_open, structure=np.ones((3, 3)))
+    if nn:
+        size = np.bincount(nlab.ravel())[1:]
+        min_alt = ndimage.minimum(alt, nlab, index=np.arange(1, nn + 1))
+        keep = (min_alt < rim_alt) | (size >= rod_area_min)
+        notsky = np.concatenate([[False], keep])[nlab]
+    else:
+        notsky = notsky_open
+
+    return (~in_fov) | notsky

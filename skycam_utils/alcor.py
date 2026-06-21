@@ -3722,3 +3722,145 @@ def create_badpix_mask_cli():
         print("# no mask written (insufficient dark frames)")
     else:
         print(out)
+
+
+def build_alcor_luminance_median(dark_files, badpix_mask=None, max_frames=None,
+                                 scratch_dir=None, tile=50, log=None):
+    """
+    Per-pixel 2-D luminance (R+G+B) median over raw alcor frames.
+
+    Trail-free like :func:`build_alcor_median_stack`, but each frame's
+    ``(3, ny, nx)`` cube is collapsed to an ``(ny, nx)`` int32 luminance plane
+    (channel sum) before stacking, then the per-pixel median is taken in row
+    tiles so peak memory stays small. When ``badpix_mask`` (a ``(3, ny, nx)``
+    bool array) is given, its pixels are zeroed per channel before the sum so
+    hot pixels don't survive into the median. ``max_frames`` strided-subsamples
+    to cap runtime/scratch.
+
+    Returns the luminance median as ``(ny, nx)`` float32.
+    """
+    files_ = list(dark_files)
+    if max_frames is not None and len(files_) > max_frames:
+        stride = len(files_) // max_frames
+        files_ = files_[::stride][:max_frames]
+    if not files_:
+        raise ValueError("no frames provided")
+
+    with fits.open(files_[0]) as hdul:
+        shp = np.asarray(hdul[0].data).shape       # (3, ny, nx)
+    nch, ny, nx = shp
+
+    tmp = tempfile.NamedTemporaryFile(
+        prefix="alcor_lum_", suffix=".dat",
+        dir=scratch_dir or tempfile.gettempdir(), delete=False)
+    tmp.close()
+    memmap_path = Path(tmp.name)
+    lum_mm = None
+    try:
+        lum_mm = np.memmap(memmap_path, dtype=np.int32, mode="w+",
+                           shape=(len(files_), ny, nx))
+        n = 0
+        for f in files_:
+            with fits.open(f) as hdul:
+                data = np.asarray(hdul[0].data)
+            if data.shape != shp:
+                if log:
+                    log(f"skip {Path(f).name}: shape {data.shape}")
+                continue
+            if badpix_mask is not None and badpix_mask.shape == data.shape:
+                data = np.where(badpix_mask, 0, data)
+            lum_mm[n] = data.astype(np.int32).sum(axis=0)
+            n += 1
+        lum_mm.flush()
+        if n == 0:
+            raise ValueError("no frames matched the reference shape")
+
+        median = np.empty((ny, nx), dtype=np.float32)
+        for r0 in range(0, ny, tile):
+            r1 = min(r0 + tile, ny)
+            slab = np.asarray(lum_mm[:n, r0:r1, :], dtype=np.float32)
+            median[r0:r1, :] = np.median(slab, axis=0)
+        return median
+    finally:
+        del lum_mm
+        memmap_path.unlink(missing_ok=True)
+
+
+def alcor_median_stack(night_dir, out_path=None, sun_alt_max=-18.0,
+                       moon_alt_max=90.0, badpix=True, max_frames=None,
+                       scratch_dir=None, pattern="*.fits.bz2", log=None):
+    """
+    Median-stack one (cloudy) night's frames into a luminance image.
+
+    Selects dark frames (Sun < ``sun_alt_max``; ``moon_alt_max`` defaults to 90,
+    i.e. the Moon cut is disabled because a cloudy night is chosen by hand),
+    builds the luminance median (optionally zeroing the nearest bad-pixel mask),
+    and writes ``<night-name>_median.fits`` carrying the raw-frame alt/az WCS for
+    the night's epoch. Returns the output `~pathlib.Path`.
+    """
+    night_dir = Path(night_dir)
+    frames = sorted(night_dir.glob(pattern))
+    dark = select_dark_frames(frames, sun_alt_max=sun_alt_max,
+                              moon_alt_max=moon_alt_max, log=log)
+    if log:
+        log(f"{len(dark)} dark frames of {len(frames)}")
+    if not dark:
+        raise ValueError("no dark frames selected")
+
+    mdate = _badpix_date_from_dir(night_dir, dark)
+    badpix_mask = None
+    if badpix:
+        badpix_mask, _ = load_alcor_badpix_mask(Time(mdate.isoformat() + "T12:00:00"))
+
+    median = build_alcor_luminance_median(
+        dark, badpix_mask=badpix_mask, max_frames=max_frames,
+        scratch_dir=scratch_dir, log=log)
+
+    cal = alcor_calibration(Time(mdate.isoformat() + "T12:00:00"))
+    wcs = build_alcor_wcs(
+        xcen=cal["xcen"], ycen=cal["ycen"], rotation=cal["rotation"],
+        radial_coeffs=cal["radial_coeffs"], horizon_radius=cal["horizon_radius"],
+        tangential_coeffs=cal["tangential_coeffs"], axis_tilt=cal["axis_tilt"])
+
+    out_path = Path(str(out_path)) if out_path is not None \
+        else Path(f"{night_dir.name}_median.fits")
+    hdu = fits.PrimaryHDU(data=median, header=wcs.to_header(relax=True))
+    hdu.header["NSTACK"] = (len(dark), "dark frames median-combined")
+    hdu.header["LUM"] = ("R+G+B", "luminance sum of channels")
+    hdu.writeto(out_path, overwrite=True)
+    if log:
+        log(f"wrote {out_path}")
+    return out_path
+
+
+def alcor_median_stack_cli():
+    """CLI entry point for :func:`alcor_median_stack`."""
+    parser = argparse.ArgumentParser(
+        description="Median-stack a cloudy night's alcor frames into a luminance image.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("night_dir", help="Directory of one (cloudy) night's frames.")
+    parser.add_argument("-o", "--out", default=None,
+                        help="Output FITS (default: <night-name>_median.fits).")
+    parser.add_argument("--sun-alt-max", type=float, default=-18.0,
+                        help="Use frames with Sun altitude below this (deg).")
+    parser.add_argument("--moon-alt-max", type=float, default=90.0,
+                        help="Use frames with Moon altitude below this (deg); 90 disables.")
+    parser.add_argument("--no-badpix", action="store_true",
+                        help="Do not zero the nearest bad-pixel mask before combining.")
+    parser.add_argument("--max-frames", type=int, default=None,
+                        help="Cap frames used (strided) to bound runtime/scratch.")
+    parser.add_argument("--scratch-dir", default=None,
+                        help="Directory for the temporary memmap (default: system temp).")
+    parser.add_argument("--pattern", default="*.fits.bz2", help="Glob for input frames.")
+    parser.add_argument("--quiet", action="store_true",
+                        help="Do not print per-step progress messages.")
+    args = parser.parse_args()
+
+    log = None if args.quiet else (lambda m: print(m, file=sys.stderr))
+    out = alcor_median_stack(
+        args.night_dir, out_path=args.out, sun_alt_max=args.sun_alt_max,
+        moon_alt_max=args.moon_alt_max, badpix=not args.no_badpix,
+        max_frames=args.max_frames, scratch_dir=args.scratch_dir,
+        pattern=args.pattern, log=log)
+    print(out)

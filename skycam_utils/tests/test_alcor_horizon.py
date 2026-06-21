@@ -63,3 +63,24 @@ def test_packaged_horizon_mask_loads():
     frac = mask.mean()
     assert 0.2 < frac < 0.8
     assert (~mask).any() and mask.any()
+
+
+def test_build_luminance_median_collapses_and_rejects(tmp_path):
+    from skycam_utils.alcor import build_alcor_luminance_median
+    # 5 frames, shape (3, 4, 4); luminance is 30 everywhere (10+10+10).
+    # One frame has an R-channel outlier at (0,0) -> luminance 1020 there.
+    base = np.full((3, 4, 4), 10, dtype=np.int16)
+    files = []
+    for i, val in enumerate([10, 10, 10, 10, 1000]):
+        frame = base.copy()
+        frame[0, 0, 0] = val
+        p = tmp_path / f"f{i}.fits"
+        fits.PrimaryHDU(data=frame).writeto(p)
+        files.append(p)
+
+    med = build_alcor_luminance_median(files, scratch_dir=str(tmp_path))
+
+    assert med.shape == (4, 4)               # channels collapsed
+    assert med.dtype == np.float32
+    assert med[0, 0] == 30.0                 # per-pixel median rejects the outlier frame
+    assert med[2, 3] == 30.0                 # unchanged elsewhere

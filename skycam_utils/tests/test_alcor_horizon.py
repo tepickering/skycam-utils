@@ -124,3 +124,37 @@ def test_build_horizon_mask_synthetic():
     # both obstructions are masked
     assert mask[120, 200]                         # inside the rim finger
     assert mask[120, 70]                          # inside the enclosed square
+
+
+def test_horizon_epoch_parsing():
+    from skycam_utils.alcor import _horizon_epoch
+    from pathlib import Path
+    import pytest
+    assert _horizon_epoch(None, Path("2026-02-18_median.fits")) == date(2026, 2, 18)
+    assert _horizon_epoch(None, Path("2026_02_18_median.fits")) == date(2026, 2, 18)
+    assert _horizon_epoch("2025-12-01", Path("anything.fits")) == date(2025, 12, 1)
+    with pytest.raises(ValueError):
+        _horizon_epoch(None, Path("median.fits"))
+
+
+def test_create_horizon_mask_writes_dated_mask(tmp_path):
+    from skycam_utils.alcor import create_horizon_mask, build_alcor_wcs
+    nx = ny = 120
+    img = np.full((ny, nx), 1000.0, dtype=np.float32)
+    img[:, 95:] = 1.0                                  # a dark block to the +x rim
+    median = tmp_path / "2026-02-18_median.fits"
+    fits.PrimaryHDU(data=img).writeto(median)
+    # pass an explicit small WCS so the build doesn't use the real 1411x1422 geometry
+    wcs = build_alcor_wcs(xcen=60.0, ycen=60.0, rotation=0.0,
+                          radial_coeffs=(1.0, 0.0, 0.0), horizon_radius=55.0)
+
+    out = create_horizon_mask(median, wcs=wcs, out_dir=str(tmp_path))
+
+    assert out.name == "alcor_horizon_2026-02-18.fits.gz"   # epoch parsed from filename
+    assert out.exists()
+    data = fits.getdata(out)
+    assert data.dtype == np.uint8
+    hdr = fits.getheader(out)
+    assert hdr["METHOD"] == "sobel-floodfill"
+    assert hdr["NMASK"] + hdr["NSKY"] == ny * nx
+    assert not hdr["UNDET"]                                  # no --phot-nights given

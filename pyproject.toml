@@ -60,6 +60,7 @@ alcor_star_photometry = "skycam_utils.alcor:alcor_star_photometry_cli"
 fit_alcor_wcs = "skycam_utils.alcor:fit_alcor_wcs_cli"
 create_badpix_mask = "skycam_utils.alcor:create_badpix_mask_cli"
 alcor_median_stack = "skycam_utils.alcor:alcor_median_stack_cli"
+create_horizon_mask = "skycam_utils.alcor:create_horizon_mask_cli"
 
 [tool.setuptools.packages.find]
 include = ["skycam_utils*"]

@@ -3941,3 +3941,181 @@ def build_alcor_horizon_mask(median_img, wcs, undetected=None, *,
         notsky = notsky_open
 
     return (~in_fov) | notsky
+
+
+def _alcor_undetected_fraction(phot_nights, wcs, smooth=1.0):
+    """
+    Accumulate the az/alt undetected-star fraction from fixed-position per-frame
+    photometry over several nights, for the SW->W building sector wall.
+
+    Reads ``xcen``/``ycen``/``flux_g_ap`` from every ``*_phot.csv`` under each
+    directory in ``phot_nights`` (a star is "undetected" when ``flux_g_ap == 0``),
+    projects to az/alt via ``wcs``, and bins into a 0.5-deg az/alt grid smoothed
+    by ``smooth``. Returns a callable ``f(az, alt) -> (fraction, count)`` over
+    identically-shaped arrays (altitude clipped into the grid), or ``None`` if no
+    measurements were found.
+    """
+    xs, ys, det = [], [], []
+    for ddir in phot_nights:
+        for f in sorted(Path(ddir).glob("*_phot.csv")):
+            try:
+                d = pd.read_csv(f, usecols=["xcen", "ycen", "flux_g_ap"])
+            except Exception:
+                continue
+            xs.append(d["xcen"].to_numpy())
+            ys.append(d["ycen"].to_numpy())
+            det.append((d["flux_g_ap"] > 0).to_numpy())
+    if not xs:
+        return None
+
+    px, py = np.concatenate(xs), np.concatenate(ys)
+    ap_det = np.concatenate(det)
+    sw = wcs.all_pix2world(np.column_stack([px, py]), 0)
+    saz, salt = sw[:, 0] % 360.0, sw[:, 1]
+    undet = ~ap_det
+    ok = np.isfinite(saz) & np.isfinite(salt)
+    saz, salt, undet = saz[ok], salt[ok], undet[ok]
+
+    az_e = np.arange(-0.25, 360.0, 0.5)
+    alt_e = np.arange(-6.25, 30.26, 0.5)
+    az_c = 0.5 * (az_e[:-1] + az_e[1:])
+    alt_c = 0.5 * (alt_e[:-1] + alt_e[1:])
+    Htot, _, _ = np.histogram2d(saz, salt, bins=[az_e, alt_e])
+    Hund, _, _ = np.histogram2d(saz[undet], salt[undet], bins=[az_e, alt_e])
+    frac = ndimage.gaussian_filter(Hund / np.maximum(Htot, 1), (smooth, smooth))
+    fr_i = RegularGridInterpolator((az_c, alt_c), frac,
+                                   bounds_error=False, fill_value=0.0)
+    ct_i = RegularGridInterpolator((az_c, alt_c), Htot,
+                                   bounds_error=False, fill_value=0.0)
+
+    def sample(az, alt):
+        shape = np.shape(az)
+        a = np.clip(np.asarray(alt, dtype=float), alt_c[0], alt_c[-1])
+        pts = np.column_stack([np.asarray(az, dtype=float).ravel(), a.ravel()])
+        return fr_i(pts).reshape(shape), ct_i(pts).reshape(shape)
+
+    return sample
+
+
+def _horizon_epoch(epoch, median_path):
+    """
+    Resolve the horizon-mask epoch date: explicit ``epoch`` (a ``date`` or a
+    ``YYYY-MM-DD``/``YYYY_MM_DD`` string) wins, else parse the date from the
+    median filename. Raises ``ValueError`` if neither yields a date.
+    """
+    if isinstance(epoch, date):
+        return epoch
+    if epoch is not None:
+        m = re.search(r"(\d{4})[-_](\d{2})[-_](\d{2})", str(epoch))
+        if not m:
+            raise ValueError(f"cannot parse epoch {epoch!r}; use YYYY-MM-DD")
+        return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    m = re.search(r"(\d{4})[-_](\d{2})[-_](\d{2})", Path(median_path).name)
+    if not m:
+        raise ValueError(
+            f"cannot determine epoch from median filename "
+            f"{Path(median_path).name!r}; pass epoch=YYYY-MM-DD")
+    return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+
+
+def create_horizon_mask(median_path, epoch=None, wcs=None, out_dir=None,
+                        phot_nights=None, edge_pct=96.0, edge_dilate=1,
+                        open_radius=3, sector=(225.0, 270.0), und_thr=0.5,
+                        und_mincount=15, rim_alt=1.5, rod_area_min=400, log=None):
+    """
+    Build and write a date-stamped horizon mask from a cloudy-night luminance
+    median.
+
+    Resolves the epoch (``epoch`` or the median filename), builds the raw-frame
+    WCS for that epoch (unless ``wcs`` is given), optionally accumulates the
+    SW->W undetected-star patch from ``phot_nights`` (a list of dirs of
+    ``*_phot.csv``; omitted -> that sector is Sobel-only), builds the mask, and
+    writes ``alcor_horizon_YYYY-MM-DD.fits.gz`` to ``out_dir`` (default: the
+    resolved horizon directory). Returns the output `~pathlib.Path`.
+    """
+    median_path = Path(median_path)
+    img = np.asarray(fits.getdata(median_path), dtype=float)
+    if img.ndim != 2:
+        raise ValueError(f"median {median_path.name} is not a 2-D luminance image")
+
+    mdate = _horizon_epoch(epoch, median_path)
+    if wcs is None:
+        cal = alcor_calibration(Time(mdate.isoformat() + "T12:00:00"))
+        wcs = build_alcor_wcs(
+            xcen=cal["xcen"], ycen=cal["ycen"], rotation=cal["rotation"],
+            radial_coeffs=cal["radial_coeffs"], horizon_radius=cal["horizon_radius"],
+            tangential_coeffs=cal["tangential_coeffs"], axis_tilt=cal["axis_tilt"])
+
+    undetected = None
+    if phot_nights:
+        undetected = _alcor_undetected_fraction(phot_nights, wcs)
+        if undetected is None and log:
+            log("no *_phot.csv measurements found; SW->W sector uses Sobel edges only")
+    elif log:
+        log("no phot_nights given; SW->W sector uses Sobel edges only")
+
+    mask = build_alcor_horizon_mask(
+        img, wcs, undetected=undetected, edge_pct=edge_pct,
+        edge_dilate=edge_dilate, open_radius=open_radius, sector=sector,
+        und_thr=und_thr, und_mincount=und_mincount, rim_alt=rim_alt,
+        rod_area_min=rod_area_min)
+
+    out_dir = Path(str(out_dir)) if out_dir is not None else _resolve_horizon_dir()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"alcor_horizon_{mdate.isoformat()}.fits.gz"
+
+    hdu = fits.PrimaryHDU(data=mask.astype(np.uint8))
+    hdu.header["METHOD"] = ("sobel-floodfill", "horizon mask construction")
+    hdu.header["SRCMED"] = (median_path.name, "source median image")
+    hdu.header["EDGEPCT"] = (edge_pct, "Sobel-edge wall percentile")
+    hdu.header["OPENR"] = (open_radius, "morphological opening radius (px)")
+    hdu.header["ALTCUT"] = (0.0, "altitude cutoff (deg); <= is masked")
+    hdu.header["UNDET"] = (bool(undetected is not None), "SW->W undetected patch used")
+    hdu.header["NMASK"] = (int(mask.sum()), "masked (not-sky) pixels")
+    hdu.header["NSKY"] = (int((~mask).sum()), "valid-sky pixels")
+    hdu.writeto(out_path, overwrite=True)
+    if log:
+        log(f"sky px {int((~mask).sum())}  not-sky {int(mask.sum())} "
+            f"({100 * mask.sum() / mask.size:.1f}% of frame)")
+        log(f"wrote {out_path}")
+    return out_path
+
+
+def create_horizon_mask_cli():
+    """CLI entry point for :func:`create_horizon_mask`."""
+    parser = argparse.ArgumentParser(
+        description="Build a date-stamped alcor horizon (sky/not-sky) mask from a cloudy-night median.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("median", help="Cloudy-night luminance median FITS (from alcor_median_stack).")
+    parser.add_argument("--epoch", default=None,
+                        help="Mask date YYYY-MM-DD (default: parsed from the median filename).")
+    parser.add_argument("--out-dir", default=None,
+                        help="Output dir (default: $ALCOR_HORIZON_DIR or packaged data/horizon).")
+    parser.add_argument("--phot-nights", nargs="+", default=None,
+                        help="Dirs of *_phot.csv for the SW->W undetected-star patch "
+                             "(omitted: that sector uses Sobel edges only).")
+    parser.add_argument("--edge-pct", type=float, default=96.0, help="Sobel-edge wall percentile.")
+    parser.add_argument("--edge-dilate", type=int, default=1, help="Wall dilation iterations.")
+    parser.add_argument("--open-radius", type=int, default=3, help="Morphological opening radius (px).")
+    parser.add_argument("--sector", type=float, nargs=2, default=[225.0, 270.0],
+                        metavar=("AZ_LO", "AZ_HI"), help="Undetected-patch azimuth sector (deg).")
+    parser.add_argument("--und-thr", type=float, default=0.5, help="Undetected fraction = obstructed.")
+    parser.add_argument("--und-mincount", type=int, default=15, help="Min star transits per cell.")
+    parser.add_argument("--rim-alt", type=float, default=1.5,
+                        help="A not-sky blob reaching below this alt is rim-connected (kept).")
+    parser.add_argument("--rod-area-min", type=int, default=400,
+                        help="Keep isolated not-sky blobs at least this size (px): the lightning rod.")
+    parser.add_argument("--quiet", action="store_true",
+                        help="Do not print per-step progress messages.")
+    args = parser.parse_args()
+
+    log = None if args.quiet else (lambda m: print(m, file=sys.stderr))
+    out = create_horizon_mask(
+        args.median, epoch=args.epoch, out_dir=args.out_dir,
+        phot_nights=args.phot_nights, edge_pct=args.edge_pct,
+        edge_dilate=args.edge_dilate, open_radius=args.open_radius,
+        sector=tuple(args.sector), und_thr=args.und_thr,
+        und_mincount=args.und_mincount, rim_alt=args.rim_alt,
+        rod_area_min=args.rod_area_min, log=log)
+    print(out)

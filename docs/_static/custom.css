@@ -1,9 +1,0 @@
-/* pydata-sphinx-theme paints every content image white in dark mode
-   (html[data-theme=dark] .bd-content img:not(.only-dark,.dark-light)) so that
-   transparent plots stay readable. The all-sky overlay and sky-brightness
-   figures are designed to sit on the page background, so opt them out via the
-   `transparent-bg` class on their `.. figure:: :class:`. */
-html[data-theme="dark"] .bd-content img.transparent-bg {
-    background-color: transparent !important;
-    border-radius: 0;
-}

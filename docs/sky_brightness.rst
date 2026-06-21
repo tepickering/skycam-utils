@@ -3,11 +3,14 @@ Sky Brightness
 ##############
 
 The same WCS geometry and photometric zeropoints that calibrate point sources
-(see :doc:`wcs_calibration` and :doc:`photometry`) also turn an Alcor OMEA frame into
+(see :doc:`wcs_calibration` and :doc:`photometry`) can also turn an Alcor OMEA frame into
 a calibrated **surface-brightness map** in V mag/arcsec². This is what
 :func:`~skycam_utils.alcor.plot_alcor_sky_brightness` produces, and it is the
 natural tool for quantifying airglow as well as light pollution, both overall and
-in specific regions affected by localized sources.
+in specific regions affected by localized sources. The OMEA **G** channel maps very closely
+to a standard **V** bandpass, as shown in :doc:`photometry`. The sky brightness
+values produced can thus be directly compared to other sky quality monitor (SQM) measurements
+that are also calibrated to the standard **V** bandpass.
 
 What it measures
 ================
@@ -41,13 +44,12 @@ End-to-end validation
 =====================
 
 A clear, dark frame lands at a **sigma-clipped median zenith brightness of
-≈ 21.5–21.6 mag/arcsec²** (the cap above altitude 85°, annotated in the figure
+≈ 21.5–21.6 mag/arcsec²** (above altitude 85°, annotated in the figure
 corner). Recovering that canonical dark-sky value with *no free parameters*
 validates the whole exposure → solid-angle → zeropoint chain end to end.
 
 .. figure:: images/skybright_test.png
    :width: 100%
-   :class: transparent-bg
    :alt: Alcor G-channel sky-brightness map in V mag/arcsec^2.
 
    An Alcor sky-brightness map: the G channel converted to observed

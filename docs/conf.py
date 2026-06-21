@@ -7,7 +7,7 @@ from importlib.metadata import metadata
 try:
     from sphinx_astropy.conf.v3 import *  # noqa: F401,F403
 except ImportError:
-    print("ERROR: the documentation requires the sphinx-astropy[confv3] package to be installed")
+    print("ERROR: the documentation requires the sphinx-astropy package to be installed")
     sys.exit(1)
 
 _meta = metadata("skycam_utils")
@@ -24,27 +24,33 @@ highlight_language = "python3"
 exclude_patterns.append("_templates")  # noqa: F405
 rst_epilog += "\n"  # noqa: F405
 
+# -- HTML output -------------------------------------------------------------
+# sphinx-astropy's conf.v3 selects the pydata-based "astropy-unified" theme; we
+# keep its extension/intersphinx machinery but render with the Read the Docs
+# theme instead, so override the theme (and its options) here.
+html_theme = "sphinx_rtd_theme"
+
 html_title = f"{project} v{release}"
-
 html_static_path = ["_static"]
-html_css_files = ["custom.css"]
 
-# The trimmed grey MMT logo reads on both the light and dark theme, so use the
-# one image for both modes.
+# The trimmed grey MMT logo sits in the RTD sidebar header.
 html_logo = "_static/mmt_logo.png"
 
 # MMT favicon (from mmto.org) in place of the theme's astropy default.
 html_favicon = "_static/mmt_favicon.ico"
 
-# astropy-unified is a pydata-based theme; wire up the GitHub link and the
-# "Edit on GitHub" button. v3 deletes the inherited theme options.
 html_theme_options = {
-    "github_url": f"https://github.com/{GITHUB_PROJECT}",
-    "use_edit_page_button": True,
+    "logo_only": False,
+    "collapse_navigation": False,
+    "navigation_depth": 3,
+    "style_external_links": True,
 }
+
+# Wire up the RTD theme's "Edit on GitHub" link.
 html_context = {
+    "display_github": True,
     "github_user": GITHUB_PROJECT.split("/")[0],
     "github_repo": GITHUB_PROJECT.split("/")[1],
     "github_version": "main",
-    "doc_path": "docs",
+    "conf_py_path": "/docs/",
 }

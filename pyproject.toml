@@ -30,7 +30,13 @@ Homepage = "https://github.com/tepickering/skycam-utils"
 
 [project.optional-dependencies]
 docs = [
-    "sphinx-astropy[confv3]>=1.11",
+    # The Read the Docs theme plus sphinx-astropy's extension/intersphinx
+    # machinery (autodoc, automodapi, numpydoc, jquery). sphinx-copybutton is
+    # listed explicitly because conf.v2's extension list references it but it
+    # only ships in sphinx-astropy's confv2/confv3 theme extras, which we drop.
+    "sphinx-astropy>=1.11",
+    "sphinx-copybutton",
+    "sphinx-rtd-theme>=3.0",
 ]
 test = [
     "pytest",

@@ -2,12 +2,12 @@
 WCS Calibration
 ################
 
-The Alcor OMEA all-sky camera images the whole visible sky onto a single RGB CMOS
-sensor. To do anything quantitative with that frame — measure a known star,
+The Alcor OMEA all-sky camera images the whole sky onto a colour CMOS
+sensor using a fish-eye lens. To do anything quantitative with its data — measure a known star,
 mask the horizon, build a sky-brightness map — the mapping between pixels and sky
 must be known accurately. ``skycam_utils`` solves this by attaching a full
-:class:`~astropy.wcs.WCS` to the raw frames that maps **pixel ↔ (azimuth,
-altitude)**. The WCS *is* the geometry; nothing downstream re-derives it.
+:class:`~astropy.wcs.WCS` to the raw frames that accurately maps **pixel ↔ (azimuth,
+altitude)**.
 
 The geometric model
 ===================
@@ -30,7 +30,7 @@ The model encodes, in order of magnitude:
 - **Tangential decentering** — Brown–Conrady ``P1``/``P2`` terms (exact degree-2
   SIP) that absorb the sensor-tilt signature: a once-per-azimuth residual that
   grows as :math:`r^2`.
-- **Optical-axis tilt** — a world-side tilt (``axis_tilt``, in degrees toward
+- **Optical-axis tilt** — a camera-system tilt (``axis_tilt``, in degrees toward
   north/east) encoded as the WCS pole: ``CRVAL = (A0, 90 − ε)`` with
   ``LONPOLE = A0``. With nonzero tilt the optical-axis pixel
   (``xcen``/``ycen``) is **not** the zenith; the zenith must be located through
@@ -38,7 +38,7 @@ The model encodes, in order of magnitude:
 
 Every one of these is a real, physically-motivated degree of freedom, and each
 was added only after the residuals demanded it. The fitted geometry is a set of
-absolute raw-frame constants — ``xcen``, ``ycen``, ``rotation``,
+absolute constants — ``xcen``, ``ycen``, ``rotation``,
 ``radial_coeffs``, ``tangential_coeffs``, ``axis_tilt``, ``horizon_radius`` —
 stored in the time-indexed ``ALCOR_CALIBRATIONS`` table in
 :mod:`skycam_utils.alcor`.
@@ -72,8 +72,9 @@ aggregates bright-star matches across **all dark frames of a whole night** and
 prints a ready-to-paste ``ALCOR_CALIBRATIONS`` epoch dict (stamped with the
 night's UT date) to add to ``alcor.py`` and commit.
 
-- **Reference catalog** — ``bright_star_sloan.fits``, stars with ``Vmag <= 4``.
-- **Dark-frame selection** — only frames with Sun ``< −18°`` *and* Moon
+- **Reference catalog** — ``bright_star_sloan.fits``, stars with ``Vmag <= 4`` by
+  default (configurable via ``--vmag-limit``).
+- **Dark-frame selection** — by default, only frames with Sun ``< −18°`` *and* Moon
   ``< −6°`` are used; moonlight scatter swamps the faint star field and corrupts
   detection. Frame times are parsed from the ``YYYY_MM_DD__HH_MM_SS`` filename
   (local MST = UT − 7), so the selector never opens files it will reject.
@@ -88,8 +89,8 @@ night's UT date) to add to ``alcor.py`` and commit.
   (~3 px).
 - **Radial order** — by default only the cubic ``k3`` is fit; pass ``--fit-k5``
   to also fit the quintic ``k5``. The committed calibrations use the full ``k5``
-  model: without it, ``k3`` runs away trying to absorb the quintic curvature and
-  the high-zenith residual balloons. The difference is large — on 2026-05-18 the
+  model: without it, ``k3`` runs away trying to absorb the quintic distortion that
+  the OMEA camera's lens exhibits. The difference is large — on 2026-05-18 the
   pooled RMS drops from **~1.44 px (k3 only)** to **~0.33 px (k3 + k5)** over the
   same matched-star set — so ``--fit-k5`` is required to reproduce them.
 
@@ -109,21 +110,21 @@ On clean dark frames the fit matches ~80 stars per frame. With the full model
 (``k5`` + ``P1``/``P2`` + axis tilt) a healthy fit reaches a **matched fraction
 near 0.7** and a **pooled RMS of ~0.35 px** (0.33 px over ~76,000 matched stars
 on 2026-05-18, sub-pixel across the whole field). The residual floor is *not*
-noise: it is a smooth, azimuthally-symmetric ~0.6 px peak-to-peak radial wiggle,
-the signature of truncating the ``k3``/``k5`` radial polynomial, and was not
-deemed worth chasing with more terms.
+noise: it is a smooth, azimuthally-symmetric ~0.6 px peak-to-peak radial wiggle.
+This appears to be a signature of truncating the radial polynomial. However, given
+that the RMS was already well under 0.5 px, it was not deemed worth chasing with more terms.
 
 The first figure overlays the WCS-predicted positions of catalog bright stars on
 a real dark frame: the apertures land on the stars from the zenith out toward
 the horizon and at every azimuth — the direct visual confirmation that the
-projection, distortion, and tilt terms are all pulling their weight.
+projection, distortion, and tilt terms are describing the camera's geometry and
+orientation well.
 
 .. figure:: images/alcor_wcs_overlay.png
    :width: 100%
-   :class: transparent-bg
    :alt: WCS-predicted bright-star apertures overlaid on a real Alcor frame.
 
-   Named bright-star positions predicted by the fitted WCS (aperture + annulus
+   Catalog star positions predicted by the fitted WCS (aperture + annulus
    markers) overlaid on a dark 2026-05-18 frame, north-up. The predicted
    positions track the visible stars across the whole field; the inset zooms on a
    near-zenith star, showing it centred inside its aperture.
@@ -134,8 +135,7 @@ residuals. Panel 1 (residual vs zenith angle) shows the refined residuals are
 sub-pixel across the **entire** zenith range; panel 3 bins the residual vectors
 over the detector and shows no coherent left-over structure; and the bottom row
 decomposes each residual into radial and tangential components, confirming the
-only leftover signal is the small azimuthally-symmetric radial wiggle (the
-``k3``/``k5`` truncation floor) rather than a missed 2-D decenter/tilt term.
+only leftover signal is the small azimuthally-symmetric radial term.
 
 .. figure:: images/alcor_wcs_residuals.png
    :width: 100%

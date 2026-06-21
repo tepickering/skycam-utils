@@ -23,7 +23,7 @@ calibration assets differ:
   and developed.
 
 The Alcor OMEA pipeline is built around a single principle: **the WCS is the one
-source of truth for geometry.** When a raw frame is loaded, an ARC-projection world
+source of truth for geometry and orientation.** When a raw frame is loaded, an ARC-projection world
 coordinate system (WCS) is attached that maps every pixel to an (azimuth, altitude) on the sky.
 This WCS encodes the zenith offset, camera rotation, lens distortion, sensor tilt, and
 optical-axis tilt. Everything downstream — star photometry, the horizon mask,

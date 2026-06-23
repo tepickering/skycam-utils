@@ -3032,6 +3032,42 @@ def plot_alcor_fits(filename, outimage=None, outfig=None, radius=680,
     return fig
 
 
+def _alcor_sky_brightness_map(cube, wcs, time, exposure,
+                              saturation=ALCOR_SB_SATURATION):
+    """
+    Full-frame V mag/arcsec^2 surface-brightness map from an alcor cube.
+
+    Returns ``(mu, alt)``: the green channel calibrated to V magnitudes per
+    square arcsecond -- corner-bias-subtracted, scaled to the
+    :data:`ALCOR_CALIB_EXPTIME` reference exposure via ``exposure`` (counts are
+    linear in exposure), divided by the WCS per-pixel solid angle
+    (:func:`_alcor_pixel_solid_angle`), and offset by the epoch G->V zeropoint
+    with no airmass term -- plus the per-pixel altitude grid in degrees. Pixels
+    the WCS cannot project (off the sky) and pixels with raw G at or above
+    ``saturation`` (clipped/non-linear) are blanked to NaN in ``mu``. Geometric
+    masking (horizon mask / altitude floor) is left to the caller, since callers
+    differ in their default sky cutoff.
+    """
+    g_raw = np.asarray(cube[1], dtype=float)
+    bias = _corner_bias(cube)[1]
+    # Counts scaled to the calibration's reference exposure (counts/20 s).
+    g20 = (g_raw - bias) * (ALCOR_CALIB_EXPTIME / exposure)
+
+    ny, nx = g_raw.shape
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    az, alt = wcs.pixel_to_world_values(xx.astype(float), yy.astype(float))
+    omega = _alcor_pixel_solid_angle(az, alt)
+    zp_g = alcor_zeropoint(time)["g"]["zp"]
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        surf = g20 / omega
+        mu = np.where(surf > 0, -2.5 * np.log10(surf) + zp_g, np.nan)
+
+    blank = ~np.isfinite(mu) | ~np.isfinite(alt) | (g_raw >= saturation)
+    mu = np.where(blank, np.nan, mu)
+    return mu, alt
+
+
 def plot_alcor_sky_brightness(filename, outimage=None, outfig=None,
                               radius=ALCOR_RADIUS, fov_altitude=-2.0,
                               horizon_mask=False, saturation=ALCOR_SB_SATURATION,
@@ -3099,29 +3135,19 @@ def plot_alcor_sky_brightness(filename, outimage=None, outfig=None,
     time = _alcor_frame_time(filename)
     exposure = _read_frame_exposure(filename)
 
-    g_raw = np.asarray(cube[1], dtype=float)
-    bias = _corner_bias(cube)[1]
-    # Counts scaled to the calibration's reference exposure (counts/20 s).
-    g20 = (g_raw - bias) * (ALCOR_CALIB_EXPTIME / exposure)
+    mu, alt = _alcor_sky_brightness_map(cube, wcs, time, exposure,
+                                        saturation=saturation)
+    ny, nx = mu.shape
 
-    ny, nx = g_raw.shape
-    yy, xx = np.mgrid[0:ny, 0:nx]
-    az, alt = wcs.pixel_to_world_values(xx.astype(float), yy.astype(float))
-    omega = _alcor_pixel_solid_angle(az, alt)
-    zp_g = alcor_zeropoint(time)["g"]["zp"]
-
-    with np.errstate(divide="ignore", invalid="ignore"):
-        surf = g20 / omega
-        mu = np.where(surf > 0, -2.5 * np.log10(surf) + zp_g, np.nan)
-
-    blank = ~np.isfinite(mu) | ~np.isfinite(alt) | (g_raw >= saturation)
+    # Geometric (non-sky) masking: the full horizon/obstruction mask, or an
+    # altitude floor when not using it (or when the mask is unavailable).
     if horizon_mask:
         hmask, _ = load_alcor_horizon_mask(time)
-        blank |= (np.asarray(hmask, dtype=bool) if hmask is not None
-                  else (alt < fov_altitude))
+        geo_blank = (np.asarray(hmask, dtype=bool) if hmask is not None
+                     else (alt < fov_altitude))
     else:
-        blank |= (alt < fov_altitude)
-    mu = np.where(blank, np.nan, mu)
+        geo_blank = (alt < fov_altitude)
+    mu = np.where(geo_blank, np.nan, mu)
 
     # Sigma-clipped median zenith brightness from the cap above altitude 85 deg.
     zen = mu[np.isfinite(mu) & (alt > 85.0)]
@@ -3181,6 +3207,84 @@ def plot_alcor_sky_brightness(filename, outimage=None, outfig=None,
         plt.savefig(outfig, transparent=True, bbox_inches="tight", pad_inches=0)
 
     return fig
+
+
+def alcor_sky_brightness_fits(filename, output_file=None, horizon_mask=False,
+                              saturation=ALCOR_SB_SATURATION, overwrite=False,
+                              **kwargs):
+    """
+    Calibrate an alcor OMEA 8C frame to a V mag/arcsec^2 surface-brightness map
+    and write it as a 2-D FITS image with the raw-frame alt/az WCS attached.
+
+    The green channel is bias-subtracted, exposure-normalised to
+    :data:`ALCOR_CALIB_EXPTIME`, divided by the WCS per-pixel solid angle, and
+    converted with the epoch G->V zeropoint (no airmass term) -- the same
+    calibration as :func:`plot_alcor_sky_brightness`, but written as a
+    full-frame ``float32`` FITS data product in the camera's native orientation
+    so the attached WCS resolves directly (matching :func:`alcor_proc_fits`).
+    Bad pixels are repaired by default (``badpix="repair"``).
+
+    Off-frame pixels and pixels with raw G at or above ``saturation`` are blanked
+    to NaN. With ``horizon_mask=True`` the not-sky region from
+    :func:`load_alcor_horizon_mask` is additionally blanked; otherwise no
+    altitude floor is applied (every on-sky pixel keeps its calibrated value).
+
+    Parameters
+    ----------
+    filename : str or `~pathlib.Path`
+        Input alcor FITS frame (gz/bz2 allowed).
+    output_file : str or `~pathlib.Path` or None (default=None)
+        Output path. If None, derived from `filename` by replacing the first
+        `.fits` extension with `_sb.fits`.
+    horizon_mask : bool (default=False)
+        Additionally blank the full horizon/obstruction mask.
+    saturation : int (default ALCOR_SB_SATURATION)
+        Raw-ADU level at/above which G pixels are blanked as non-linear.
+    overwrite : bool (default=False)
+        Passed through to `fits.PrimaryHDU.writeto`.
+    **kwargs
+        Forwarded to `load_alcor_fits` (``wcs``, ``masks_dir``, ...). ``badpix``
+        defaults to ``"repair"`` here but may be overridden.
+
+    Returns
+    -------
+    output_file : `~pathlib.Path`
+        Path to the written FITS file.
+    """
+    kwargs.setdefault("badpix", "repair")
+    cube, wcs, _ = load_alcor_fits(filename, **kwargs)
+    time = _alcor_frame_time(filename)
+    exposure = _read_frame_exposure(filename)
+
+    mu, _ = _alcor_sky_brightness_map(cube, wcs, time, exposure,
+                                      saturation=saturation)
+    if horizon_mask:
+        hmask, _ = load_alcor_horizon_mask(time)
+        if hmask is not None:
+            mu = np.where(np.asarray(hmask, dtype=bool), np.nan, mu)
+
+    if output_file is None:
+        stem = str(filename)
+        for ext in (".fits.bz2", ".fits.gz", ".fits"):
+            if stem.endswith(ext):
+                stem = stem[: -len(ext)]
+                break
+        output_file = stem + "_sb.fits"
+    output_file = Path(output_file)
+
+    zp = alcor_zeropoint(time)
+    header = wcs.to_header(relax=True)
+    header["BUNIT"] = ("mag/arcsec2", "observed V surface brightness")
+    header["ZP_G"] = (zp["g"]["zp"], "G->V zeropoint applied (mag)")
+    header["ZP_EPOCH"] = (zp["epoch"], "ALCOR_ZEROPOINTS epoch used")
+    header["EXPOSURE"] = (exposure, "frame exposure (s)")
+    header["CALIBEXP"] = (ALCOR_CALIB_EXPTIME, "reference exposure for counts (s)")
+    header["SATLEVEL"] = (saturation, "raw G blanked at/above this ADU")
+    header["HORIZMSK"] = (bool(horizon_mask), "horizon/obstruction mask applied")
+
+    hdu = fits.PrimaryHDU(data=mu.astype(np.float32), header=header)
+    hdu.writeto(output_file, overwrite=overwrite)
+    return output_file
 
 
 def save_alcor_photometry_check_plot(filename, phot, output_file,
@@ -3480,6 +3584,36 @@ def plot_alcor_sky_brightness_cli():
         figsize=args.figsize,
     )
     print(outfig)
+
+
+def alcor_sky_brightness_cli():
+    """
+    CLI entry point for `alcor_sky_brightness_fits`. Writes a calibrated
+    V mag/arcsec^2 FITS data product with the raw-frame alt/az WCS attached,
+    named after the input file with `_sb.fits` unless `-o` is given.
+    """
+    parser = argparse.ArgumentParser(
+        description="Calibrate an alcor OMEA 8C frame to a V mag/arcsec^2 FITS image with the raw-frame alt/az WCS attached.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("filename", help="Input alcor FITS file.")
+    parser.add_argument("-o", "--output", default=None,
+                        help="Output FITS path (default: <input>_sb.fits).")
+    parser.add_argument("--horizon-mask", action="store_true",
+                        help="Also blank the full horizon/obstruction mask (default blanks only off-frame + saturated pixels).")
+    parser.add_argument("--saturation", type=int, default=ALCOR_SB_SATURATION,
+                        help="Blank raw G pixels at or above this ADU level (clipped/non-linear).")
+    parser.add_argument("--overwrite", action="store_true", help="Overwrite output file if it exists.")
+    args = parser.parse_args()
+
+    out = alcor_sky_brightness_fits(
+        args.filename,
+        output_file=args.output,
+        horizon_mask=args.horizon_mask,
+        saturation=args.saturation,
+        overwrite=args.overwrite,
+    )
+    print(out)
 
 
 def alcor_star_photometry_cli():

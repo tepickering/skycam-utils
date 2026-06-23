@@ -54,9 +54,7 @@ validates the whole exposure → solid-angle → zeropoint chain end to end.
 
    An Alcor sky-brightness map: the G channel converted to observed
    V mag/arcsec² (exposure-normalized to 20 s, divided by the exact WCS
-   per-pixel solid angle, G→V zeropoint, no airmass term). The ``cividis_r``
-   colorbar runs bright-sky-light; the annotated zenith median lands near the
-   canonical dark-sky value.
+   per-pixel solid angle, G→V zeropoint, no airmass term).
 
 Usage
 =====
@@ -73,5 +71,35 @@ The renderer reuses the same zenith crop and alt/az polar grid as
 :func:`~skycam_utils.alcor.plot_alcor_fits` (both call the shared
 ``_alcor_zenith_crop_bounds`` / ``_add_alcor_alt_az_grid`` helpers), so the
 surface-brightness map and the annotated all-sky figure are framed identically.
+
+FITS data product
+=================
+
+:func:`~skycam_utils.alcor.plot_alcor_sky_brightness` is for *display* — it
+crops, stretches, and annotates. When you want the calibrated values themselves
+for further analysis, use its FITS-output sibling
+:func:`~skycam_utils.alcor.alcor_sky_brightness_fits` (CLI
+``alcor_sky_brightness``). Both run the identical, zero-free-parameter
+calibration chain through the shared ``_alcor_sky_brightness_map`` helper; they
+differ only in what they emit.
+
+.. code-block:: bash
+
+   # Calibrated V mag/arcsec^2 FITS with the raw-frame WCS attached
+   alcor_sky_brightness 2026_05_18__04_30_00.fits.bz2 -o frame_sb.fits
+
+   # Additionally blank the obstruction/terrain region
+   alcor_sky_brightness <input.fits> --horizon-mask
+
+The output is the **full frame** in the camera's **native orientation**, written
+as a 2-D ``float32`` image with the raw-frame alt/az WCS in the header (exactly
+like :func:`~skycam_utils.alcor.alcor_proc_fits`), so DS9 and other tools resolve
+the WCS directly. Bad pixels are repaired before calibration. Off-frame pixels
+and pixels with raw G ``>= ALCOR_SB_SATURATION`` are blanked to ``NaN``; unlike
+the display renderer there is **no altitude floor** by default — every on-sky
+pixel keeps its calibrated value, and ``--horizon-mask`` is the only geometric
+masking. The header carries ``BUNIT = 'mag/arcsec2'`` plus provenance keywords
+(``ZP_G``, ``ZP_EPOCH``, ``EXPOSURE``, ``CALIBEXP``, ``SATLEVEL``, ``HORIZMSK``).
+The default output path replaces the input extension with ``_sb.fits``.
 
 See :doc:`reference/index` for the full :mod:`skycam_utils.alcor` API.

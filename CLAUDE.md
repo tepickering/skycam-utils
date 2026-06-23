@@ -59,6 +59,18 @@ plot_alcor_sky_brightness <input.fits> [-o OUT.pdf] [--outimage IMG] [--radius 6
 #   (alt > 85 deg) brightness is annotated. Auto-scales by default (range varies with
 #   moonlight). Default output: <input>_skybright.pdf.
 
+alcor_sky_brightness <input.fits> [-o OUT.fits] [--horizon-mask] [--saturation 25000] [--overwrite]
+#   FITS-output sibling of plot_alcor_sky_brightness: writes the calibrated G->V
+#   observed V mag/arcsec^2 map as a 2-D float32 FITS in the camera's NATIVE
+#   orientation with the raw-frame alt/az WCS attached (so DS9 resolves it; matches
+#   alcor_proc_fits). Same calibration chain (badpix repair, exposure-normalized to
+#   20 s, WCS per-pixel solid angle, G->V zeropoint, NO airmass) via the shared
+#   _alcor_sky_brightness_map helper. NaN-blanks off-frame + raw G >= --saturation;
+#   --horizon-mask additionally blanks not-sky (no altitude floor otherwise). Header
+#   carries BUNIT='mag/arcsec2' + provenance (ZP_G, ZP_EPOCH, EXPOSURE, CALIBEXP,
+#   SATLEVEL, HORIZMSK). Reusable as alcor_sky_brightness_fits(filename, ...).
+#   Default output: <input>_sb.fits.
+
 alcor_star_photometry <input.fits> [-o OUT.csv] [--aperture-radius 4] [--annulus-width 1] [--min-altitude 20] [--vmag-limit 5.5] [--no-refraction] [--sun-alt-max -12] [--saturation 32767] [--gaussian] [--both] [--mask-threshold 15000] [--check-plot] [--check-radius 680]
 #   Fixed-position RGB aperture photometry of named bright stars at their
 #   WCS-predicted pixels (no detection step). Writes <input>_phot.csv indexed

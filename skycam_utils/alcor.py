@@ -60,6 +60,30 @@ ALCOR_CALIB_EXPTIME = 20.0   # seconds
 # flags, because the per-pixel response departs from linear well before clipping.
 ALCOR_SB_SATURATION = 25000   # raw ADU
 
+# Fixed sky-brightness sampling apertures for the nightly archive summary
+# (alcor_process_night). Each is the median surface brightness of the pixels
+# within ALCOR_SB_APERTURE_RADIUS degrees of a fixed (azimuth, altitude), so the
+# same patch of sky is reported for every frame of every night: the zenith as the
+# dark-sky reference, and two low-altitude cones aimed at the Tucson and Nogales
+# light domes.
+ALCOR_SB_APERTURE_RADIUS = 5.0    # deg, angular radius of each sampling cone
+ALCOR_SB_TARGETS = {              # column name -> (azimuth, altitude) in deg
+    "allsky_mv_zenith": (0.0, 90.0),
+    "allsky_mv_tucson": (0.0, 15.0),
+    "allsky_mv_nogales": (190.0, 15.0),
+}
+ALCOR_SB_TARGET_DESCRIPTIONS = {
+    "allsky_mv_zenith":
+        "Allsky visible magnitude at zenith, median within 5 deg radius aperture",
+    "allsky_mv_tucson":
+        "Allsky visible magnitude toward Tucson, median within 5 deg radius "
+        "aperture centered at az=0, alt=15",
+    "allsky_mv_nogales":
+        "Allsky visible magnitude toward Nogales, median within 5 deg radius "
+        "aperture centered at az=190, alt=15",
+}
+ALCOR_SB_TARGET_UNIT = "V mag/arcsec^2"
+
 # Adopted photometric calibration (see ALCOR_ZEROPOINTS). A single achromatic
 # extinction term applies to all three bands, and instrument magnitudes brighter
 # than the bright cut are in the CMOS non-linear regime where the calibration is
@@ -1371,6 +1395,25 @@ def build_alcor_badpix_mask(median_cube, ksize=5, z_thresh=25.0):
     return hot & keep[None, :, :]
 
 
+def _median_stack_tiles(cube_mm, selection, shape, tile=50):
+    """
+    Per-pixel median over the selected frames of an ``(n, 3, ny, nx)`` memmap.
+
+    ``selection`` indexes the frame axis: a slice for a contiguous run, or an
+    index array when only some slots hold valid frames. The median is taken in
+    ``tile``-row slabs so peak memory stays a small multiple of one row block
+    rather than the whole stack. Returns ``(3, ny, nx)`` float32.
+    """
+    nch, ny, nx = shape
+    median = np.empty((nch, ny, nx), dtype=np.float32)
+    for c in range(nch):
+        for r0 in range(0, ny, tile):
+            r1 = min(r0 + tile, ny)
+            slab = np.asarray(cube_mm[selection, c, r0:r1, :], dtype=np.float32)
+            median[c, r0:r1, :] = np.median(slab, axis=0)
+    return median
+
+
 def build_alcor_median_stack(dark_files, max_frames=None, scratch_dir=None,
                              tile=50, log=None):
     """
@@ -1418,13 +1461,7 @@ def build_alcor_median_stack(dark_files, max_frames=None, scratch_dir=None,
         if n == 0:
             raise ValueError("no frames matched the reference shape")
 
-        median = np.empty((nch, ny, nx), dtype=np.float32)
-        for c in range(nch):
-            for r0 in range(0, ny, tile):
-                r1 = min(r0 + tile, ny)
-                slab = np.asarray(cube_mm[:n, c, r0:r1, :], dtype=np.float32)
-                median[c, r0:r1, :] = np.median(slab, axis=0)
-        return median
+        return _median_stack_tiles(cube_mm, slice(0, n), (nch, ny, nx), tile=tile)
     finally:
         del cube_mm
         memmap_path.unlink(missing_ok=True)
@@ -2198,7 +2235,7 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
                           sun_alt_max=-12.0, saturation=ALCOR_SATURATION,
                           gaussian=False,
                           mask_threshold=ALCOR_NONLINEAR_THRESHOLD,
-                          both=False):
+                          both=False, frame=None):
     """
     Measure fixed-position aperture photometry for bright named stars.
 
@@ -2245,6 +2282,13 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
     offset, i.e. the line-of-sight cloud extinction in magnitudes). Both are NaN
     for measurements brighter than ``ALCOR_BRIGHT_CUT`` (CMOS non-linear regime)
     or for stars lacking a catalog color.
+
+    Pass ``frame`` as an already-loaded ``(cube, wcs, mask)`` tuple (the
+    :func:`load_alcor_fits` return) to skip the internal load. The cube must
+    already be bad-pixel-repaired, since that is what the internal load does.
+    This exists so a batch driver that needs the same frame for something else
+    (see :func:`alcor_process_night`) decompresses each file only once; the Sun
+    check still runs from the filename, so a rejected frame is still rejected.
 
     Returns
     -------
@@ -2299,8 +2343,11 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
         )
         return empty, None
 
-    cube, wcs, _ = load_alcor_fits(filename, badpix="repair",
-                                   masks_dir=masks_dir)
+    if frame is None:
+        cube, wcs, _ = load_alcor_fits(filename, badpix="repair",
+                                       masks_dir=masks_dir)
+    else:
+        cube, wcs = frame[0], frame[1]
     bias = _corner_bias(cube, size=10)
     data = cube.astype(float, copy=False) - bias[:, None, None]
 
@@ -2743,14 +2790,12 @@ def save_alcor_keogram_plot(
         timestamp_edges = _timestamp_edges(xvalues)
 
     if timestamp_edges is None:
-        ax.imshow(im, aspect="auto", origin="upper")
-        ax.set_yticks([0, (keogram.shape[0] - 1) / 2.0, keogram.shape[0] - 1])
+        ax.imshow(im, aspect="auto", origin="lower")
+        _set_keogram_yaxis(ax, keogram.shape[0])
     else:
         yedges = np.arange(keogram.shape[0] + 1)
         ax.pcolormesh(timestamp_edges, yedges, im, shading="flat", rasterized=True)
-        ax.invert_yaxis()
-        ax.set_yticks([0, keogram.shape[0] / 2.0, keogram.shape[0]])
-    ax.set_yticklabels(["N", "Z", "S"])
+        _set_keogram_yaxis(ax, keogram.shape[0], edges=True)
     ax.set_xlabel("UT")
 
     if times is None:
@@ -2764,6 +2809,26 @@ def save_alcor_keogram_plot(
     fig.savefig(output_file, dpi=dpi)
     plt.close(fig)
     return output_file
+
+
+def _set_keogram_yaxis(ax, nrows, edges=False):
+    """
+    Label a keogram's y axis north-up, with the row index increasing upward.
+
+    A keogram column is the raw zenith pixel column, and :func:`build_alcor_wcs`
+    puts north at *increasing* y, so row 0 is the south end and row ``nrows - 1``
+    is the north end. The axis must therefore run bottom-to-top as S / Z / N:
+    drawing with ``origin="upper"`` or calling ``invert_yaxis`` silently renders
+    the keogram upside down (north at the bottom under an "N" label at the top).
+    Setting the limits explicitly here keeps that decision in one place.
+
+    ``edges`` selects the tick positions for a ``pcolormesh`` drawn on
+    ``nrows + 1`` cell edges rather than an ``imshow`` on ``nrows`` pixel centres.
+    """
+    upper = nrows if edges else nrows - 1
+    ax.set_ylim(0, upper)
+    ax.set_yticks([0, upper / 2.0, upper])
+    ax.set_yticklabels(["S", "Z", "N"])
 
 
 def _timestamp_edges(xvalues):
@@ -2876,6 +2941,162 @@ def plot_alcor_keogram_fits(filename, output_file=None, **kwargs):
 
     keogram, timestamps = load_alcor_keogram_fits(filename)
     return save_alcor_keogram_plot(keogram, timestamps, output_file, **kwargs)
+
+
+def save_alcor_sb_keogram_fits(keogram, timestamps, output_file="sb_keogram.fits",
+                               overwrite=False):
+    """
+    Save a calibrated sky-brightness keogram and its timestamps to a FITS file.
+
+    The surface-brightness sibling of :func:`save_alcor_keogram_fits`: the data
+    are a single 2-D ``float32`` plane in V mag/arcsec^2 rather than an RGB cube,
+    with NaN where the sky brightness could not be measured (off-frame, saturated,
+    or a frame that failed to process). The ``TIMESTAMPS`` table extension has the
+    same form, so the two products pair column-for-column.
+
+    Parameters
+    ----------
+    keogram : ndarray
+        Sky-brightness keogram of shape (image_height, number_of_images), as
+        built by :func:`alcor_process_night`.
+    timestamps : sequence of str
+        UT timestamps corresponding to the keogram columns.
+    output_file : str or `~pathlib.Path` (default="sb_keogram.fits")
+        Output FITS filename.
+    overwrite : bool (default=False)
+        Passed through to `fits.HDUList.writeto`.
+
+    Returns
+    -------
+    output_file : `~pathlib.Path`
+        Path to the written FITS file.
+    """
+    output_file = Path(output_file)
+    primary = fits.PrimaryHDU(data=np.asarray(keogram, dtype=np.float32))
+    primary.header["CTYPE1"] = "TIME"
+    primary.header["CTYPE2"] = "OFFSET"
+    primary.header["BUNIT"] = ("mag/arcsec2", "observed V surface brightness")
+
+    timestamps = np.asarray(timestamps, dtype=str)
+    width = max(1, max(len(timestamp) for timestamp in timestamps))
+    columns = [fits.Column(name="DATE", format=f"{width}A", array=timestamps)]
+    table = fits.BinTableHDU.from_columns(columns, name="TIMESTAMPS")
+
+    hdul = fits.HDUList([primary, table])
+    hdul.writeto(output_file, overwrite=overwrite)
+    return output_file
+
+
+def load_alcor_sb_keogram_fits(filename):
+    """
+    Load a sky-brightness keogram FITS file written by
+    :func:`save_alcor_sb_keogram_fits`.
+
+    Returns ``(keogram, timestamps)``: the 2-D V mag/arcsec^2 plane and the
+    ``DATE`` values from the ``TIMESTAMPS`` extension.
+    """
+    with fits.open(filename) as hdul:
+        keogram = np.asarray(hdul[0].data, dtype=float)
+        timestamps = list(hdul["TIMESTAMPS"].data["DATE"])
+
+    return keogram, timestamps
+
+
+def save_alcor_sb_keogram_plot(keogram, timestamps, output_file, vmin=None,
+                               vmax=None, cmap="cividis_r", figsize=(12, 6),
+                               dpi=150):
+    """
+    Save a timestamp-labeled plot of a calibrated sky-brightness keogram.
+
+    The surface-brightness sibling of :func:`save_alcor_keogram_plot`. The y axis
+    is the same raw zenith column (north at the top, zenith in the middle, south
+    at the bottom), so this plot stacks row-for-row against the raw RGB keogram;
+    the colour axis is observed V mag/arcsec^2 with a colorbar, and unmeasurable
+    pixels are left blank.
+
+    Parameters
+    ----------
+    keogram : ndarray
+        Sky-brightness keogram of shape (image_height, number_of_images).
+    timestamps : sequence of str
+        UT timestamps corresponding to the keogram columns.
+    output_file : str or `~pathlib.Path`
+        Output figure filename. The format is inferred from the extension.
+    vmin, vmax : float or None (default=None)
+        Colour limits in mag/arcsec^2. When None, the 1st and 99th percentiles
+        of the finite data are used (the range varies a lot with moonlight).
+    cmap : str (default="cividis_r")
+        Matplotlib colormap; reversed so bright sky reads bright.
+    figsize : tuple (default=(12, 6))
+        Matplotlib figure size in inches.
+    dpi : int (default=150)
+        Output figure resolution.
+
+    Returns
+    -------
+    output_file : `~pathlib.Path`
+        Path to the written plot.
+    """
+    output_file = Path(output_file)
+    im = np.asarray(keogram, dtype=float)
+
+    if vmin is None or vmax is None:
+        finite = im[np.isfinite(im)]
+        if finite.size:
+            low, high = np.percentile(finite, [1.0, 99.0])
+            vmin = low if vmin is None else vmin
+            vmax = high if vmax is None else vmax
+
+    times = _parse_timestamps(timestamps)
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.set_facecolor("0.15")
+    if times is None:
+        timestamp_edges = None
+    else:
+        timestamp_edges = _timestamp_edges(mdates.date2num(times))
+
+    if timestamp_edges is None:
+        mesh = ax.imshow(im, aspect="auto", origin="lower", cmap=cmap,
+                         vmin=vmin, vmax=vmax, interpolation="nearest")
+        _set_keogram_yaxis(ax, im.shape[0])
+        ax.set_xlim(-0.5, im.shape[1] - 0.5)
+    else:
+        yedges = np.arange(im.shape[0] + 1)
+        mesh = ax.pcolormesh(timestamp_edges, yedges, im, shading="flat",
+                             cmap=cmap, vmin=vmin, vmax=vmax, rasterized=True)
+        _set_keogram_yaxis(ax, im.shape[0], edges=True)
+        ax.xaxis_date()
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+        fig.autofmt_xdate()
+    ax.set_xlabel("UT")
+
+    cbar = fig.colorbar(mesh, ax=ax, pad=0.02)
+    cbar.set_label("V mag/arcsec$^2$")
+
+    fig.tight_layout()
+    fig.savefig(output_file, dpi=dpi)
+    plt.close(fig)
+    return output_file
+
+
+def plot_alcor_sb_keogram_fits(filename, output_file=None, **kwargs):
+    """
+    Create a sky-brightness keogram plot from a FITS file written by
+    :func:`save_alcor_sb_keogram_fits`. ``output_file`` defaults to the input
+    with its FITS suffix replaced by ``.png``; ``**kwargs`` are forwarded to
+    :func:`save_alcor_sb_keogram_plot`.
+    """
+    filename = Path(filename)
+    if output_file is None:
+        stem = str(filename)
+        for ext in (".fits.gz", ".fits"):
+            if stem.endswith(ext):
+                stem = stem[: -len(ext)]
+                break
+        output_file = stem + ".png"
+
+    keogram, timestamps = load_alcor_sb_keogram_fits(filename)
+    return save_alcor_sb_keogram_plot(keogram, timestamps, output_file, **kwargs)
 
 
 def _parse_timestamps(timestamps):
@@ -3068,6 +3289,48 @@ def _alcor_sky_brightness_map(cube, wcs, time, exposure,
     return mu, alt
 
 
+def _alcor_cone_indices(wcs, shape, targets=None,
+                        radius_deg=ALCOR_SB_APERTURE_RADIUS, exclude=None):
+    """
+    Flat pixel indices of the sampling cones around fixed ``(az, alt)`` targets.
+
+    ``targets`` maps a name to an ``(azimuth, altitude)`` pair in degrees
+    (default :data:`ALCOR_SB_TARGETS`); a pixel belongs to a cone when its
+    great-circle separation from that direction is at most ``radius_deg``.
+    ``exclude`` is an optional ``(ny, nx)`` boolean array of pixels to drop (the
+    horizon/obstruction mask), so terrain cannot drag a low-altitude cone faint.
+
+    The cones depend only on the WCS, so a caller processing a whole night
+    builds them once and reuses them for every frame. Returns a dict mapping
+    each name to a flat ``int64`` index array (possibly empty).
+    """
+    if targets is None:
+        targets = ALCOR_SB_TARGETS
+    ny, nx = shape
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    az, alt = wcs.pixel_to_world_values(xx.astype(float), yy.astype(float))
+
+    az_r = np.radians(az)
+    alt_r = np.radians(alt)
+    sin_alt = np.sin(alt_r)
+    cos_alt = np.cos(alt_r)
+    valid = np.isfinite(alt)
+    if exclude is not None:
+        valid &= ~np.asarray(exclude, dtype=bool)
+
+    cos_radius = np.cos(np.radians(radius_deg))
+    cones = {}
+    for name, (az0, alt0) in targets.items():
+        az0_r = np.radians(az0)
+        alt0_r = np.radians(alt0)
+        with np.errstate(invalid="ignore"):
+            cos_sep = (sin_alt * np.sin(alt0_r)
+                       + cos_alt * np.cos(alt0_r) * np.cos(az_r - az0_r))
+            inside = valid & (cos_sep >= cos_radius)
+        cones[name] = np.flatnonzero(inside)
+    return cones
+
+
 def plot_alcor_sky_brightness(filename, outimage=None, outfig=None,
                               radius=ALCOR_RADIUS, fov_altitude=-2.0,
                               horizon_mask=False, saturation=ALCOR_SB_SATURATION,
@@ -3209,6 +3472,23 @@ def plot_alcor_sky_brightness(filename, outimage=None, outfig=None,
     return fig
 
 
+def _alcor_sb_fits_header(wcs, time, exposure, saturation, horizon_mask):
+    """
+    FITS header for a calibrated surface-brightness map: the raw-frame alt/az
+    WCS plus the provenance of the calibration chain that produced the values.
+    """
+    zp = alcor_zeropoint(time)
+    header = wcs.to_header(relax=True)
+    header["BUNIT"] = ("mag/arcsec2", "observed V surface brightness")
+    header["ZP_G"] = (zp["g"]["zp"], "G->V zeropoint applied (mag)")
+    header["ZP_EPOCH"] = (zp["epoch"], "ALCOR_ZEROPOINTS epoch used")
+    header["EXPOSURE"] = (exposure, "frame exposure (s)")
+    header["CALIBEXP"] = (ALCOR_CALIB_EXPTIME, "reference exposure for counts (s)")
+    header["SATLEVEL"] = (saturation, "raw G blanked at/above this ADU")
+    header["HORIZMSK"] = (bool(horizon_mask), "horizon/obstruction mask applied")
+    return header
+
+
 def alcor_sky_brightness_fits(filename, output_file=None, horizon_mask=False,
                               saturation=ALCOR_SB_SATURATION, overwrite=False,
                               **kwargs):
@@ -3272,19 +3552,553 @@ def alcor_sky_brightness_fits(filename, output_file=None, horizon_mask=False,
         output_file = stem + "_sb.fits"
     output_file = Path(output_file)
 
-    zp = alcor_zeropoint(time)
-    header = wcs.to_header(relax=True)
-    header["BUNIT"] = ("mag/arcsec2", "observed V surface brightness")
-    header["ZP_G"] = (zp["g"]["zp"], "G->V zeropoint applied (mag)")
-    header["ZP_EPOCH"] = (zp["epoch"], "ALCOR_ZEROPOINTS epoch used")
-    header["EXPOSURE"] = (exposure, "frame exposure (s)")
-    header["CALIBEXP"] = (ALCOR_CALIB_EXPTIME, "reference exposure for counts (s)")
-    header["SATLEVEL"] = (saturation, "raw G blanked at/above this ADU")
-    header["HORIZMSK"] = (bool(horizon_mask), "horizon/obstruction mask applied")
-
+    header = _alcor_sb_fits_header(wcs, time, exposure, saturation, horizon_mask)
     hdu = fits.PrimaryHDU(data=mu.astype(np.float32), header=header)
     hdu.writeto(output_file, overwrite=overwrite)
     return output_file
+
+
+def _alcor_frame_stem(filename):
+    """Path string of a frame with its (possibly compressed) FITS suffix removed."""
+    stem = str(filename)
+    for ext in (".fits.bz2", ".fits.gz", ".fits"):
+        if stem.endswith(ext):
+            return stem[: -len(ext)]
+    return stem
+
+
+def _cone_median(mu, indices):
+    """Median of a flattened surface-brightness map over one cone's pixels."""
+    if indices.size == 0:
+        return float("nan")
+    values = mu.reshape(-1)[indices]
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return float("nan")
+    return float(np.median(values))
+
+
+# Per-worker geometry, installed once by _init_night_worker: the sampling-cone
+# pixel indices and the horizon mask both depend only on the night's WCS, so they
+# are built once in the parent instead of per frame.
+_NIGHT_CONES = None
+_NIGHT_HORIZON = None
+
+
+def _init_night_worker(cones, horizon):
+    global _NIGHT_CONES, _NIGHT_HORIZON
+    _NIGHT_CONES = cones
+    _NIGHT_HORIZON = horizon
+
+
+def _process_night_frame(task):
+    """
+    Process one night frame: photometry, sky brightness, and stack slot.
+
+    The frame is decompressed exactly once. The raw cube goes to the median-stack
+    memmap slot (bad-pixel repair would erase the very pixels the stack exists to
+    track), and the repaired cube feeds star photometry, the surface-brightness
+    map, and the raw RGB keogram column. Returns
+    ``(index, values, column, rgb_column, exposure, stacked, error)``; on failure
+    the values and columns are NaN and ``error`` is the message, so one bad frame
+    does not abort the night.
+
+    Star photometry is skipped when ``phot_out`` already exists and is non-empty
+    (something measured this frame already -- eventually the real-time ingest),
+    unless ``reprocess`` is set. The frame is still read, because the
+    surface-brightness map and the keogram columns need its pixels and the
+    per-frame CSV does not carry them.
+    """
+    index, filename, opts = task
+    filename = Path(filename)
+    zcol = opts["zcol"]
+    ny = opts["shape"][1]
+    nan_values = {name: float("nan") for name in _NIGHT_CONES}
+    nan_column = np.full(ny, np.nan, dtype=np.float32)
+    nan_rgb = np.full((ny, 3), np.nan, dtype=np.float32) if opts["rgb_column"] else None
+
+    try:
+        cube_raw, wcs, mask = load_alcor_fits(filename, badpix=None,
+                                              masks_dir=opts["masks_dir"])
+
+        stacked = False
+        stack = opts["stack"]
+        if stack is not None and cube_raw.shape == tuple(opts["shape"]):
+            cube_mm = np.memmap(stack["path"], dtype=np.uint16, mode="r+",
+                                shape=tuple(stack["shape"]))
+            cube_mm[index] = np.clip(cube_raw, 0, 65535).astype(np.uint16)
+            cube_mm.flush()
+            del cube_mm
+            stacked = True
+
+        cube = _apply_badpix_repair(cube_raw, mask) if mask is not None else cube_raw
+
+        if opts["phot_out"] is not None and not _photometry_is_done(
+                opts["phot_out"], opts["reprocess"]):
+            alcor_star_photometry(filename, output_file=opts["phot_out"],
+                                  frame=(cube, wcs, mask), **opts["phot_kwargs"])
+
+        time = _alcor_frame_time(filename)
+        exposure = _read_frame_exposure(filename)
+        mu, _ = _alcor_sky_brightness_map(cube, wcs, time, exposure,
+                                          saturation=opts["sb_saturation"])
+        if _NIGHT_HORIZON is not None:
+            mu = np.where(_NIGHT_HORIZON, np.nan, mu)
+
+        if opts["sb_out"] is not None:
+            header = _alcor_sb_fits_header(wcs, time, exposure,
+                                           opts["sb_saturation"],
+                                           _NIGHT_HORIZON is not None)
+            fits.PrimaryHDU(data=mu.astype(np.float32), header=header).writeto(
+                opts["sb_out"], overwrite=opts["overwrite"])
+
+        values = {name: _cone_median(mu, idx) for name, idx in _NIGHT_CONES.items()}
+        column = mu[:, zcol].astype(np.float32)
+        # The RGB keogram column is free here: same cube, same zenith column.
+        rgb_column = (cube[:, :, zcol].T.astype(np.float32)
+                      if opts["rgb_column"] else None)
+        return index, values, column, rgb_column, exposure, stacked, None
+    except Exception as exc:                                   # noqa: BLE001
+        return index, nan_values, nan_column, nan_rgb, float("nan"), False, f"{exc}"
+
+
+def _photometry_is_done(phot_out, reprocess):
+    """True when ``phot_out`` already holds photometry we should not redo."""
+    if reprocess:
+        return False
+    try:
+        return Path(phot_out).stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _day_keogram_column(task):
+    """
+    Raw RGB zenith column of one frame, for the daylight half of a day keogram.
+
+    Loads once and takes the night's fixed ``zcol``, so the day keogram and the
+    calibrated sky-brightness keogram sample the identical pixel column.
+    """
+    index, filename, zcol, kwargs = task
+    try:
+        cube, _, _ = load_alcor_fits(filename, **kwargs)
+        return index, cube[:, :, zcol].T.astype(np.float32), None
+    except Exception as exc:                                   # noqa: BLE001
+        return index, None, f"{exc}"
+
+
+def _build_day_keogram(frames, night_files, night_times, night_rgb_columns,
+                       zcol, max_frames, masks_dir, workers, errors, log):
+    """
+    Full-day RGB keogram from a day directory, reusing the night's columns.
+
+    A day directory spans local noon to the following morning, so it holds the
+    night frames the main pass already loaded plus the daylight remainder. The
+    night columns come back free from :func:`_process_night_frame`; only the
+    remaining frames need a second, column-only pass. Both halves are merged in
+    time order, so the result is directly comparable to the sky-brightness
+    keogram, which samples the same ``zcol``.
+
+    Timestamps come from :func:`_alcor_frame_time` (filename first, DATE header
+    fallback) rather than the raw DATE header string that :func:`alcor_keogram`
+    stores, so both keograms of a run share one time source.
+
+    Returns ``(keogram, timestamps)`` with the keogram shaped
+    ``(ny, nframes, 3)``.
+    """
+    night_set = set(night_files)
+    extra = [f for f in frames if f not in night_set]
+    if max_frames is not None and len(extra) > max_frames:
+        stride = len(extra) // max_frames
+        extra = extra[::stride][:max_frames]
+    log(f"day keogram: {len(night_files)} night columns reused, "
+        f"{len(extra)} daylight frames to load")
+
+    extra_columns = [None] * len(extra)
+    tasks = [(index, filename, zcol, {"masks_dir": masks_dir})
+             for index, filename in enumerate(extra)]
+
+    def _store(result):
+        index, column, error = result
+        extra_columns[index] = column
+        if error is not None:
+            errors.append((extra[index].name, error))
+            log(f"{extra[index].name}: {error}")
+
+    if tasks:
+        if workers == 1:
+            for task in tasks:
+                _store(_day_keogram_column(task))
+        else:
+            with ProcessPoolExecutor(max_workers=workers) as executor:
+                futures = [executor.submit(_day_keogram_column, task)
+                           for task in tasks]
+                for future in as_completed(futures):
+                    _store(future.result())
+
+    entries = [(t, column) for t, column
+               in zip(night_times, night_rgb_columns) if column is not None]
+    ny = entries[0][1].shape[0] if entries else None
+    for filename, column in zip(extra, extra_columns):
+        if column is None:                       # failed load, keep the column
+            if ny is None:
+                continue
+            column = np.full((ny, 3), np.nan, dtype=np.float32)
+        entries.append((_alcor_frame_time(filename), column))
+
+    entries.sort(key=lambda entry: entry[0].jd)
+    keogram = np.stack([column for _, column in entries], axis=1)
+    timestamps = [t.isot for t, _ in entries]
+    return keogram, timestamps
+
+def alcor_process_night(night_dir, out_dir=None, pattern="*.fits.bz2",
+                        sun_alt_max=-12.0, targets=None,
+                        sb_aperture_radius=ALCOR_SB_APERTURE_RADIUS,
+                        horizon_mask=True, sb_saturation=ALCOR_SB_SATURATION,
+                        write_sb_fits=False, median_stack=False,
+                        day_keogram=False, reprocess=False,
+                        max_frames=None, scratch_dir=None, masks_dir=None,
+                        workers=None, overwrite=False, log=None, **phot_kwargs):
+    """
+    Process one archived night of alcor OMEA 8C frames end to end.
+
+    Every frame with the Sun below ``sun_alt_max`` (there is no Moon cut -- the
+    Moon's effect on sky brightness is the signal here) is decompressed once and
+    turned into three things: fixed-position star photometry
+    (:func:`alcor_star_photometry`), a calibrated V mag/arcsec^2 surface-brightness
+    map (:func:`_alcor_sky_brightness_map`), and, optionally, a slot in the
+    night's raw median stack.
+
+    From the surface-brightness maps the night summary is built: for each entry
+    in ``targets`` the median brightness inside a ``sb_aperture_radius``-degree
+    cone about a fixed ``(azimuth, altitude)``, so the same patch of sky is
+    reported for every frame of every night. The default
+    :data:`ALCOR_SB_TARGETS` are the zenith and the Tucson and Nogales light
+    domes. The zenith column of every map is also stacked into a calibrated
+    nighttime keogram -- the same raw column :func:`alcor_keogram` uses, so the
+    calibrated and RGB keograms stack row for row.
+
+    Parameters
+    ----------
+    night_dir : str or `~pathlib.Path`
+        Directory holding one night's frames.
+    out_dir : str or `~pathlib.Path` or None (default=None)
+        Where every product is written. Defaults to ``night_dir``; pass an
+        explicit directory when the archive is read-only or on slow media.
+    pattern : str (default="*.fits.bz2")
+        Glob pattern selecting frames within `night_dir`.
+    sun_alt_max : float (default=-12.0)
+        Night is the Sun below this altitude in degrees.
+    targets : dict or None (default=None)
+        Maps a summary column name to an ``(azimuth, altitude)`` pair in
+        degrees. None uses :data:`ALCOR_SB_TARGETS`.
+    sb_aperture_radius : float (default ALCOR_SB_APERTURE_RADIUS)
+        Angular radius of each sampling cone in degrees.
+    horizon_mask : bool (default=True)
+        Blank not-sky pixels (:func:`load_alcor_horizon_mask`) in the maps, the
+        cones, and the keogram, so terrain cannot drag a low-altitude cone faint.
+    sb_saturation : int (default ALCOR_SB_SATURATION)
+        Raw-ADU level at/above which G pixels are blanked as non-linear.
+    write_sb_fits : bool (default=False)
+        Also keep each frame's full surface-brightness map as ``<frame>_sb.fits``.
+        Off by default: the maps are several MB each and the summary and keogram
+        already carry what they are usually wanted for.
+    median_stack : bool (default=False)
+        Also build the per-channel median of the night's *raw* frames and write
+        ``<night>_median.fits``, stamped with the per-channel hot-pixel counts
+        from :func:`build_alcor_badpix_mask` so bad-pixel growth can be trended.
+        Off by default because it needs scratch space for the whole night
+        (~12 MB per frame).
+    day_keogram : bool (default=False)
+        Also build the full-day raw RGB keogram (``<night>_keogram.fits`` /
+        ``.png``). A day directory spans local noon to the following morning, so
+        this covers daylight too; the night frames' columns are free from the
+        main pass and only the daylight remainder needs a second, column-only
+        read. Off by default so a photometry run never touches daylight frames.
+    reprocess : bool (default=False)
+        Re-measure star photometry even where ``<frame>_phot.csv`` already
+        exists. By default an existing non-empty CSV is left alone and reused --
+        the frame is still read, because the surface-brightness map and the
+        keogram columns need its pixels. Pass this after changing photometry
+        options, since a CSV written in another mode is otherwise reused as-is.
+    max_frames : int or None (default=None)
+        Strided-subsample the night to at most this many frames (and, for the day
+        keogram, the daylight remainder to at most this many as well).
+    scratch_dir : str or None (default=None)
+        Directory for the median-stack memmap (default: the system temp dir).
+    masks_dir : str or None (default=None)
+        Override the bad-pixel masks directory.
+    workers : int or None (default=None)
+        Worker processes for the per-frame pass. 1 runs serially; None uses one
+        per core.
+    overwrite : bool (default=False)
+        Overwrite existing output files.
+    log : callable or None (default=None)
+        Called with progress messages. None is silent.
+    **phot_kwargs
+        Forwarded to :func:`alcor_star_photometry` (``aperture_radius``,
+        ``annulus_width``, ``min_altitude``, ``vmag_limit``, ``gaussian``,
+        ``both``, ...). Its ``sun_alt_max`` is pinned to this function's, so it
+        never rejects a frame the night selection accepted.
+
+    Returns
+    -------
+    dict
+        ``summary`` (the `~pandas.DataFrame` written to ``sky_brightness.csv``),
+        ``keogram`` (the ``(ny, nframes)`` float32 sky-brightness array),
+        ``timestamps``, ``day_keogram`` (the ``(ny, nframes, 3)`` RGB array, or
+        None), ``files`` (the night frames used, in column order), ``errors`` (a
+        list of ``(filename, message)`` for frames that failed), and the paths
+        written: ``summary_file``, ``keogram_file``, ``keogram_plot``,
+        ``day_keogram_file``, ``day_keogram_plot``, ``photometry_file``,
+        ``median_file``.
+
+    Raises
+    ------
+    FileNotFoundError
+        If `pattern` matches nothing in `night_dir`.
+    ValueError
+        If no frame in `night_dir` has the Sun below `sun_alt_max`.
+    """
+    def _log(message):
+        if log is not None:
+            log(message)
+
+    night_dir = Path(night_dir)
+    night_name = night_dir.resolve().name
+    out_dir = night_dir if out_dir is None else Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if targets is None:
+        targets = ALCOR_SB_TARGETS
+
+    frames = sorted(night_dir.glob(pattern))
+    if not frames:
+        raise FileNotFoundError(f"No files matching {pattern!r} found in {night_dir}")
+    # No Moon cut: moonlit sky brightness is exactly what this measures.
+    files_ = select_dark_frames(frames, sun_alt_max=sun_alt_max,
+                                moon_alt_max=90.0, log=None)
+    if not files_:
+        raise ValueError(f"No frames in {night_dir} have the Sun below "
+                         f"{sun_alt_max:g} deg")
+    if max_frames is not None and len(files_) > max_frames:
+        stride = len(files_) // max_frames
+        files_ = files_[::stride][:max_frames]
+    nframes = len(files_)
+    _log(f"{nframes} of {len(frames)} frames are night "
+         f"(Sun below {sun_alt_max:g} deg)")
+
+    # Ephemeris for the whole night in one vectorised pass.
+    frame_times = [_alcor_frame_time(f) for f in files_]
+    if any(t is None for t in frame_times):
+        missing = [f.name for f, t in zip(files_, frame_times) if t is None]
+        raise ValueError(f"could not determine a frame time for {missing}")
+    times = Time(frame_times)
+    # Keogram columns follow file order and summary rows follow time order, so
+    # put the frames in time order once and keep the two products aligned.
+    order = np.argsort(times.jd)
+    files_ = [files_[i] for i in order]
+    times = times[order]
+
+    altaz = AltAz(obstime=times, location=MMT_LOCATION)
+    sun_alt = get_sun(times).transform_to(altaz).alt.deg
+    moon = get_body("moon", times, MMT_LOCATION).transform_to(altaz)
+
+    # The geometry is fixed for the night, so resolve it once from the first frame.
+    header0 = fits.getheader(files_[0])
+    shape = (int(header0["NAXIS3"]), int(header0["NAXIS2"]), int(header0["NAXIS1"]))
+    cal = _alcor_frame_calibration(files_[0])
+    wcs = build_alcor_wcs(xcen=cal["xcen"], ycen=cal["ycen"],
+                          rotation=cal["rotation"],
+                          radial_coeffs=cal["radial_coeffs"],
+                          horizon_radius=cal["horizon_radius"],
+                          tangential_coeffs=cal["tangential_coeffs"],
+                          axis_tilt=cal["axis_tilt"])
+
+    horizon = None
+    if horizon_mask:
+        horizon, horizon_date = load_alcor_horizon_mask(times[0])
+        if horizon is not None and horizon.shape != shape[1:]:
+            _log(f"horizon mask shape {horizon.shape} does not match "
+                 f"{shape[1:]}; not applied")
+            horizon = None
+        elif horizon is None:
+            _log("no horizon mask found; not applied")
+        else:
+            _log(f"using horizon mask for {horizon_date}")
+
+    cones = _alcor_cone_indices(wcs, shape[1:], targets=targets,
+                                radius_deg=sb_aperture_radius, exclude=horizon)
+    for name, idx in cones.items():
+        _log(f"{name}: {idx.size} pixels within {sb_aperture_radius:g} deg "
+             f"of az={targets[name][0]:g}, alt={targets[name][1]:g}")
+    zx, _ = wcs.world_to_pixel_values(0.0, 90.0)
+    zcol = int(np.clip(round(float(zx)), 0, shape[2] - 1))
+
+    memmap_path = None
+    stack = None
+    try:
+        if median_stack:
+            tmp = tempfile.NamedTemporaryFile(
+                prefix="alcor_night_", suffix=".dat",
+                dir=scratch_dir or tempfile.gettempdir(), delete=False)
+            tmp.close()
+            memmap_path = Path(tmp.name)
+            stack_shape = (nframes,) + shape
+            cube_mm = np.memmap(memmap_path, dtype=np.uint16, mode="w+",
+                                shape=stack_shape)
+            del cube_mm
+            stack = {"path": str(memmap_path), "shape": stack_shape}
+            _log(f"median stack scratch: {memmap_path} "
+                 f"({np.prod(stack_shape, dtype=float) * 2 / 1e9:.1f} GB)")
+
+        phot_kwargs = dict(phot_kwargs)
+        phot_kwargs["sun_alt_max"] = sun_alt_max
+        phot_kwargs["masks_dir"] = masks_dir
+        tasks = []
+        for index, filename in enumerate(files_):
+            stem = Path(_alcor_frame_stem(filename)).name
+            tasks.append((index, filename, {
+                "zcol": zcol,
+                "shape": shape,
+                "masks_dir": masks_dir,
+                "phot_out": out_dir / f"{stem}_phot.csv",
+                "sb_out": (out_dir / f"{stem}_sb.fits") if write_sb_fits else None,
+                "sb_saturation": sb_saturation,
+                "rgb_column": day_keogram,
+                "reprocess": reprocess,
+                "overwrite": overwrite,
+                "phot_kwargs": phot_kwargs,
+                "stack": stack,
+            }))
+
+        values = [None] * nframes
+        columns = [None] * nframes
+        rgb_columns = [None] * nframes
+        exposures = np.full(nframes, np.nan)
+        stacked = np.zeros(nframes, dtype=bool)
+        errors = []
+
+        def _collect(result):
+            index, vals, column, rgb_column, exposure, ok, error = result
+            values[index] = vals
+            columns[index] = column
+            rgb_columns[index] = rgb_column
+            exposures[index] = exposure
+            stacked[index] = ok
+            if error is not None:
+                errors.append((files_[index].name, error))
+                _log(f"{files_[index].name}: {error}")
+
+        if workers == 1:
+            _init_night_worker(cones, horizon)
+            for done, task in enumerate(tasks, start=1):
+                _collect(_process_night_frame(task))
+                _log(f"[{done}/{nframes}] {files_[task[0]].name}")
+        else:
+            with ProcessPoolExecutor(max_workers=workers,
+                                     initializer=_init_night_worker,
+                                     initargs=(cones, horizon)) as executor:
+                futures = [executor.submit(_process_night_frame, task)
+                           for task in tasks]
+                for done, future in enumerate(as_completed(futures), start=1):
+                    result = future.result()
+                    _collect(result)
+                    _log(f"[{done}/{nframes}] {files_[result[0]].name}")
+
+        summary = pd.DataFrame({
+            "filename": [f.name for f in files_],
+            "OBSTIME": pd.to_datetime(times.isot),
+            "exposure": exposures,
+            "sun_alt": sun_alt,
+            "moon_alt": moon.alt.deg,
+            "moon_az": moon.az.deg,
+        })
+        for name in targets:
+            summary[name] = [vals[name] for vals in values]
+        summary = summary.sort_values("OBSTIME", ignore_index=True)
+        summary_file = out_dir / "sky_brightness.csv"
+        summary.to_csv(summary_file, index=False)
+        _log(f"wrote {summary_file}")
+
+        keogram = np.stack(columns, axis=1)
+        timestamps = list(times.isot)
+        keogram_file = out_dir / f"{night_name}_sb_keogram.fits"
+        save_alcor_sb_keogram_fits(keogram, timestamps, keogram_file,
+                                   overwrite=True)
+        keogram_plot = out_dir / f"{night_name}_sb_keogram.png"
+        save_alcor_sb_keogram_plot(keogram, timestamps, keogram_plot)
+        _log(f"wrote {keogram_file} and {keogram_plot}")
+
+        day_keogram_array = None
+        day_keogram_file = None
+        day_keogram_plot = None
+        if day_keogram:
+            day_keogram_array, day_times = _build_day_keogram(
+                frames, files_, times, rgb_columns, zcol, max_frames,
+                masks_dir, workers, errors, _log)
+            day_keogram_file = out_dir / f"{night_name}_keogram.fits"
+            save_alcor_keogram_fits(day_keogram_array, day_times,
+                                    day_keogram_file, overwrite=True)
+            day_keogram_plot = out_dir / f"{night_name}_keogram.png"
+            save_alcor_keogram_plot(day_keogram_array, day_times, day_keogram_plot)
+            _log(f"wrote {day_keogram_file} and {day_keogram_plot}")
+
+        photometry_file = None
+        try:
+            phot = collect_alcor_photometry([t[2]["phot_out"] for t in tasks
+                                             if t[2]["phot_out"].exists()])
+        except ValueError as exc:
+            _log(f"no combined photometry written: {exc}")
+        else:
+            photometry_file = out_dir / f"{night_name}_phot.csv"
+            phot.to_csv(photometry_file, index=False)
+            _log(f"wrote {photometry_file}")
+
+        median_file = None
+        if median_stack:
+            ok = np.flatnonzero(stacked)
+            if ok.size == 0:
+                _log("no frames stacked; no median written")
+            else:
+                cube_mm = np.memmap(memmap_path, dtype=np.uint16, mode="r",
+                                    shape=stack["shape"])
+                selection = (slice(0, nframes) if ok.size == nframes
+                             else ok)
+                median = _median_stack_tiles(cube_mm, selection, shape)
+                del cube_mm
+                median_file = out_dir / f"{night_name}_median.fits"
+                mask = build_alcor_badpix_mask(median)
+                mheader = wcs.to_header(relax=True)
+                mheader["BUNIT"] = ("adu", "raw counts, per-channel median")
+                mheader["NSTACK"] = (int(ok.size), "frames in the median")
+                mheader["SUNALT"] = (sun_alt_max, "night definition (deg)")
+                for c, channel in enumerate("RGB"):
+                    mheader[f"NBAD{channel}"] = (
+                        int(mask[c].sum()), f"{channel} hot pixels in this median")
+                fits.PrimaryHDU(data=median, header=mheader).writeto(
+                    median_file, overwrite=True)
+                _log(f"wrote {median_file} "
+                     f"(hot pixels R/G/B: {mask[0].sum()}/{mask[1].sum()}/"
+                     f"{mask[2].sum()})")
+    finally:
+        if memmap_path is not None:
+            memmap_path.unlink(missing_ok=True)
+
+    return {
+        "summary": summary,
+        "summary_file": summary_file,
+        "keogram": keogram,
+        "keogram_file": keogram_file,
+        "keogram_plot": keogram_plot,
+        "timestamps": timestamps,
+        "day_keogram": day_keogram_array,
+        "day_keogram_file": day_keogram_file,
+        "day_keogram_plot": day_keogram_plot,
+        "photometry_file": photometry_file,
+        "median_file": median_file,
+        "files": files_,
+        "errors": errors,
+    }
 
 
 def save_alcor_photometry_check_plot(filename, phot, output_file,
@@ -3614,6 +4428,135 @@ def alcor_sky_brightness_cli():
         overwrite=args.overwrite,
     )
     print(out)
+
+
+def plot_alcor_sb_keogram_fits_cli():
+    """
+    CLI entry point for :func:`plot_alcor_sb_keogram_fits`, so a saved
+    sky-brightness keogram can be re-rendered at different colour limits without
+    reprocessing the night.
+    """
+    parser = argparse.ArgumentParser(
+        description="Plot a calibrated alcor sky-brightness keogram FITS file.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("filename", help="Input sky-brightness keogram FITS file.")
+    parser.add_argument("-o", "--output", default=None,
+                        help="Output plot path (default: the input with a .png suffix).")
+    parser.add_argument("--vmin", type=float, default=None,
+                        help="Colorbar lower limit (mag/arcsec^2); default is the 1st percentile.")
+    parser.add_argument("--vmax", type=float, default=None,
+                        help="Colorbar upper limit (mag/arcsec^2); default is the 99th percentile.")
+    parser.add_argument("--cmap", default="cividis_r", help="Matplotlib colormap.")
+    parser.add_argument("--figsize", type=float, nargs=2, default=(12, 6),
+                        metavar=("WIDTH", "HEIGHT"))
+    parser.add_argument("--dpi", type=int, default=150, help="Output figure resolution.")
+    args = parser.parse_args()
+
+    out = plot_alcor_sb_keogram_fits(
+        args.filename,
+        output_file=args.output,
+        vmin=args.vmin,
+        vmax=args.vmax,
+        cmap=args.cmap,
+        figsize=tuple(args.figsize),
+        dpi=args.dpi,
+    )
+    print(out)
+
+
+def alcor_process_night_cli():
+    """
+    CLI entry point for :func:`alcor_process_night`: process one archived night
+    into per-frame photometry, the ``sky_brightness.csv`` summary, and a
+    calibrated nighttime keogram.
+    """
+    parser = argparse.ArgumentParser(
+        description="Process one archived night of alcor frames into star photometry, a sky-brightness summary, and a calibrated keogram.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("night_dir", help="Directory of one night's alcor frames.")
+    parser.add_argument("-o", "--out-dir", default=None,
+                        help="Directory for all products (default: alongside the frames).")
+    parser.add_argument("--pattern", default="*.fits.bz2", help="Glob for input frames.")
+    parser.add_argument("--sun-alt-max", type=float, default=-12.0,
+                        help="Night is the Sun below this altitude (deg). No Moon cut is applied.")
+    parser.add_argument("--sb-aperture-radius", type=float,
+                        default=ALCOR_SB_APERTURE_RADIUS,
+                        help="Angular radius of each sky-brightness sampling cone (deg).")
+    parser.add_argument("--no-horizon-mask", action="store_true",
+                        help="Do not blank not-sky pixels in the maps, cones, and keogram.")
+    parser.add_argument("--sb-saturation", type=int, default=ALCOR_SB_SATURATION,
+                        help="Blank raw G pixels at or above this ADU level (clipped/non-linear).")
+    parser.add_argument("--write-sb-fits", action="store_true",
+                        help="Also keep each frame's full surface-brightness map as <frame>_sb.fits.")
+    parser.add_argument("--median-stack", action="store_true",
+                        help="Also build the per-channel raw median stack (<night>_median.fits) for bad-pixel tracking.")
+    parser.add_argument("--day-keogram", action="store_true",
+                        help="Also build the full-day raw RGB keogram (<night>_keogram.fits/.png), daylight included.")
+    parser.add_argument("--reprocess", action="store_true",
+                        help="Re-measure star photometry even where <frame>_phot.csv already exists.")
+    parser.add_argument("--aperture-radius", type=float, default=4.0,
+                        help="Star aperture radius in pixels (also the Gaussian fit window).")
+    parser.add_argument("--annulus-width", type=float, default=1.0,
+                        help="Star background annulus width in pixels.")
+    parser.add_argument("--min-altitude", type=float, default=20.0,
+                        help="Minimum catalog-star altitude to measure (deg).")
+    parser.add_argument("--vmag-limit", type=float, default=5.5,
+                        help="Faintest catalog star Vmag to measure.")
+    parser.add_argument("--gaussian", action="store_true",
+                        help="Use constrained-Gaussian PSF photometry instead of apertures.")
+    parser.add_argument("--both", action="store_true",
+                        help="Measure aperture AND Gaussian photometry (overrides --gaussian).")
+    parser.add_argument("--max-frames", type=int, default=None,
+                        help="Strided-subsample the night to at most this many frames.")
+    parser.add_argument("--scratch-dir", default=None,
+                        help="Directory for the median-stack scratch memmap.")
+    parser.add_argument("--masks-dir", default=None,
+                        help="Override the bad-pixel masks directory.")
+    parser.add_argument("--workers", type=int, default=None,
+                        help="Worker processes (default: one per core; 1 runs serially).")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="Overwrite existing per-frame output files.")
+    parser.add_argument("--quiet", action="store_true",
+                        help="Do not report progress to stderr.")
+    args = parser.parse_args()
+
+    def log(message):
+        print(message, file=sys.stderr)
+
+    result = alcor_process_night(
+        args.night_dir,
+        out_dir=args.out_dir,
+        pattern=args.pattern,
+        sun_alt_max=args.sun_alt_max,
+        sb_aperture_radius=args.sb_aperture_radius,
+        horizon_mask=not args.no_horizon_mask,
+        sb_saturation=args.sb_saturation,
+        write_sb_fits=args.write_sb_fits,
+        median_stack=args.median_stack,
+        day_keogram=args.day_keogram,
+        reprocess=args.reprocess,
+        max_frames=args.max_frames,
+        scratch_dir=args.scratch_dir,
+        masks_dir=args.masks_dir,
+        workers=args.workers,
+        overwrite=args.overwrite,
+        log=None if args.quiet else log,
+        aperture_radius=args.aperture_radius,
+        annulus_width=args.annulus_width,
+        min_altitude=args.min_altitude,
+        vmag_limit=args.vmag_limit,
+        gaussian=args.gaussian,
+        both=args.both,
+    )
+    for path in ("summary_file", "keogram_file", "keogram_plot",
+                 "day_keogram_file", "day_keogram_plot",
+                 "photometry_file", "median_file"):
+        if result[path] is not None:
+            print(result[path])
+    if result["errors"]:
+        print(f"# {len(result['errors'])} frames failed", file=sys.stderr)
 
 
 def alcor_star_photometry_cli():

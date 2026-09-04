@@ -12,6 +12,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Horizon mask (sky vs not-sky): `load_alcor_horizon_mask(time)` returns `(mask, date)`, a 2-D bool raw-frame mask where `True` = **not-sky** — obstructions above the horizon (terrain, buildings, the lightning rod) plus everything at/below altitude 0 — so valid sky is `~mask`. It is achromatic (one plane shared by R/G/B, unlike the per-channel bad-pixel mask) and an **exclusion** mask: it is not repaired, only used to select valid sky for sky-background / cloud-extinction maps. It is date-resolved (nearest date, `$ALCOR_HORIZON_DIR` override) from `skycam_utils/data/horizon/alcor_horizon_YYYY-MM-DD.fits.gz`, exactly like the calibration / bad-pixel assets, and stable across epochs for the same reason (one epoch covers 2024–2026; add a new epoch only if the camera moves). It is rebuilt by the packaged `alcor_median_stack` + `create_horizon_mask` CLIs (the reference script `claude_docs/scripts/horizon_floodfill.py` now only re-renders the diagnostic figures). The method: a Sobel-edge flood-fill of a cloudy-night median (the smooth, slowly-varying overcast sky leaves only the sharp obstruction edges), treating strong `sobel(log10)` edges as walls, flood-filling the sky from the WCS zenith, and marking everything the fill can't reach as not-sky — so the thin, enclosed lightning-rod spike is captured (the earlier radial altitude-profile extraction in `alcor_horizon_extract.py` structurally missed it, and an az/alt boolean grid was rejected as too coarse). The SW→W building sector (az 225–270), where the Sobel edges break up, is instead filled from the **undetected-star patch** (fixed-position per-frame photometry accumulated over 5 nights by `claude_docs/scripts/sobel_vs_undetected.py`; high undetected fraction = obstructed). A morphological opening (radius 3) severs thin necks so spurious open-sky pockets detach, then a connected-component cleanup drops any not-sky blob that neither reaches the rim nor is rod-sized. Tested in `test_alcor_horizon.py`.
 
+Night-level processing (`alcor_process_night`, packaged CLI): the archive driver that turns one night's directory into the standard data products in a single pass. Night is **Sun < -12 deg with no Moon cut** — unlike every other night-selecting entry point here, moonlight is the signal rather than contamination. Each frame is decompressed **once** and feeds three consumers: `alcor_star_photometry` (via its `frame=` passthrough, which skips the internal load), `_alcor_sky_brightness_map`, and optionally a slot in the night's raw median stack. Two invariants are load-bearing. (1) The **sampling cones are built once per night, not per frame** — `_alcor_cone_indices` turns each `ALCOR_SB_TARGETS` (az, alt) into flat pixel indices from the night's WCS (great-circle separation <= `ALCOR_SB_APERTURE_RADIUS` = 5 deg, horizon-masked), and they reach the worker pool through a `ProcessPoolExecutor` *initializer* rather than per-task pickling; per frame it is then just a `median` over ~5000 pixels. The resulting `sky_brightness.csv` columns `allsky_mv_zenith` / `allsky_mv_tucson` / `allsky_mv_nogales` (V mag/arcsec^2, descriptions in `ALCOR_SB_TARGET_DESCRIPTIONS`) sample the *same patch of sky every frame of every night*, which is the whole point — a clear dark zenith reads ~21.5 and the two low-altitude light domes sit ~1 mag brighter. (2) The **median stack is built from RAW cubes** — the worker loads `badpix=None`, writes the raw frame to the memmap slot, and applies `_apply_badpix_repair` itself for the photometry/SB path; stacking repaired data would interpolate away exactly the pixels the stack exists to track. It writes `<night>_median.fits` stamped with `NBADR`/`NBADG`/`NBADB` (a header read gives the night's hot-pixel count, so CMOS aging is trendable) but deliberately writes **no mask** — `create_badpix_mask` still owns that, and its stricter Sun<-18/Moon<-6 selection makes the counts not strictly comparable. The calibrated nighttime keogram takes the **same raw zenith column `alcor_keogram` takes** (not a resampled altitude grid), so the SB and RGB keograms stack row-for-row; `save_alcor_sb_keogram_fits`/`_plot`/`plot_alcor_sb_keogram_fits` are the 2-D `mag/arcsec2` siblings of the RGB keogram trio. With `--day-keogram` the driver also builds the full-day RGB keogram itself (the night columns are free from the main pass, only the daylight remainder is re-read), which is why `scripts/make_movies.sh` now calls this instead of `alcor_keogram`. (3) The driver is **resumable through the per-frame photometry CSVs**: an existing non-empty `<frame>_phot.csv` is reused rather than re-measured — that is the hook for doing photometry as images arrive — but the frame is still read, because the SB map and keogram columns need its pixels and the CSV does not carry them; `--reprocess` forces re-measurement, which is required after changing photometry options. Tested in `test_alcor_night.py`.
+
 Packaging is PEP 621 / `pyproject.toml`-only — there is no `setup.py`, `setup.cfg`, `MANIFEST.in`, or `tox.ini`. The version is generated by `setuptools_scm` into `skycam_utils/_version.py` at build/install time (gitignored). `AGENTS.md` is a symlink to this file — edit `CLAUDE.md` only.
 
 `docs/` is reserved for the Sphinx/Read-the-Docs documentation root (the `# Build docs` command below points there). Non-packaged reference/analysis material — the calibration and analysis scripts (`claude_docs/scripts/`) and the committed reference figures (`claude_docs/gplots/*.png`, kept in the repo on purpose via a `.gitignore` negation) — lives under `claude_docs/`, *not* `docs/`. (It was all renamed out of `docs/` to free that name for Sphinx.)
@@ -93,6 +95,79 @@ alcor_star_photometry <input.fits> [-o OUT.csv] [--aperture-radius 4] [--annulus
 #   overrides --gaussian. collect_alcor_photometry is column-agnostic so the
 #   combined schema flows through unchanged.
 
+alcor_process_night <night-dir> [-o OUT-DIR] [--pattern *.fits.bz2] [--sun-alt-max -12] [--sb-aperture-radius 5] [--no-horizon-mask] [--sb-saturation 25000] [--write-sb-fits] [--median-stack] [--day-keogram] [--reprocess] [--aperture-radius 4] [--annulus-width 1] [--min-altitude 20] [--vmag-limit 5.5] [--gaussian] [--both] [--max-frames N] [--scratch-dir DIR] [--masks-dir DIR] [--workers N] [--overwrite] [--quiet]
+#   Night-level driver: processes one archived night end to end. Selects frames
+#   with the Sun below --sun-alt-max (NO Moon cut -- moonlit sky brightness is the
+#   signal, not contamination), then decompresses each frame ONCE and derives
+#   three things from it: star photometry (<frame>_phot.csv), a calibrated
+#   V mag/arcsec^2 surface-brightness map, and optionally a slot in the night's
+#   raw median stack. Writes (default alongside the frames, -o redirects):
+#     sky_brightness.csv      filename, OBSTIME (UT), exposure, sun_alt, moon_alt,
+#                             moon_az, allsky_mv_zenith, allsky_mv_tucson,
+#                             allsky_mv_nogales -- the last three being the MEDIAN
+#                             surface brightness within a --sb-aperture-radius
+#                             (5 deg) cone about a fixed (az, alt) from
+#                             ALCOR_SB_TARGETS: zenith, az=0/alt=15 (Tucson dome),
+#                             az=190/alt=15 (Nogales dome). Same patch of sky every
+#                             frame of every night. Horizon-masked by default so
+#                             terrain cannot drag the low cones faint.
+#     <night>_sb_keogram.fits/.png  the calibrated nighttime keogram: the zenith
+#                             column of every SB map, i.e. the SAME raw column
+#                             alcor_keogram takes, so it stacks row-for-row against
+#                             the raw RGB keogram. 2-D float32, BUNIT=mag/arcsec2,
+#                             TIMESTAMPS bintable; NaN where not measurable.
+#     <night>_phot.csv        the collect_alcor_photometry rollup (free -- the
+#                             per-frame CSVs already exist).
+#     <night>_median.fits     --median-stack only: the per-channel median of the
+#                             night's RAW frames (bad-pixel repair would erase the
+#                             very pixels it tracks), stamped with NSTACK and
+#                             NBADR/NBADG/NBADB from build_alcor_badpix_mask, so
+#                             per-night hot-pixel counts are a header read and CMOS
+#                             aging can be trended. It does NOT write a mask --
+#                             create_badpix_mask still owns alcor_badpix_*.fits.gz,
+#                             and its stricter Sun<-18/Moon<-6 selection means the
+#                             counts are not strictly comparable to a shipped mask.
+#                             Needs scratch for the whole night (~12 MB/frame).
+#     <night>_keogram.fits/.png  --day-keogram only: the FULL-DAY raw RGB keogram
+#                             that alcor_keogram used to build on its own. A day
+#                             directory spans local noon -> next morning, so this
+#                             covers daylight too: the night frames' columns come
+#                             back FREE from the main pass (same cube, same zcol)
+#                             and only the daylight remainder needs a second,
+#                             column-only read. Timestamps are _alcor_frame_time
+#                             (filename first) rather than the raw DATE header
+#                             string alcor_keogram stores, so both keograms of a
+#                             run share one time source.
+#   --write-sb-fits keeps each frame's full SB map as <frame>_sb.fits (off by
+#   default: several MB each, and the summary + keogram already carry the signal).
+#   RESUME: a frame whose <frame>_phot.csv already exists and is non-empty is NOT
+#   re-measured (the real-time ingest will eventually write those as images come
+#   in), but IS still read -- the SB map and both keogram columns need its pixels
+#   and the CSV does not carry them, so every product stays complete. Photometry is
+#   only ~17% of per-frame cost (load+repair is ~63%), so this saves the measurement,
+#   not the frame. --reprocess forces re-measurement; use it after changing
+#   photometry options, since a CSV written in another mode is otherwise reused
+#   as-is and collect_alcor_photometry would pool a mixed schema.
+#   Reusable as alcor_process_night(night_dir, ...), which returns a dict of the
+#   DataFrame, keogram arrays, and written paths. A frame that fails is recorded in
+#   errors[] with NaN values rather than aborting the night.
+#   scripts/make_movies.sh calls this (with --day-keogram) in place of its old
+#   alcor_keogram call, then publishes both keograms to keograms/<year>/{png,fits}/.
+
+alcor_keogram <input-dir> [-o OUT.png] [--fits-output OUT.fits] [--pattern ...] [--workers N] [--no-progress] [--powerstretch ...] [--gscale ...] [--bscale ...]
+#   Standalone raw RGB keogram over a whole day: the zenith column of each frame's
+#   raw cube stacked into an (ny, nframes, 3) image + DATE timestamps. Still useful
+#   on its own, but alcor_process_night --day-keogram produces the same product as
+#   part of a night run and reuses the night columns it has already loaded.
+#   plot_alcor_keogram_fits re-renders a saved one; plot_alcor_sb_keogram_fits is
+#   the calibrated sibling and takes --vmin/--vmax/--cmap in mag/arcsec^2.
+#   BOTH keogram plotters render NORTH-UP via the shared _set_keogram_yaxis: a
+#   keogram column is the raw zenith pixel column and build_alcor_wcs puts north at
+#   INCREASING y, so row 0 is south and the axis runs S/Z/N bottom to top. Drawing
+#   with origin="upper" or invert_yaxis() silently produces an upside-down keogram
+#   (this was a real bug in save_alcor_keogram_plot); test_alcor_night.py pins both
+#   the WCS premise and the axis direction.
+
 fit_alcor_wcs <night-dir> [--pattern ...] [--vmag-limit 4] [--tolerance 3] [--fit-k5] [--max-detections 200] [--sun-alt-max -18] [--moon-alt-max -6] [--residual-plot OUT.png] [--max-frames N] [--workers N] [--quiet]
 #   Aggregates bright-star matches across dark frames across a night and prints
 #   a ready-to-paste ALCOR_CALIBRATIONS epoch dict (absolute raw-frame constants —
@@ -150,7 +225,7 @@ create_horizon_mask <median.fits> [--epoch YYYY-MM-DD] [--out-dir DIR] [--phot-n
 #   it needs local raw data and is not reproducible from a bare pip install.
 ```
 
-Test coverage is concentrated on the Alcor module (`test_alcor.py`, `test_alcor_wcs.py`, `test_alcor_badpix.py`, `test_alcor_horizon.py`, `test_alcor_skybright.py`, run against the bundled `test.fits.bz2` frame and synthetic geometry). The Stellacam pipeline and photometry/astrometry modules have no tests — don't assume coverage exists for code you change there.
+Test coverage is concentrated on the Alcor module (`test_alcor.py`, `test_alcor_wcs.py`, `test_alcor_badpix.py`, `test_alcor_horizon.py`, `test_alcor_skybright.py`, `test_alcor_night.py`, run against the bundled `test.fits.bz2` frame and synthetic geometry). The Stellacam pipeline and photometry/astrometry modules have no tests — don't assume coverage exists for code you change there.
 
 ## Pipeline architecture
 

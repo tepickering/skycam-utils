@@ -8,6 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from astropy.io import fits
+from astropy.time import Time
 
 os.environ.setdefault("MPLBACKEND", "Agg")
 _MPLCONFIGDIR = Path(tempfile.gettempdir()) / "skycam-utils-matplotlib"
@@ -181,3 +182,56 @@ def test_alcor_sky_brightness_fits_requires_overwrite(tmp_path):
         alcor_sky_brightness_fits(input_file, output_file=out)
     # overwrite succeeds
     assert alcor_sky_brightness_fits(input_file, output_file=out, overwrite=True) == out
+
+
+def test_sb_map_blanks_outside_the_illuminated_field():
+    """Beyond the image circle the fisheye delivers no light; that must be NaN."""
+    from skycam_utils.alcor import (ALCOR_FIELD_RADIUS, _alcor_sky_brightness_map,
+                                    alcor_calibration, build_alcor_wcs)
+
+    cal = alcor_calibration(Time("2026-06-09"))
+    wcs = build_alcor_wcs(xcen=cal["xcen"], ycen=cal["ycen"],
+                          rotation=cal["rotation"],
+                          radial_coeffs=cal["radial_coeffs"],
+                          horizon_radius=cal["horizon_radius"],
+                          tangential_coeffs=cal["tangential_coeffs"],
+                          axis_tilt=cal["axis_tilt"])
+    ny, nx = 1411, 1422
+    cube = np.full((3, ny, nx), 3000.0)
+    # _corner_bias reads the four 10x10 image corners; leave them at a pedestal
+    # so the bias-subtracted signal is positive and the map is finite on-field.
+    for ys in (slice(0, 10), slice(ny - 10, ny)):
+        for xs in (slice(0, 10), slice(nx - 10, nx)):
+            cube[:, ys, xs] = 1900.0
+
+    mu, _ = _alcor_sky_brightness_map(cube, wcs, Time("2026-06-09T08:00:00"), 20.0)
+    kept, _ = _alcor_sky_brightness_map(cube, wcs, Time("2026-06-09T08:00:00"), 20.0,
+                                        field_radius=None)
+
+    ax, ay = (float(c) - 1.0 for c in wcs.wcs.crpix[:2])
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    r = np.hypot(xx - ax, yy - ay)
+
+    assert not np.isfinite(mu[r > ALCOR_FIELD_RADIUS + 1]).any()
+    assert np.isfinite(mu[r < ALCOR_FIELD_RADIUS - 1]).any()
+    # opting out restores pixels the field cut removed
+    assert np.isfinite(kept[(r > ALCOR_FIELD_RADIUS + 1) & np.isfinite(kept)]).any()
+
+
+def test_field_radius_sits_inside_the_nominal_horizon_radius():
+    """The sensor reaches a couple of degrees below the horizon, no further."""
+    from skycam_utils.alcor import (ALCOR_FIELD_RADIUS, ALCOR_HORIZON_RADIUS,
+                                    alcor_calibration, build_alcor_wcs)
+
+    assert ALCOR_FIELD_RADIUS < ALCOR_HORIZON_RADIUS
+
+    cal = alcor_calibration(Time("2026-06-09"))
+    wcs = build_alcor_wcs(xcen=cal["xcen"], ycen=cal["ycen"],
+                          rotation=cal["rotation"],
+                          radial_coeffs=cal["radial_coeffs"],
+                          horizon_radius=cal["horizon_radius"],
+                          tangential_coeffs=cal["tangential_coeffs"],
+                          axis_tilt=cal["axis_tilt"])
+    _, alt = wcs.pixel_to_world_values(cal["xcen"],
+                                       cal["ycen"] - ALCOR_FIELD_RADIUS)
+    assert -4.0 < float(alt) < -1.0

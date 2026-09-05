@@ -70,6 +70,21 @@ ALCOR_SB_SATURATION = 25000   # raw ADU
 # gradient itself is excluded, not just the not-sky side of it.
 ALCOR_BADPIX_RIM_DILATION = 4   # pixels
 
+# Radius in pixels, about the OPTICAL AXIS, of the camera's illuminated image
+# circle. Beyond it the fisheye simply delivers no light: measured on four night
+# medians spanning 2026-01 to 2026-06, the median signal above bias falls from
+# ~180 counts at radius 676-679 to 42 at 679-682 and then flat at a few counts,
+# an unambiguous optical edge at the same radius on every night. It sits at
+# altitude ~-2.5 deg, INSIDE the nominal ALCOR_HORIZON_RADIUS (747) where alt=0
+# would fall without distortion -- the sensor reaches a couple of degrees below
+# the true horizon and no further. Surface-brightness maps blank everything
+# outside it, because dividing a near-zero signal by a solid angle yields a
+# confident-looking ~25 mag/arcsec^2 that is an artifact, not dark sky.
+# Numerically equal to ALCOR_RADIUS, but that one is a display-crop half-width;
+# this is a property of the optics, so they are kept separate.
+ALCOR_FIELD_RADIUS = 680   # pixels
+
+
 # ...and a disc this big around the north celestial pole is excluded too. The
 # detector assumes a night median is trail-free, which holds everywhere except
 # at the pole: Polaris (V=1.98) moves only ~10 px in a night, so its trail
@@ -3464,7 +3479,8 @@ def plot_alcor_fits(filename, outimage=None, outfig=None, radius=680,
 
 
 def _alcor_sky_brightness_map(cube, wcs, time, exposure,
-                              saturation=ALCOR_SB_SATURATION):
+                              saturation=ALCOR_SB_SATURATION,
+                              field_radius=ALCOR_FIELD_RADIUS):
     """
     Full-frame V mag/arcsec^2 surface-brightness map from an alcor cube.
 
@@ -3474,10 +3490,12 @@ def _alcor_sky_brightness_map(cube, wcs, time, exposure,
     linear in exposure), divided by the WCS per-pixel solid angle
     (:func:`_alcor_pixel_solid_angle`), and offset by the epoch G->V zeropoint
     with no airmass term -- plus the per-pixel altitude grid in degrees. Pixels
-    the WCS cannot project (off the sky) and pixels with raw G at or above
-    ``saturation`` (clipped/non-linear) are blanked to NaN in ``mu``. Geometric
-    masking (horizon mask / altitude floor) is left to the caller, since callers
-    differ in their default sky cutoff.
+    the WCS cannot project (off the sky), pixels with raw G at or above
+    ``saturation`` (clipped/non-linear), and pixels farther than ``field_radius``
+    from the optical axis (outside the illuminated image circle -- see
+    :data:`ALCOR_FIELD_RADIUS`; pass None to keep them) are blanked to NaN in
+    ``mu``. Geometric masking (horizon mask / altitude floor) is left to the
+    caller, since callers differ in their default sky cutoff.
     """
     g_raw = np.asarray(cube[1], dtype=float)
     bias = _corner_bias(cube)[1]
@@ -3495,6 +3513,11 @@ def _alcor_sky_brightness_map(cube, wcs, time, exposure,
         mu = np.where(surf > 0, -2.5 * np.log10(surf) + zp_g, np.nan)
 
     blank = ~np.isfinite(mu) | ~np.isfinite(alt) | (g_raw >= saturation)
+    if field_radius is not None:
+        # The optical axis is CRPIX (1-based), which is where build_alcor_wcs
+        # puts (xcen, ycen) -- so the WCS stays the single source of geometry.
+        ax, ay = (float(c) - 1.0 for c in wcs.wcs.crpix[:2])
+        blank |= (xx - ax) ** 2 + (yy - ay) ** 2 > float(field_radius) ** 2
     mu = np.where(blank, np.nan, mu)
     return mu, alt
 

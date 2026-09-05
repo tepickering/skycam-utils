@@ -109,7 +109,9 @@ venv.bak/
 
 # mypy
 .mypy_cache/
-data/
+# local weather dumps at the repo root; anchored so the PACKAGED assets in
+# skycam_utils/data/ (WCS, masks, catalogs) stay tracked without needing -f
+/data/
 
 *.png
 # reference calibration figures, kept in the repo on purpose

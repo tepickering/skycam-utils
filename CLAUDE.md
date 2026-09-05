@@ -132,17 +132,21 @@ alcor_process_night <night-dir> [-o OUT-DIR] [--pattern *.fits.bz2] [--sun-alt-m
 #                             alcor_keogram takes, so it stacks row-for-row against
 #                             the raw RGB keogram. 2-D float32, BUNIT=mag/arcsec2,
 #                             TIMESTAMPS bintable; NaN where not measurable.
-#                             The column is taken from the UN-horizon-masked map,
-#                             so like the RGB keogram it spans the full sensor
-#                             column: alt -6.9 (S) -> zenith -> -6.0 (N). Running
-#                             BELOW the horizon is the point -- that band is where
-#                             the light domes are. The whole column is inside the
-#                             illuminated field (its far end is ~711 px from the
-#                             zenith vs horizon_radius 747), so there is no dark
-#                             corner to trim and the sensor edge is the natural
-#                             stop. The allsky_mv_* cones are unaffected:
-#                             _alcor_cone_indices builds their index sets with
-#                             exclude=horizon, so terrain cannot reach them.
+                             The column is taken from the UN-horizon-masked map,
+#                             so like the RGB keogram it runs BELOW the horizon at
+#                             both ends -- that band is where the light domes are,
+#                             and showing it is the point. The stop is the optics,
+#                             not the sensor: _alcor_sky_brightness_map blanks
+#                             everything beyond ALCOR_FIELD_RADIUS = 680 px from
+#                             the optical axis (CRPIX), the edge of the camera's
+#                             illuminated image circle, which lands at alt ~-2.5.
+#                             Live rows are 24..1383 of 1411. Without that cut the
+#                             outermost ~50 rows report a confident-looking ~25
+#                             mag/arcsec^2 that is pure artifact -- near-zero
+#                             signal divided by a solid angle. The allsky_mv_*
+#                             cones are unaffected: _alcor_cone_indices builds
+#                             their index sets with exclude=horizon, so terrain
+#                             cannot reach them, and they sit far inside the field.
 #     <night>_phot.csv        the collect_alcor_photometry rollup (free -- the
 #                             per-frame CSVs already exist).
 #     <night>_median.fits     --median-stack only: the per-channel median of the

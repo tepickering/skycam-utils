@@ -217,3 +217,65 @@ def test_badpix_date_from_dir_raises_when_undeterminable(tmp_path):
     bad.mkdir()
     with pytest.raises(ValueError, match="cannot determine mask date"):
         _badpix_date_from_dir(bad, [bad / "not_a_timestamp.fits.bz2"])
+
+
+def test_build_badpix_mask_honours_valid_region():
+    cube = np.zeros((3, 15, 15), dtype=float)
+    cube[0, 2, 2] = 1000.0
+    cube[0, 7, 7] = 1000.0
+
+    valid = np.ones((15, 15), dtype=bool)
+    valid[2, 2] = False
+
+    mask = build_alcor_badpix_mask(cube, ksize=5, z_thresh=25, valid=valid)
+
+    assert not mask[0, 2, 2]        # dropped: outside the search region
+    assert mask[0, 7, 7]            # kept
+
+
+def test_build_badpix_mask_rejects_mismatched_valid():
+    cube = np.zeros((3, 15, 15), dtype=float)
+    with pytest.raises(ValueError, match="valid has shape"):
+        build_alcor_badpix_mask(cube, valid=np.ones((10, 10), dtype=bool))
+
+
+def test_search_region_excludes_horizon_and_pole(tmp_path, monkeypatch):
+    from skycam_utils.alcor import (alcor_badpix_search_region, build_alcor_wcs,
+                                    alcor_calibration, MMT_LOCATION)
+
+    cal = alcor_calibration(Time("2026-01-11"))
+    wcs = build_alcor_wcs(xcen=cal["xcen"], ycen=cal["ycen"],
+                          rotation=cal["rotation"],
+                          radial_coeffs=cal["radial_coeffs"],
+                          horizon_radius=cal["horizon_radius"],
+                          tangential_coeffs=cal["tangential_coeffs"],
+                          axis_tilt=cal["axis_tilt"])
+    shape = (1411, 1422)
+
+    # a synthetic horizon mask whose not-sky region is the top 100 rows
+    horizon = np.zeros(shape, dtype=bool)
+    horizon[:100] = True
+    fits.PrimaryHDU(horizon.astype(np.uint8)).writeto(
+        tmp_path / "alcor_horizon_2026-01-01.fits.gz")
+    monkeypatch.setenv("ALCOR_HORIZON_DIR", str(tmp_path))
+
+    valid = alcor_badpix_search_region(shape, time=date(2026, 1, 11), wcs=wcs,
+                                       rim_dilation=4, pole_radius=15)
+
+    assert valid.shape == shape
+    assert not valid[:100].any()            # not-sky
+    assert not valid[100:104].any()         # plus the dilated rim
+    assert valid[110].any()                 # open sky survives
+
+    # the pole disc is centred on the north celestial pole: due true north at
+    # an altitude equal to the site latitude.  Polaris lives inside it.
+    px, py = wcs.world_to_pixel_values(0.0, float(MMT_LOCATION.lat.deg))
+    assert not valid[int(round(float(py))), int(round(float(px)))]
+    assert valid[int(round(float(py))) + 40, int(round(float(px)))]
+
+
+def test_search_region_disabled_pieces_are_noops():
+    from skycam_utils.alcor import alcor_badpix_search_region
+
+    valid = alcor_badpix_search_region((50, 60), time=None, wcs=None)
+    assert valid.all()

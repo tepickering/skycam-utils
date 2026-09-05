@@ -95,7 +95,7 @@ alcor_star_photometry <input.fits> [-o OUT.csv] [--aperture-radius 4] [--annulus
 #   overrides --gaussian. collect_alcor_photometry is column-agnostic so the
 #   combined schema flows through unchanged.
 
-alcor_process_night <night-dir> [-o OUT-DIR] [--pattern *.fits.bz2] [--sun-alt-max -12] [--sb-aperture-radius 5] [--no-horizon-mask] [--sb-saturation 25000] [--write-sb-fits] [--median-stack] [--day-keogram] [--reprocess] [--aperture-radius 4] [--annulus-width 1] [--min-altitude 20] [--vmag-limit 5.5] [--gaussian] [--both] [--max-frames N] [--scratch-dir DIR] [--masks-dir DIR] [--workers N] [--overwrite] [--quiet]
+alcor_process_night <night-dir> [-o OUT-DIR] [--pattern *.fits.bz2] [--sun-alt-max -12] [--sb-aperture-radius 5] [--no-horizon-mask] [--sb-saturation 25000] [--best-min-altitude 30] [--write-sb-fits] [--median-stack] [--day-keogram] [--reprocess] [--aperture-radius 4] [--annulus-width 1] [--min-altitude 20] [--vmag-limit 5.5] [--gaussian] [--both] [--max-frames N] [--scratch-dir DIR] [--masks-dir DIR] [--workers N] [--overwrite] [--quiet]
 #   Night-level driver: processes one archived night end to end. Selects frames
 #   with the Sun below --sun-alt-max (NO Moon cut -- moonlit sky brightness is the
 #   signal, not contamination), then decompresses each frame ONCE and derives
@@ -104,13 +104,27 @@ alcor_process_night <night-dir> [-o OUT-DIR] [--pattern *.fits.bz2] [--sun-alt-m
 #   raw median stack. Writes (default alongside the frames, -o redirects):
 #     sky_brightness.csv      filename, OBSTIME (UT), exposure, sun_alt, moon_alt,
 #                             moon_az, allsky_mv_zenith, allsky_mv_tucson,
-#                             allsky_mv_nogales -- the last three being the MEDIAN
-#                             surface brightness within a --sb-aperture-radius
-#                             (5 deg) cone about a fixed (az, alt) from
-#                             ALCOR_SB_TARGETS: zenith, az=0/alt=15 (Tucson dome),
-#                             az=190/alt=15 (Nogales dome). Same patch of sky every
-#                             frame of every night. Horizon-masked by default so
-#                             terrain cannot drag the low cones faint.
+#                             allsky_mv_nogales, allsky_mv_best, best_az, best_alt.
+#                             The three named columns are the MEDIAN surface
+#                             brightness within a --sb-aperture-radius (5 deg) cone
+#                             about a FIXED (az, alt) from ALCOR_SB_TARGETS: zenith,
+#                             az=0/alt=15 (Tucson dome), az=190/alt=15 (Nogales
+#                             dome) -- the same patch of sky every frame of every
+#                             night. allsky_mv_best is the same statistic at a
+#                             FLOATING position: the darkest of ~100 candidate cones
+#                             tiling the sky above --best-min-altitude (30 deg),
+#                             with best_az/best_alt recording where it was found.
+#                             It exists because the ZENITH IS NOT A DARKNESS
+#                             MEASURE -- the Milky Way transits through it, so the
+#                             zenith value tracks galactic latitude as much as sky
+#                             quality; over a night high galactic latitude does
+#                             transit, so the darkest cone is what says how dark the
+#                             site actually got. The zenith is one of the candidates,
+#                             so allsky_mv_best >= allsky_mv_zenith always. A single
+#                             darkest PIXEL would be wrong (stars only push pixels
+#                             brighter, so the extreme dark tail is read noise);
+#                             hence a cone median, ~7 ms/frame. Horizon-masked by
+#                             default so terrain cannot drag the low cones faint.
 #     <night>_sb_keogram.fits/.png  the calibrated nighttime keogram: the zenith
 #                             column of every SB map, i.e. the SAME raw column
 #                             alcor_keogram takes, so it stacks row-for-row against

@@ -15,7 +15,9 @@ os.environ.setdefault("MPLCONFIGDIR", str(_MPLCONFIGDIR))
 
 from skycam_utils.alcor import (
     ALCOR_SB_APERTURE_RADIUS,
+    ALCOR_SB_BEST_MIN_ALTITUDE,
     ALCOR_SB_TARGETS,
+    _alcor_best_cone_targets,
     _alcor_cone_indices,
     _cone_median,
     _photometry_is_done,
@@ -94,6 +96,33 @@ def test_cone_indices_area_matches_the_plate_scale():
     assert cones["allsky_mv_zenith"].size == pytest.approx(expected, rel=0.05)
 
 
+def test_best_cone_targets_tile_the_sky_above_the_floor():
+    radius = ALCOR_SB_APERTURE_RADIUS
+    targets = _alcor_best_cone_targets(radius_deg=radius,
+                                       min_altitude=ALCOR_SB_BEST_MIN_ALTITUDE)
+    assert targets
+
+    alts = sorted({round(alt, 6) for _, alt in targets.values()})
+    # every cone lies wholly above the floor ...
+    assert min(alts) >= ALCOR_SB_BEST_MIN_ALTITUDE + radius - 1e-9
+    # ... rings are one cone diameter apart, and the zenith is a candidate so
+    # allsky_mv_best can never come out brighter than allsky_mv_zenith
+    assert 90.0 in alts
+    ring = [a for a in alts if a < 90.0]
+    assert np.allclose(np.diff(ring), 2 * radius)
+
+    for az, alt in targets.values():
+        assert 0.0 <= az < 360.0
+        assert ALCOR_SB_BEST_MIN_ALTITUDE <= alt <= 90.0
+
+    # azimuth sampling widens with altitude so cones do not bunch at the pole
+    counts = {}
+    for az, alt in targets.values():
+        counts[round(alt)] = counts.get(round(alt), 0) + 1
+    lows = [counts[a] for a in sorted(counts) if a < 90]
+    assert lows == sorted(lows, reverse=True)
+
+
 def test_cone_indices_drop_excluded_pixels():
     wcs = build_alcor_wcs()
     ny, nx = FRAME_SHAPE[1:]
@@ -150,7 +179,8 @@ def test_process_night_summary_columns_and_values(night_run):
 
     assert list(summary.columns) == [
         "filename", "OBSTIME", "exposure", "sun_alt", "moon_alt", "moon_az",
-        "allsky_mv_zenith", "allsky_mv_tucson", "allsky_mv_nogales"]
+        "allsky_mv_zenith", "allsky_mv_tucson", "allsky_mv_nogales",
+        "allsky_mv_best", "best_az", "best_alt"]
     assert len(summary) == len(FRAME_STAMPS)
     assert summary["OBSTIME"].is_monotonic_increasing
     assert (summary["exposure"] == 20.0).all()
@@ -162,6 +192,16 @@ def test_process_night_summary_columns_and_values(night_run):
     assert ((zenith > 20.5) & (zenith < 22.5)).all()
     assert (summary["allsky_mv_tucson"] < zenith).all()
     assert (summary["allsky_mv_nogales"] < zenith).all()
+
+    # The zenith is one of the darkest-cone candidates, so the darkest patch is
+    # always at least as dark as the zenith -- and it must come from above the
+    # altitude floor. This is the invariant that makes allsky_mv_best a valid
+    # darkness measure when the Milky Way is sitting on the zenith.
+    best = summary["allsky_mv_best"]
+    assert (best >= zenith - 1e-9).all()
+    assert ((best > 20.5) & (best < 22.5)).all()
+    assert (summary["best_alt"] >= ALCOR_SB_BEST_MIN_ALTITUDE - 1e-9).all()
+    assert ((summary["best_az"] >= 0) & (summary["best_az"] < 360)).all()
 
 
 def test_process_night_keogram_matches_the_summary(night_run):

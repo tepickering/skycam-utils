@@ -83,6 +83,13 @@ ALCOR_SB_TARGET_DESCRIPTIONS = {
         "aperture centered at az=190, alt=15",
 }
 ALCOR_SB_TARGET_UNIT = "V mag/arcsec^2"
+# The fixed cones above sample named directions; allsky_mv_best instead reports the
+# DARKEST such cone anywhere above this altitude. The zenith is not a reliable
+# darkness measure -- the Milky Way transits through it -- so the darkest patch is
+# what says how dark the site actually got. It is the same statistic in the same
+# units (median inside a 5 deg cone), just at a floating position rather than a
+# fixed one, so it is directly comparable to the three named columns.
+ALCOR_SB_BEST_MIN_ALTITUDE = 30.0   # deg
 
 # Adopted photometric calibration (see ALCOR_ZEROPOINTS). A single achromatic
 # extinction term applies to all three bands, and instrument magnitudes brighter
@@ -3289,6 +3296,34 @@ def _alcor_sky_brightness_map(cube, wcs, time, exposure,
     return mu, alt
 
 
+def _alcor_best_cone_targets(radius_deg=ALCOR_SB_APERTURE_RADIUS,
+                             min_altitude=ALCOR_SB_BEST_MIN_ALTITUDE):
+    """
+    Candidate cone centres tiling the sky above ``min_altitude``.
+
+    Rings are spaced one cone diameter apart in altitude, starting one radius
+    above the floor so the lowest ring just touches it, and within a ring the
+    azimuth step is widened by ``1/cos(alt)`` so the cones tile at roughly
+    constant spacing on the sphere instead of bunching near the zenith. The
+    zenith itself is included, which makes ``allsky_mv_best`` always at least as
+    dark as ``allsky_mv_zenith``.
+
+    Returns a dict of ``name -> (azimuth, altitude)`` in degrees, the same shape
+    of input :func:`_alcor_cone_indices` takes for the fixed targets.
+    """
+    step = 2.0 * radius_deg
+    targets = {}
+    alt = min_altitude + radius_deg
+    while alt < 90.0:
+        n = max(1, int(round(360.0 * np.cos(np.radians(alt)) / step)))
+        for i in range(n):
+            az = 360.0 * i / n
+            targets[f"best_{alt:.0f}_{az:03.0f}"] = (az, alt)
+        alt += step
+    targets["best_zenith"] = (0.0, 90.0)
+    return targets
+
+
 def _alcor_cone_indices(wcs, shape, targets=None,
                         radius_deg=ALCOR_SB_APERTURE_RADIUS, exclude=None):
     """
@@ -3583,12 +3618,42 @@ def _cone_median(mu, indices):
 # are built once in the parent instead of per frame.
 _NIGHT_CONES = None
 _NIGHT_HORIZON = None
+_NIGHT_BEST_CONES = None
+_NIGHT_BEST_TARGETS = None
 
 
-def _init_night_worker(cones, horizon):
-    global _NIGHT_CONES, _NIGHT_HORIZON
+def _init_night_worker(cones, horizon, best_cones=None, best_targets=None):
+    global _NIGHT_CONES, _NIGHT_HORIZON, _NIGHT_BEST_CONES, _NIGHT_BEST_TARGETS
     _NIGHT_CONES = cones
     _NIGHT_HORIZON = horizon
+    _NIGHT_BEST_CONES = best_cones or {}
+    _NIGHT_BEST_TARGETS = best_targets or {}
+
+
+# Summary columns derived from the floating darkest-cone search, appended after
+# the fixed ALCOR_SB_TARGETS columns.
+ALCOR_SB_BEST_COLUMNS = ("allsky_mv_best", "best_az", "best_alt")
+
+
+def _darkest_cone(mu):
+    """
+    Darkest 5 deg cone above ALCOR_SB_BEST_MIN_ALTITUDE, as
+    ``(brightness, az, alt)``.
+
+    The zenith is contaminated whenever the Milky Way transits it, so the
+    darkest patch of sky is what actually measures how dark the site got. This
+    reports the same statistic as the fixed cones -- a median inside a 5 deg
+    aperture -- at whichever candidate position is faintest, rather than the
+    single darkest pixel, which would just track the noise floor (stars only
+    push pixels brighter, so the extreme dark tail is read noise).
+    """
+    best = best_az = best_alt = float("nan")
+    for name, idx in _NIGHT_BEST_CONES.items():
+        value = _cone_median(mu, idx)
+        if np.isfinite(value) and (not np.isfinite(best) or value > best):
+            best = value
+            best_az, best_alt = _NIGHT_BEST_TARGETS[name]
+    return best, best_az, best_alt
 
 
 def _process_night_frame(task):
@@ -3614,6 +3679,7 @@ def _process_night_frame(task):
     zcol = opts["zcol"]
     ny = opts["shape"][1]
     nan_values = {name: float("nan") for name in _NIGHT_CONES}
+    nan_values.update({name: float("nan") for name in ALCOR_SB_BEST_COLUMNS})
     nan_column = np.full(ny, np.nan, dtype=np.float32)
     nan_rgb = np.full((ny, 3), np.nan, dtype=np.float32) if opts["rgb_column"] else None
 
@@ -3653,6 +3719,10 @@ def _process_night_frame(task):
                 opts["sb_out"], overwrite=opts["overwrite"])
 
         values = {name: _cone_median(mu, idx) for name, idx in _NIGHT_CONES.items()}
+        best, best_az, best_alt = _darkest_cone(mu)
+        values["allsky_mv_best"] = best
+        values["best_az"] = best_az
+        values["best_alt"] = best_alt
         column = mu[:, zcol].astype(np.float32)
         # The RGB keogram column is free here: same cube, same zenith column.
         rgb_column = (cube[:, :, zcol].T.astype(np.float32)
@@ -3754,6 +3824,7 @@ def _build_day_keogram(frames, night_files, night_times, night_rgb_columns,
 def alcor_process_night(night_dir, out_dir=None, pattern="*.fits.bz2",
                         sun_alt_max=-12.0, targets=None,
                         sb_aperture_radius=ALCOR_SB_APERTURE_RADIUS,
+                        best_min_altitude=ALCOR_SB_BEST_MIN_ALTITUDE,
                         horizon_mask=True, sb_saturation=ALCOR_SB_SATURATION,
                         write_sb_fits=False, median_stack=False,
                         day_keogram=False, reprocess=False,
@@ -3794,6 +3865,8 @@ def alcor_process_night(night_dir, out_dir=None, pattern="*.fits.bz2",
         degrees. None uses :data:`ALCOR_SB_TARGETS`.
     sb_aperture_radius : float (default ALCOR_SB_APERTURE_RADIUS)
         Angular radius of each sampling cone in degrees.
+    best_min_altitude : float (default ALCOR_SB_BEST_MIN_ALTITUDE)
+        Altitude floor for the ``allsky_mv_best`` darkest-cone search.
     horizon_mask : bool (default=True)
         Blank not-sky pixels (:func:`load_alcor_horizon_mask`) in the maps, the
         cones, and the keogram, so terrain cannot drag a low-altitude cone faint.
@@ -3931,6 +4004,19 @@ def alcor_process_night(night_dir, out_dir=None, pattern="*.fits.bz2",
     for name, idx in cones.items():
         _log(f"{name}: {idx.size} pixels within {sb_aperture_radius:g} deg "
              f"of az={targets[name][0]:g}, alt={targets[name][1]:g}")
+
+    # Floating darkest-cone search: candidates tiling the sky above the floor,
+    # built once for the night like the fixed cones. Drop any the horizon mask or
+    # the frame edge leaves empty so the search never sees an all-NaN cone.
+    best_targets = _alcor_best_cone_targets(radius_deg=sb_aperture_radius,
+                                            min_altitude=best_min_altitude)
+    best_cones = _alcor_cone_indices(wcs, shape[1:], targets=best_targets,
+                                     radius_deg=sb_aperture_radius,
+                                     exclude=horizon)
+    best_cones = {name: idx for name, idx in best_cones.items() if idx.size}
+    best_targets = {name: best_targets[name] for name in best_cones}
+    _log(f"allsky_mv_best: darkest of {len(best_cones)} cones above "
+         f"alt {best_min_altitude:g} deg")
     zx, _ = wcs.world_to_pixel_values(0.0, 90.0)
     zcol = int(np.clip(round(float(zx)), 0, shape[2] - 1))
 
@@ -3990,14 +4076,15 @@ def alcor_process_night(night_dir, out_dir=None, pattern="*.fits.bz2",
                 _log(f"{files_[index].name}: {error}")
 
         if workers == 1:
-            _init_night_worker(cones, horizon)
+            _init_night_worker(cones, horizon, best_cones, best_targets)
             for done, task in enumerate(tasks, start=1):
                 _collect(_process_night_frame(task))
                 _log(f"[{done}/{nframes}] {files_[task[0]].name}")
         else:
             with ProcessPoolExecutor(max_workers=workers,
                                      initializer=_init_night_worker,
-                                     initargs=(cones, horizon)) as executor:
+                                     initargs=(cones, horizon, best_cones,
+                                               best_targets)) as executor:
                 futures = [executor.submit(_process_night_frame, task)
                            for task in tasks]
                 for done, future in enumerate(as_completed(futures), start=1):
@@ -4013,7 +4100,7 @@ def alcor_process_night(night_dir, out_dir=None, pattern="*.fits.bz2",
             "moon_alt": moon.alt.deg,
             "moon_az": moon.az.deg,
         })
-        for name in targets:
+        for name in list(targets) + list(ALCOR_SB_BEST_COLUMNS):
             summary[name] = [vals[name] for vals in values]
         summary = summary.sort_values("OBSTIME", ignore_index=True)
         summary_file = out_dir / "sky_brightness.csv"
@@ -4484,6 +4571,9 @@ def alcor_process_night_cli():
     parser.add_argument("--sb-aperture-radius", type=float,
                         default=ALCOR_SB_APERTURE_RADIUS,
                         help="Angular radius of each sky-brightness sampling cone (deg).")
+    parser.add_argument("--best-min-altitude", type=float,
+                        default=ALCOR_SB_BEST_MIN_ALTITUDE,
+                        help="Altitude floor for the allsky_mv_best darkest-cone search (deg).")
     parser.add_argument("--no-horizon-mask", action="store_true",
                         help="Do not blank not-sky pixels in the maps, cones, and keogram.")
     parser.add_argument("--sb-saturation", type=int, default=ALCOR_SB_SATURATION,
@@ -4531,6 +4621,7 @@ def alcor_process_night_cli():
         pattern=args.pattern,
         sun_alt_max=args.sun_alt_max,
         sb_aperture_radius=args.sb_aperture_radius,
+        best_min_altitude=args.best_min_altitude,
         horizon_mask=not args.no_horizon_mask,
         sb_saturation=args.sb_saturation,
         write_sb_fits=args.write_sb_fits,

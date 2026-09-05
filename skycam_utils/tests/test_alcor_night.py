@@ -4,9 +4,11 @@ import shutil
 import tempfile
 from pathlib import Path
 
+import astropy.units as u
 import numpy as np
 import pytest
 from astropy.io import fits
+from astropy.time import Time
 
 os.environ.setdefault("MPLBACKEND", "Agg")
 _MPLCONFIGDIR = Path(tempfile.gettempdir()) / "skycam-utils-matplotlib"
@@ -395,3 +397,80 @@ def test_process_night_requires_matching_files(tmp_path):
     with pytest.raises(FileNotFoundError):
         alcor_process_night(night_dir, out_dir=tmp_path / "out",
                             pattern="*.fits.gz", workers=1)
+
+
+def test_keogram_row_altitude_spans_below_the_horizon():
+    """The keogram column runs past alt 0 at BOTH ends, inside the lit field."""
+    from skycam_utils.alcor import (_keogram_row_altitude, alcor_calibration,
+                                    build_alcor_wcs)
+
+    cal = alcor_calibration(Time("2026-06-09"))
+    wcs = build_alcor_wcs(xcen=cal["xcen"], ycen=cal["ycen"],
+                          rotation=cal["rotation"],
+                          radial_coeffs=cal["radial_coeffs"],
+                          horizon_radius=cal["horizon_radius"],
+                          tangential_coeffs=cal["tangential_coeffs"],
+                          axis_tilt=cal["axis_tilt"])
+    zx, zy = wcs.world_to_pixel_values(0.0, 90.0)
+    nrows = 1411
+    alt = _keogram_row_altitude(wcs, nrows, int(round(float(zx))))
+
+    assert alt.shape == (nrows,)
+    assert alt[0] < 0 and alt[-1] < 0          # both ends below the horizon
+    assert alt.max() > 88                       # and the zenith in between
+    # the whole column is inside the illuminated field, so nothing is clipped
+    assert max(float(zy), nrows - 1 - float(zy)) < cal["horizon_radius"]
+
+
+def test_keogram_horizon_rows_finds_both_crossings():
+    from skycam_utils.alcor import _keogram_horizon_rows
+
+    alt = np.concatenate([np.linspace(-5, -0.1, 10),
+                          np.linspace(0.1, 89, 30),
+                          np.linspace(89, -4, 20)])
+    rows = _keogram_horizon_rows(alt)
+    assert len(rows) == 2
+    assert rows[0] < rows[1]
+    assert _keogram_horizon_rows(None) == []
+    assert _keogram_horizon_rows(np.full(10, -3.0)) == []
+
+
+def test_sb_keogram_scale_uses_sky_rows_only():
+    """Bright below-horizon rows must not drag the colour scale."""
+    from skycam_utils.alcor import _sb_keogram_limits
+
+    alt = np.concatenate([np.full(10, -3.0), np.full(20, 45.0), np.full(10, -3.0)])
+    keo = np.full((40, 12), 21.5)
+    keo[alt < 0] = 17.0                      # terrain / light domes, much brighter
+
+    vmin, vmax = _sb_keogram_limits(keo, alt, None, None)
+    assert 21.0 < vmin <= vmax < 22.0        # scaled on sky, not on terrain
+
+    # without altitudes the terrain drags the range wide open, which is the
+    # behaviour older keograms (no ROWALT extension) keep
+    wide_min, wide_max = _sb_keogram_limits(keo, None, None, None)
+    assert wide_min < 18.0
+
+    # explicit limits always win
+    assert _sb_keogram_limits(keo, alt, 19.0, 22.0) == (19.0, 22.0)
+
+
+def test_keogram_fits_round_trips_row_altitude(tmp_path):
+    from skycam_utils.alcor import (save_alcor_sb_keogram_fits,
+                                    save_alcor_keogram_fits, _load_row_altitude)
+
+    alt = np.linspace(-6.0, -5.0, 25)
+    times = [(Time("2026-06-09T04:00:00") + i * u.min).isot for i in range(4)]
+
+    sb = tmp_path / "sb_keogram.fits"
+    save_alcor_sb_keogram_fits(np.zeros((25, 4)), times, sb, altitude=alt)
+    np.testing.assert_allclose(_load_row_altitude(sb), alt, rtol=1e-6)
+
+    rgb = tmp_path / "keogram.fits"
+    save_alcor_keogram_fits(np.zeros((25, 4, 3)), times, rgb, altitude=alt)
+    np.testing.assert_allclose(_load_row_altitude(rgb), alt, rtol=1e-6)
+
+    # a file written without it stays loadable
+    plain = tmp_path / "plain.fits"
+    save_alcor_sb_keogram_fits(np.zeros((25, 4)), times, plain)
+    assert _load_row_altitude(plain) is None

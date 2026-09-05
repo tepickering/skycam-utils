@@ -2844,6 +2844,7 @@ def save_alcor_keogram_plot(
     bscale=1.7,
     figsize=(12, 6),
     dpi=150,
+    altitude=None,
 ):
     """
     Save a timestamp-labeled plot of an alcor keogram.
@@ -2868,6 +2869,9 @@ def save_alcor_keogram_plot(
         Matplotlib figure size in inches.
     dpi : int (default=150)
         Output figure resolution.
+    altitude : ndarray or None (default=None)
+        Per-row altitude in degrees (:func:`_keogram_row_altitude`). When given,
+        the horizon crossings are marked.
 
     Returns
     -------
@@ -2892,11 +2896,11 @@ def save_alcor_keogram_plot(
 
     if timestamp_edges is None:
         ax.imshow(im, aspect="auto", origin="lower")
-        _set_keogram_yaxis(ax, keogram.shape[0])
+        _set_keogram_yaxis(ax, keogram.shape[0], altitude=altitude)
     else:
         yedges = np.arange(keogram.shape[0] + 1)
         ax.pcolormesh(timestamp_edges, yedges, im, shading="flat", rasterized=True)
-        _set_keogram_yaxis(ax, keogram.shape[0], edges=True)
+        _set_keogram_yaxis(ax, keogram.shape[0], edges=True, altitude=altitude)
     ax.set_xlabel("UT")
 
     if times is None:
@@ -2912,7 +2916,39 @@ def save_alcor_keogram_plot(
     return output_file
 
 
-def _set_keogram_yaxis(ax, nrows, edges=False):
+def _keogram_row_altitude(wcs, nrows, zcol):
+    """
+    Altitude in degrees of each row of a keogram column.
+
+    A keogram column is the raw zenith pixel column, so its rows run from the
+    south end of the sensor, up through the zenith, to the north end -- crossing
+    altitude 0 twice. This is what lets a plotter mark the horizon and scale on
+    sky pixels alone.
+    """
+    rows = np.arange(int(nrows), dtype=float)
+    _, alt = wcs.pixel_to_world_values(np.full(rows.shape, float(zcol)), rows)
+    return np.asarray(alt, dtype=float)
+
+
+def _keogram_horizon_rows(altitude):
+    """
+    Row indices where a keogram column crosses altitude 0, south end first.
+
+    Returns an empty list when ``altitude`` is None or never crosses (a sensor
+    whose column stays above the horizon).
+    """
+    if altitude is None:
+        return []
+    alt = np.asarray(altitude, dtype=float)
+    sky = alt > 0.0
+    if not sky.any():
+        return []
+    edges = np.flatnonzero(np.diff(sky.astype(int)) != 0)
+    # +0.5: the crossing lies between the two rows that straddle it.
+    return [float(e) + 0.5 for e in edges]
+
+
+def _set_keogram_yaxis(ax, nrows, edges=False, altitude=None):
     """
     Label a keogram's y axis north-up, with the row index increasing upward.
 
@@ -2925,11 +2961,18 @@ def _set_keogram_yaxis(ax, nrows, edges=False):
 
     ``edges`` selects the tick positions for a ``pcolormesh`` drawn on
     ``nrows + 1`` cell edges rather than an ``imshow`` on ``nrows`` pixel centres.
+
+    When ``altitude`` (per-row degrees, from :func:`_keogram_row_altitude`) is
+    given, the two altitude-0 crossings are drawn as dashed lines. The column
+    runs past the horizon at both ends -- that band is terrain and the light
+    domes above it, and without the marks it is indistinguishable from low sky.
     """
     upper = nrows if edges else nrows - 1
     ax.set_ylim(0, upper)
     ax.set_yticks([0, upper / 2.0, upper])
     ax.set_yticklabels(["S", "Z", "N"])
+    for row in _keogram_horizon_rows(altitude):
+        ax.axhline(row, color="0.65", ls="--", lw=0.8, alpha=0.8)
 
 
 def _timestamp_edges(xvalues):
@@ -2951,7 +2994,31 @@ def _timestamp_edges(xvalues):
     return edges
 
 
-def save_alcor_keogram_fits(keogram, timestamps, output_file="keogram.fits", overwrite=False):
+def _row_altitude_hdu(altitude):
+    """
+    ``ROWALT`` extension carrying the per-row altitude of a keogram column.
+
+    Written alongside ``TIMESTAMPS`` so a saved keogram is self-describing: a
+    plotter can mark the horizon and scale on sky alone without re-resolving the
+    calibration. Returns None when there is nothing to write.
+    """
+    if altitude is None:
+        return None
+    altitude = np.asarray(altitude, dtype=np.float32)
+    column = fits.Column(name="ALTITUDE", format="E", unit="deg", array=altitude)
+    return fits.BinTableHDU.from_columns([column], name="ROWALT")
+
+
+def _load_row_altitude(filename):
+    """Per-row altitude from a keogram FITS, or None for a file written without it."""
+    with fits.open(filename) as hdul:
+        if "ROWALT" not in hdul:
+            return None
+        return np.asarray(hdul["ROWALT"].data["ALTITUDE"], dtype=float)
+
+
+def save_alcor_keogram_fits(keogram, timestamps, output_file="keogram.fits",
+                            overwrite=False, altitude=None):
     """
     Save an alcor keogram and its timestamps to a FITS file.
 
@@ -2966,6 +3033,8 @@ def save_alcor_keogram_fits(keogram, timestamps, output_file="keogram.fits", ove
         Output FITS filename.
     overwrite : bool (default=False)
         Passed through to `fits.HDUList.writeto`.
+    altitude : ndarray or None (default=None)
+        Per-row altitude in degrees; written as a ``ROWALT`` extension.
 
     Returns
     -------
@@ -2986,6 +3055,9 @@ def save_alcor_keogram_fits(keogram, timestamps, output_file="keogram.fits", ove
     table = fits.BinTableHDU.from_columns(columns, name="TIMESTAMPS")
 
     hdul = fits.HDUList([primary, table])
+    rowalt = _row_altitude_hdu(altitude)
+    if rowalt is not None:
+        hdul.append(rowalt)
     hdul.writeto(output_file, overwrite=overwrite)
     return output_file
 
@@ -3041,11 +3113,12 @@ def plot_alcor_keogram_fits(filename, output_file=None, **kwargs):
         output_file = stem + ".png"
 
     keogram, timestamps = load_alcor_keogram_fits(filename)
+    kwargs.setdefault("altitude", _load_row_altitude(filename))
     return save_alcor_keogram_plot(keogram, timestamps, output_file, **kwargs)
 
 
 def save_alcor_sb_keogram_fits(keogram, timestamps, output_file="sb_keogram.fits",
-                               overwrite=False):
+                               overwrite=False, altitude=None):
     """
     Save a calibrated sky-brightness keogram and its timestamps to a FITS file.
 
@@ -3066,6 +3139,8 @@ def save_alcor_sb_keogram_fits(keogram, timestamps, output_file="sb_keogram.fits
         Output FITS filename.
     overwrite : bool (default=False)
         Passed through to `fits.HDUList.writeto`.
+    altitude : ndarray or None (default=None)
+        Per-row altitude in degrees; written as a ``ROWALT`` extension.
 
     Returns
     -------
@@ -3084,6 +3159,9 @@ def save_alcor_sb_keogram_fits(keogram, timestamps, output_file="sb_keogram.fits
     table = fits.BinTableHDU.from_columns(columns, name="TIMESTAMPS")
 
     hdul = fits.HDUList([primary, table])
+    rowalt = _row_altitude_hdu(altitude)
+    if rowalt is not None:
+        hdul.append(rowalt)
     hdul.writeto(output_file, overwrite=overwrite)
     return output_file
 
@@ -3103,9 +3181,34 @@ def load_alcor_sb_keogram_fits(filename):
     return keogram, timestamps
 
 
+def _sb_keogram_limits(im, altitude, vmin, vmax):
+    """
+    Fill in missing colour limits for a sky-brightness keogram.
+
+    Percentiles are taken over pixels ABOVE THE HORIZON when ``altitude`` is
+    known. The column runs a few degrees below the horizon at both ends, and the
+    terrain and light domes there are a couple of magnitudes brighter than sky;
+    including them would compress away the sky contrast that makes the keogram
+    readable, so they saturate the bright end of the colormap instead.
+    """
+    if vmin is not None and vmax is not None:
+        return vmin, vmax
+    scale_from = im
+    if altitude is not None:
+        sky = np.asarray(altitude, dtype=float) > 0.0
+        if sky.any():
+            scale_from = im[sky]
+    finite = scale_from[np.isfinite(scale_from)]
+    if finite.size:
+        low, high = np.percentile(finite, [1.0, 99.0])
+        vmin = low if vmin is None else vmin
+        vmax = high if vmax is None else vmax
+    return vmin, vmax
+
+
 def save_alcor_sb_keogram_plot(keogram, timestamps, output_file, vmin=None,
                                vmax=None, cmap="cividis_r", figsize=(12, 6),
-                               dpi=150):
+                               dpi=150, altitude=None):
     """
     Save a timestamp-labeled plot of a calibrated sky-brightness keogram.
 
@@ -3125,13 +3228,23 @@ def save_alcor_sb_keogram_plot(keogram, timestamps, output_file, vmin=None,
         Output figure filename. The format is inferred from the extension.
     vmin, vmax : float or None (default=None)
         Colour limits in mag/arcsec^2. When None, the 1st and 99th percentiles
-        of the finite data are used (the range varies a lot with moonlight).
+        are used (the range varies a lot with moonlight) -- taken over pixels
+        ABOVE THE HORIZON when ``altitude`` is given. The column runs several
+        degrees below the horizon at both ends, and terrain and the light domes
+        there are a couple of magnitudes brighter than sky; letting them into
+        the percentile clip would compress away the sky contrast that makes the
+        keogram readable. They saturate the bright end instead, which reads
+        correctly as "brighter than the scale".
     cmap : str (default="cividis_r")
         Matplotlib colormap; reversed so bright sky reads bright.
     figsize : tuple (default=(12, 6))
         Matplotlib figure size in inches.
     dpi : int (default=150)
         Output figure resolution.
+    altitude : ndarray or None (default=None)
+        Per-row altitude in degrees (:func:`_keogram_row_altitude`). When given,
+        the horizon crossings are marked and the colour scale is set from sky
+        pixels alone.
 
     Returns
     -------
@@ -3141,12 +3254,7 @@ def save_alcor_sb_keogram_plot(keogram, timestamps, output_file, vmin=None,
     output_file = Path(output_file)
     im = np.asarray(keogram, dtype=float)
 
-    if vmin is None or vmax is None:
-        finite = im[np.isfinite(im)]
-        if finite.size:
-            low, high = np.percentile(finite, [1.0, 99.0])
-            vmin = low if vmin is None else vmin
-            vmax = high if vmax is None else vmax
+    vmin, vmax = _sb_keogram_limits(im, altitude, vmin, vmax)
 
     times = _parse_timestamps(timestamps)
     fig, ax = plt.subplots(figsize=figsize)
@@ -3159,13 +3267,13 @@ def save_alcor_sb_keogram_plot(keogram, timestamps, output_file, vmin=None,
     if timestamp_edges is None:
         mesh = ax.imshow(im, aspect="auto", origin="lower", cmap=cmap,
                          vmin=vmin, vmax=vmax, interpolation="nearest")
-        _set_keogram_yaxis(ax, im.shape[0])
+        _set_keogram_yaxis(ax, im.shape[0], altitude=altitude)
         ax.set_xlim(-0.5, im.shape[1] - 0.5)
     else:
         yedges = np.arange(im.shape[0] + 1)
         mesh = ax.pcolormesh(timestamp_edges, yedges, im, shading="flat",
                              cmap=cmap, vmin=vmin, vmax=vmax, rasterized=True)
-        _set_keogram_yaxis(ax, im.shape[0], edges=True)
+        _set_keogram_yaxis(ax, im.shape[0], edges=True, altitude=altitude)
         ax.xaxis_date()
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
         fig.autofmt_xdate()
@@ -3197,6 +3305,7 @@ def plot_alcor_sb_keogram_fits(filename, output_file=None, **kwargs):
         output_file = stem + ".png"
 
     keogram, timestamps = load_alcor_sb_keogram_fits(filename)
+    kwargs.setdefault("altitude", _load_row_altitude(filename))
     return save_alcor_sb_keogram_plot(keogram, timestamps, output_file, **kwargs)
 
 
@@ -3800,10 +3909,10 @@ def _process_night_frame(task):
 
         time = _alcor_frame_time(filename)
         exposure = _read_frame_exposure(filename)
-        mu, _ = _alcor_sky_brightness_map(cube, wcs, time, exposure,
-                                          saturation=opts["sb_saturation"])
-        if _NIGHT_HORIZON is not None:
-            mu = np.where(_NIGHT_HORIZON, np.nan, mu)
+        mu_full, _ = _alcor_sky_brightness_map(cube, wcs, time, exposure,
+                                               saturation=opts["sb_saturation"])
+        mu = (np.where(_NIGHT_HORIZON, np.nan, mu_full)
+              if _NIGHT_HORIZON is not None else mu_full)
 
         if opts["sb_out"] is not None:
             header = _alcor_sb_fits_header(wcs, time, exposure,
@@ -3817,7 +3926,14 @@ def _process_night_frame(task):
         values["allsky_mv_best"] = best
         values["best_az"] = best_az
         values["best_alt"] = best_alt
-        column = mu[:, zcol].astype(np.float32)
+        # The keogram column comes from the UNMASKED map: the whole column is
+        # inside the illuminated field (its far end is ~711 px from the zenith
+        # against a horizon_radius of 747), so it runs a few degrees BELOW the
+        # horizon at both ends -- which is exactly where the light domes are, and
+        # the point of a calibrated keogram is to show where the light is coming
+        # from. The cone medians above are unaffected: _alcor_cone_indices built
+        # their index sets with exclude=horizon, so terrain cannot reach them.
+        column = mu_full[:, zcol].astype(np.float32)
         # The RGB keogram column is free here: same cube, same zenith column.
         rgb_column = (cube[:, :, zcol].T.astype(np.float32)
                       if opts["rgb_column"] else None)
@@ -4203,11 +4319,14 @@ def alcor_process_night(night_dir, out_dir=None, pattern="*.fits.bz2",
 
         keogram = np.stack(columns, axis=1)
         timestamps = list(times.isot)
+        # Both keograms are the same raw column, so one altitude array serves.
+        row_altitude = _keogram_row_altitude(wcs, shape[1], zcol)
         keogram_file = out_dir / f"{night_name}_sb_keogram.fits"
         save_alcor_sb_keogram_fits(keogram, timestamps, keogram_file,
-                                   overwrite=True)
+                                   overwrite=True, altitude=row_altitude)
         keogram_plot = out_dir / f"{night_name}_sb_keogram.png"
-        save_alcor_sb_keogram_plot(keogram, timestamps, keogram_plot)
+        save_alcor_sb_keogram_plot(keogram, timestamps, keogram_plot,
+                                   altitude=row_altitude)
         _log(f"wrote {keogram_file} and {keogram_plot}")
 
         day_keogram_array = None
@@ -4219,9 +4338,11 @@ def alcor_process_night(night_dir, out_dir=None, pattern="*.fits.bz2",
                 masks_dir, workers, errors, _log)
             day_keogram_file = out_dir / f"{night_name}_keogram.fits"
             save_alcor_keogram_fits(day_keogram_array, day_times,
-                                    day_keogram_file, overwrite=True)
+                                    day_keogram_file, overwrite=True,
+                                    altitude=row_altitude)
             day_keogram_plot = out_dir / f"{night_name}_keogram.png"
-            save_alcor_keogram_plot(day_keogram_array, day_times, day_keogram_plot)
+            save_alcor_keogram_plot(day_keogram_array, day_times,
+                                    day_keogram_plot, altitude=row_altitude)
             _log(f"wrote {day_keogram_file} and {day_keogram_plot}")
 
         photometry_file = None
@@ -4412,12 +4533,24 @@ def alcor_keogram_cli():
     if fits_output is None:
         fits_output = f"{input_dir.name}_keogram.fits"
 
-    keogram, timestamps, _ = alcor_keogram(
+    keogram, timestamps, used = alcor_keogram(
         input_dir,
         pattern=args.pattern,
         workers=args.workers,
         progress=not args.no_progress,
     )
+    row_altitude = None
+    if used:
+        cal = _alcor_frame_calibration(used[0])
+        wcs = build_alcor_wcs(xcen=cal["xcen"], ycen=cal["ycen"],
+                              rotation=cal["rotation"],
+                              radial_coeffs=cal["radial_coeffs"],
+                              horizon_radius=cal["horizon_radius"],
+                              tangential_coeffs=cal["tangential_coeffs"],
+                              axis_tilt=cal["axis_tilt"])
+        zx, _ = wcs.world_to_pixel_values(0.0, 90.0)
+        row_altitude = _keogram_row_altitude(
+            wcs, keogram.shape[0], int(round(float(zx))))
     output_file = save_alcor_keogram_plot(
         keogram,
         timestamps,
@@ -4428,12 +4561,14 @@ def alcor_keogram_cli():
         bscale=args.bscale,
         figsize=tuple(args.figsize),
         dpi=args.dpi,
+        altitude=row_altitude,
     )
     fits_output = save_alcor_keogram_fits(
         keogram,
         timestamps,
         fits_output,
         overwrite=True,
+        altitude=row_altitude,
     )
 
     if args.timestamps_output is not None:

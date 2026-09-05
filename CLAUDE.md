@@ -132,6 +132,17 @@ alcor_process_night <night-dir> [-o OUT-DIR] [--pattern *.fits.bz2] [--sun-alt-m
 #                             alcor_keogram takes, so it stacks row-for-row against
 #                             the raw RGB keogram. 2-D float32, BUNIT=mag/arcsec2,
 #                             TIMESTAMPS bintable; NaN where not measurable.
+#                             The column is taken from the UN-horizon-masked map,
+#                             so like the RGB keogram it spans the full sensor
+#                             column: alt -6.9 (S) -> zenith -> -6.0 (N). Running
+#                             BELOW the horizon is the point -- that band is where
+#                             the light domes are. The whole column is inside the
+#                             illuminated field (its far end is ~711 px from the
+#                             zenith vs horizon_radius 747), so there is no dark
+#                             corner to trim and the sensor edge is the natural
+#                             stop. The allsky_mv_* cones are unaffected:
+#                             _alcor_cone_indices builds their index sets with
+#                             exclude=horizon, so terrain cannot reach them.
 #     <night>_phot.csv        the collect_alcor_photometry rollup (free -- the
 #                             per-frame CSVs already exist).
 #     <night>_median.fits     --median-stack only: the per-channel median of the
@@ -183,6 +194,14 @@ alcor_keogram <input-dir> [-o OUT.png] [--fits-output OUT.fits] [--pattern ...] 
 #   with origin="upper" or invert_yaxis() silently produces an upside-down keogram
 #   (this was a real bug in save_alcor_keogram_plot); test_alcor_night.py pins both
 #   the WCS premise and the axis direction.
+#   Both savers also write a ROWALT bintable extension holding the per-row altitude
+#   in deg (_keogram_row_altitude), so a saved keogram is self-describing and the
+#   re-plotters pick it up automatically. With it, _set_keogram_yaxis dashes the two
+#   alt=0 crossings, and the SB plotter takes its default vmin/vmax percentiles from
+#   SKY ROWS ONLY (_sb_keogram_limits) -- terrain and the domes are ~2 mag brighter
+#   than sky and would otherwise compress the sky contrast away; they saturate the
+#   bright end instead. A keogram written before ROWALT existed still loads: the
+#   extension is optional and its absence just restores the old whole-frame scaling.
 
 fit_alcor_wcs <night-dir> [--pattern ...] [--vmag-limit 4] [--tolerance 3] [--fit-k5] [--max-detections 200] [--sun-alt-max -18] [--moon-alt-max -6] [--residual-plot OUT.png] [--max-frames N] [--workers N] [--quiet]
 #   Aggregates bright-star matches across dark frames across a night and prints

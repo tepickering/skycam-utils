@@ -55,9 +55,18 @@ ALCOR_NONLINEAR_THRESHOLD = 15000   # raw ADU; per-pixel non-linearity onset
 # reference before the zeropoint is applied (see plot_alcor_sky_brightness).
 ALCOR_CALIB_EXPTIME = 20.0   # seconds
 # Sky-brightness saturation / strong-non-linearity ceiling: raw pixels at or
-# above this are clipped or badly non-linear and are masked in surface-brightness
-# maps. Lower than the 15-bit hard ceiling ALCOR_SATURATION used for star sat_*
-# flags, because the per-pixel response departs from linear well before clipping.
+# above this are clipped or badly non-linear. Lower than the 15-bit hard ceiling
+# ALCOR_SATURATION used for star sat_* flags, because the per-pixel response
+# departs from linear well before clipping.
+#
+# NOT applied by default any more. Blanking these pixels was actively
+# misleading on a surface-brightness map: a NaN renders as the axes background,
+# so the very brightest sources -- a saturated star or planet crossing the
+# frame -- appeared as DARK holes when the truth is that they are too bright to
+# measure. Keeping the value is the lesser error. Clipping loses flux, so a
+# saturated pixel reads slightly too FAINT, which makes the rendered peak a
+# lower bound on the real surface brightness rather than an inversion of it.
+# Pass an explicit `saturation` to restore the mask.
 ALCOR_SB_SATURATION = 25000   # raw ADU
 
 # Bad-pixel detection is restricted to sky pixels. The 5 px median high-pass that
@@ -3603,7 +3612,7 @@ def plot_alcor_fits(filename, outimage=None, outfig=None, radius=680,
 
 
 def _alcor_sky_brightness_map(cube, wcs, time, exposure,
-                              saturation=ALCOR_SB_SATURATION,
+                              saturation=None,
                               field_radius=ALCOR_FIELD_RADIUS):
     """
     Full-frame V mag/arcsec^2 surface-brightness map from an alcor cube.
@@ -3615,7 +3624,9 @@ def _alcor_sky_brightness_map(cube, wcs, time, exposure,
     (:func:`_alcor_pixel_solid_angle`), and offset by the epoch G->V zeropoint
     with no airmass term -- plus the per-pixel altitude grid in degrees. Pixels
     the WCS cannot project (off the sky), pixels with raw G at or above
-    ``saturation`` (clipped/non-linear), and pixels farther than ``field_radius``
+    ``saturation`` when one is given (clipped/non-linear -- ``None``, the
+    default, keeps them: see :data:`ALCOR_SB_SATURATION` for why blanking them
+    misleads), and pixels farther than ``field_radius``
     from the optical axis (outside the illuminated image circle -- see
     :data:`ALCOR_FIELD_RADIUS`; pass None to keep them) are blanked to NaN in
     ``mu``. Geometric masking (horizon mask / altitude floor) is left to the
@@ -3636,7 +3647,9 @@ def _alcor_sky_brightness_map(cube, wcs, time, exposure,
         surf = g20 / omega
         mu = np.where(surf > 0, -2.5 * np.log10(surf) + zp_g, np.nan)
 
-    blank = ~np.isfinite(mu) | ~np.isfinite(alt) | (g_raw >= saturation)
+    blank = ~np.isfinite(mu) | ~np.isfinite(alt)
+    if saturation is not None:
+        blank |= g_raw >= saturation
     if field_radius is not None:
         # The optical axis is CRPIX (1-based), which is where build_alcor_wcs
         # puts (xcen, ycen) -- so the WCS stays the single source of geometry.
@@ -3718,7 +3731,7 @@ def _alcor_cone_indices(wcs, shape, targets=None,
 
 def plot_alcor_sky_brightness(filename, outimage=None, outfig=None,
                               radius=ALCOR_RADIUS, fov_altitude=-2.0,
-                              horizon_mask=False, saturation=ALCOR_SB_SATURATION,
+                              horizon_mask=False, saturation=None,
                               vmin=None, vmax=None, cmap="cividis_r", figsize=12):
     """
     Render an alcor frame as a V-band sky-surface-brightness map.
@@ -3740,7 +3753,8 @@ def plot_alcor_sky_brightness(filename, outimage=None, outfig=None,
     structure. The G band is essentially color-flat (G~=V), so no color term is
     used; the absolute scale inherits the zeropoint's ~0.03 mag epoch stability.
 
-    Masking: pixels with raw G at or above ``saturation`` are clipped/non-linear
+    Masking: with a ``saturation`` given, pixels with raw G at or above it are
+    clipped/non-linear
     and are blanked, as are non-sky pixels -- by default everything below
     ``fov_altitude`` degrees, or, when ``horizon_mask`` is True, the
     obstruction/terrain mask from :func:`load_alcor_horizon_mask` (which already
@@ -3765,7 +3779,7 @@ def plot_alcor_sky_brightness(filename, outimage=None, outfig=None,
         when ``horizon_mask`` is True.
     horizon_mask : bool (default False)
         Use the full horizon/obstruction mask instead of the altitude cutoff.
-    saturation : int (default ALCOR_SB_SATURATION)
+    saturation : int or None (default None)
         Raw-ADU level at/above which G pixels are masked as non-linear.
     vmin, vmax : float, optional
         Colorbar limits in mag/arcsec^2 (default: robust autoscale of the sky).
@@ -3869,13 +3883,16 @@ def _alcor_sb_fits_header(wcs, time, exposure, saturation, horizon_mask):
     header["ZP_EPOCH"] = (zp["epoch"], "ALCOR_ZEROPOINTS epoch used")
     header["EXPOSURE"] = (exposure, "frame exposure (s)")
     header["CALIBEXP"] = (ALCOR_CALIB_EXPTIME, "reference exposure for counts (s)")
-    header["SATLEVEL"] = (saturation, "raw G blanked at/above this ADU")
+    header["SATLEVEL"] = (
+        "none" if saturation is None else saturation,
+        "raw G blanked at/above this ADU" if saturation is not None
+        else "saturated pixels kept, not blanked")
     header["HORIZMSK"] = (bool(horizon_mask), "horizon/obstruction mask applied")
     return header
 
 
 def alcor_sky_brightness_fits(filename, output_file=None, horizon_mask=False,
-                              saturation=ALCOR_SB_SATURATION, overwrite=False,
+                              saturation=None, overwrite=False,
                               **kwargs):
     """
     Calibrate an alcor OMEA 8C frame to a V mag/arcsec^2 surface-brightness map
@@ -3889,7 +3906,8 @@ def alcor_sky_brightness_fits(filename, output_file=None, horizon_mask=False,
     so the attached WCS resolves directly (matching :func:`alcor_proc_fits`).
     Bad pixels are repaired by default (``badpix="repair"``).
 
-    Off-frame pixels and pixels with raw G at or above ``saturation`` are blanked
+    Off-frame pixels, and with a ``saturation`` given the pixels with raw G at or
+    above it, are blanked
     to NaN. With ``horizon_mask=True`` the not-sky region from
     :func:`load_alcor_horizon_mask` is additionally blanked; otherwise no
     altitude floor is applied (every on-sky pixel keeps its calibrated value).
@@ -3903,7 +3921,7 @@ def alcor_sky_brightness_fits(filename, output_file=None, horizon_mask=False,
         `.fits` extension with `_sb.fits`.
     horizon_mask : bool (default=False)
         Additionally blank the full horizon/obstruction mask.
-    saturation : int (default ALCOR_SB_SATURATION)
+    saturation : int or None (default None)
         Raw-ADU level at/above which G pixels are blanked as non-linear.
     overwrite : bool (default=False)
         Passed through to `fits.PrimaryHDU.writeto`.
@@ -4182,7 +4200,7 @@ def alcor_process_night(night_dir, out_dir=None, pattern="*.fits.bz2",
                         sun_alt_max=-12.0, targets=None,
                         sb_aperture_radius=ALCOR_SB_APERTURE_RADIUS,
                         best_min_altitude=ALCOR_SB_BEST_MIN_ALTITUDE,
-                        horizon_mask=True, sb_saturation=ALCOR_SB_SATURATION,
+                        horizon_mask=True, sb_saturation=None,
                         write_sb_fits=False, median_stack=False,
                         day_keogram=False, reprocess=False,
                         max_frames=None, scratch_dir=None, masks_dir=None,
@@ -4833,8 +4851,8 @@ def plot_alcor_sky_brightness_cli():
                         help="Mask pixels below this altitude (deg). Ignored with --horizon-mask.")
     parser.add_argument("--horizon-mask", action="store_true",
                         help="Mask non-sky with the full horizon/obstruction mask instead of the altitude cutoff.")
-    parser.add_argument("--saturation", type=int, default=ALCOR_SB_SATURATION,
-                        help="Mask raw G pixels at or above this ADU level (clipped/non-linear).")
+    parser.add_argument("--saturation", type=int, default=None,
+                        help="Blank raw G pixels at or above this ADU level (clipped/non-linear). OFF by default: a blanked pixel renders as background, so the brightest sources would appear as dark holes.")
     parser.add_argument("--vmin", type=float, default=None, help="Colorbar lower limit (mag/arcsec^2).")
     parser.add_argument("--vmax", type=float, default=None, help="Colorbar upper limit (mag/arcsec^2).")
     parser.add_argument("--cmap", default="cividis_r", help="Matplotlib colormap.")
@@ -4881,8 +4899,8 @@ def alcor_sky_brightness_cli():
                         help="Output FITS path (default: <input>_sb.fits).")
     parser.add_argument("--horizon-mask", action="store_true",
                         help="Also blank the full horizon/obstruction mask (default blanks only off-frame + saturated pixels).")
-    parser.add_argument("--saturation", type=int, default=ALCOR_SB_SATURATION,
-                        help="Blank raw G pixels at or above this ADU level (clipped/non-linear).")
+    parser.add_argument("--saturation", type=int, default=None,
+                        help="Blank raw G pixels at or above this ADU level (clipped/non-linear). OFF by default: a blanked pixel renders as background, so the brightest sources would appear as dark holes.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite output file if it exists.")
     args = parser.parse_args()
 
@@ -4955,8 +4973,8 @@ def alcor_process_night_cli():
                         help="Altitude floor for the allsky_mv_best darkest-cone search (deg).")
     parser.add_argument("--no-horizon-mask", action="store_true",
                         help="Do not blank not-sky pixels in the maps, cones, and keogram.")
-    parser.add_argument("--sb-saturation", type=int, default=ALCOR_SB_SATURATION,
-                        help="Blank raw G pixels at or above this ADU level (clipped/non-linear).")
+    parser.add_argument("--sb-saturation", type=int, default=None,
+                        help="Blank raw G pixels at or above this ADU level (clipped/non-linear). OFF by default: a blanked pixel renders as background, so the brightest sources would appear as dark holes.")
     parser.add_argument("--write-sb-fits", action="store_true",
                         help="Also keep each frame's full surface-brightness map as <frame>_sb.fits.")
     parser.add_argument("--median-stack", action="store_true",

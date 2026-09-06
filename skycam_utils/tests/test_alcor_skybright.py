@@ -235,3 +235,54 @@ def test_field_radius_sits_inside_the_nominal_horizon_radius():
     _, alt = wcs.pixel_to_world_values(cal["xcen"],
                                        cal["ycen"] - ALCOR_FIELD_RADIUS)
     assert -4.0 < float(alt) < -1.0
+
+
+def test_sb_map_keeps_saturated_pixels_by_default():
+    """A blanked pixel renders as background, so the brightest sources would
+    appear as dark holes. Keeping the (slightly too faint) value is the lesser
+    error -- see ALCOR_SB_SATURATION."""
+    from skycam_utils.alcor import (ALCOR_SB_SATURATION, _alcor_sky_brightness_map,
+                                    alcor_calibration, build_alcor_wcs)
+
+    cal = alcor_calibration(Time("2026-06-09"))
+    wcs = build_alcor_wcs(xcen=cal["xcen"], ycen=cal["ycen"],
+                          rotation=cal["rotation"],
+                          radial_coeffs=cal["radial_coeffs"],
+                          horizon_radius=cal["horizon_radius"],
+                          tangential_coeffs=cal["tangential_coeffs"],
+                          axis_tilt=cal["axis_tilt"])
+    ny, nx = 1411, 1422
+    cube = np.full((3, ny, nx), 3000.0)
+    for ys in (slice(0, 10), slice(ny - 10, ny)):
+        for xs in (slice(0, 10), slice(nx - 10, nx)):
+            cube[:, ys, xs] = 1900.0
+    # a saturated core near the optical axis
+    yc, xc = int(round(cal["ycen"])), int(round(cal["xcen"]))
+    cube[1, yc, xc] = ALCOR_SB_SATURATION + 5000
+
+    kept, _ = _alcor_sky_brightness_map(cube, wcs, Time("2026-06-09T08:00:00"), 20.0)
+    masked, _ = _alcor_sky_brightness_map(cube, wcs, Time("2026-06-09T08:00:00"),
+                                          20.0, saturation=ALCOR_SB_SATURATION)
+
+    # default keeps it, and it reads BRIGHTER (lower mag) than the surround
+    assert np.isfinite(kept[yc, xc])
+    assert kept[yc, xc] < kept[yc, xc + 20]
+    # opting in still blanks it
+    assert np.isnan(masked[yc, xc])
+    assert np.isfinite(masked[yc, xc + 20])
+
+
+def test_sb_fits_header_records_that_nothing_was_masked():
+    from skycam_utils.alcor import _alcor_sb_fits_header, alcor_calibration, build_alcor_wcs
+
+    cal = alcor_calibration(Time("2026-06-09"))
+    wcs = build_alcor_wcs(xcen=cal["xcen"], ycen=cal["ycen"],
+                          rotation=cal["rotation"],
+                          radial_coeffs=cal["radial_coeffs"],
+                          horizon_radius=cal["horizon_radius"],
+                          tangential_coeffs=cal["tangential_coeffs"],
+                          axis_tilt=cal["axis_tilt"])
+    off = _alcor_sb_fits_header(wcs, Time("2026-06-09T08:00:00"), 20.0, None, False)
+    on = _alcor_sb_fits_header(wcs, Time("2026-06-09T08:00:00"), 20.0, 25000, False)
+    assert off["SATLEVEL"] == "none"
+    assert on["SATLEVEL"] == 25000

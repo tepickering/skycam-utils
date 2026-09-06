@@ -264,7 +264,7 @@ def test_alcor_star_photometry_retains_nonpositive_channel_flux(tmp_path, monkey
                         lambda filename: Time("2024-09-05T07:00:00"))
     monkeypatch.setattr(alcor, "load_alcor_fits",
                         lambda *args, **kwargs: (cube, FakeWCS(), None))
-    monkeypatch.setattr(alcor, "alcor_named_reference_altaz",
+    monkeypatch.setattr(alcor, "alcor_photometry_reference_altaz",
                         lambda *args, **kwargs: cat)
 
     phot, output_file = alcor_star_photometry(
@@ -332,7 +332,7 @@ def test_alcor_star_photometry_flags_saturation(tmp_path, monkeypatch):
                         lambda filename: Time("2024-09-05T07:00:00"))
     monkeypatch.setattr(alcor, "load_alcor_fits",
                         lambda *args, **kwargs: (cube, FakeWCS(), None))
-    monkeypatch.setattr(alcor, "alcor_named_reference_altaz",
+    monkeypatch.setattr(alcor, "alcor_photometry_reference_altaz",
                         lambda *args, **kwargs: cat)
 
     phot, _ = alcor_star_photometry(
@@ -376,7 +376,7 @@ def _patch_single_star(monkeypatch, cube, px, py):
                         lambda filename: Time("2024-09-05T07:00:00"))
     monkeypatch.setattr(alcor, "load_alcor_fits",
                         lambda *a, **k: (cube, FakeWCS(), None))
-    monkeypatch.setattr(alcor, "alcor_named_reference_altaz",
+    monkeypatch.setattr(alcor, "alcor_photometry_reference_altaz",
                         lambda *a, **k: cat)
 
 
@@ -651,7 +651,8 @@ def test_alcor_calibrate_photometry_nans_bright_and_unknown(monkeypatch):
                         lambda: {"known": {"BV": 0.5, "V": 3.0, "R": 2.7, "B": 3.5}})
     df = pd.DataFrame(
         {"altitude": [70.0, 70.0, 70.0],
-         "mag_g": [ALCOR_BRIGHT_CUT - 1.0, -9.0, -9.0]},
+         "mag_g": [ALCOR_BRIGHT_CUT - 1.0, -9.0, -9.0],
+         "mag_r": [ALCOR_BRIGHT_CUT - 1.0, -9.0, -9.0]},
         index=pd.Index(["known", "known", "unknown"], name="name"))
 
     out = alcor_calibrate_photometry(df, time=Time("2024-09-06T00:00:00"))
@@ -660,8 +661,13 @@ def test_alcor_calibrate_photometry_nans_bright_and_unknown(monkeypatch):
     # row 1: known star, linear regime -> finite calibrated mag and offset
     assert np.isfinite(out["cal_g"].iloc[1])
     assert np.isfinite(out["ext_g"].iloc[1])
-    # row 2: star absent from the catalog (no color) -> NaN
-    assert np.isnan(out["cal_g"].iloc[2])
+    # row 2: star absent from the catalog. G is colour flat (coefficient -0.038),
+    # so an unknown B-V costs under 0.06 mag and the magnitude is still worth
+    # having; R is not, and stays NaN. ext_* needs a catalog magnitude, so it is
+    # NaN either way.
+    assert np.isfinite(out["cal_g"].iloc[2])
+    assert np.isnan(out["cal_r"].iloc[2])
+    assert np.isnan(out["ext_g"].iloc[2])
 
 
 def test_alcor_star_photometry_includes_calibrated_columns(tmp_path, monkeypatch):
@@ -733,11 +739,11 @@ def test_alcor_star_photometry_default_vmag_limit_is_5p5(monkeypatch, tmp_path):
                         lambda *args, **kwargs: (
                             np.zeros((3, 20, 20), dtype=float), FakeWCS(), None))
 
-    def fake_catalog(time, vmag_limit, min_alt, refraction):
+    def fake_catalog(time, vmag_limit, min_alt, refraction, **kwargs):
         seen["vmag_limit"] = vmag_limit
         return Table({"NAME": ["default"], "HD": [1], "Alt": [80.0], "Az": [10.0]})
 
-    monkeypatch.setattr(alcor, "alcor_named_reference_altaz", fake_catalog)
+    monkeypatch.setattr(alcor, "alcor_photometry_reference_altaz", fake_catalog)
 
     def fake_photometry(image, xcen, ycen, aperture_radius, annulus_width):
         seen["aperture_radius"] = aperture_radius

@@ -23,7 +23,7 @@ from matplotlib.patches import Circle
 import matplotlib.dates as mdates
 from astropy.io import fits
 from astropy.stats import sigma_clipped_stats
-from astropy.table import Table, hstack
+from astropy.table import Table, hstack, vstack
 from astropy.time import Time
 from astropy.wcs import WCS, Sip
 from photutils.detection import DAOStarFinder
@@ -83,6 +83,14 @@ ALCOR_BADPIX_RIM_DILATION = 4   # pixels
 # Numerically equal to ALCOR_RADIUS, but that one is a display-crop half-width;
 # this is a property of the optics, so they are kept separate.
 ALCOR_FIELD_RADIUS = 680   # pixels
+
+# A band whose colour coefficient is within this of zero is treated as colour
+# flat, so a star with no catalogued B-V still gets a calibrated magnitude
+# instead of a nan. G's coefficient is -0.038, so even a very red star (B-V=1.5)
+# costs under 0.06 mag -- below the per-frame photometric scatter. R (-0.343)
+# and B (+0.47) are nowhere near flat and correctly stay nan without a colour.
+# This matters for the variable catalog, where 42 of 642 stars have no B-V.
+ALCOR_COLOR_FLAT_TOL = 0.05   # mag per mag of B-V
 
 
 # ...and a disc this big around the north celestial pole is excluded too. The
@@ -1858,6 +1866,90 @@ def lookup_sloan_photometry(star_name, case_sensitive=False):
     return {col: _catalog_value_to_python(row[col]) for col in matches.colnames}
 
 
+def alcor_variable_reference_altaz(time, vmag_limit=5.5, min_alt=20.0,
+                                   refraction=True, location=MMT_LOCATION):
+    """
+    Load ``bright_variable_vsx.fits`` and compute Alt/Az at ``time``.
+
+    The variable-star sibling of :func:`alcor_named_reference_altaz`. The
+    calibration catalog excludes variables by construction -- correctly, since
+    they would corrupt the zeropoints -- which left the camera never measuring
+    any of them; Polaris was not merely unmeasured but was being flagged as a
+    cluster of hot pixels. This catalog is the other half: AAVSO VSX entries
+    brighter than V=6.0 at maximum with amplitude >= 0.05 mag, excluding
+    eruptive/cataclysmic types (see ``claude_docs/scripts/build_variable_catalog.py``).
+
+    ``vmag_limit`` filters on ``Vmax``, the brightness at MAXIMUM light -- what
+    decides whether the star is ever measurable. A large-amplitude Mira spends
+    most of its cycle far below the limit, and those non-detections are data.
+    """
+    catpath = files(__package__) / "data" / "bright_variable_vsx.fits"
+    cat = Table.read(str(catpath))
+    cat = cat[cat["Vmag"] <= vmag_limit]
+
+    coords = SkyCoord(cat["_RAJ2000"], cat["_DEJ2000"], unit="deg", frame="icrs")
+    if refraction:
+        frame = AltAz(obstime=time, location=location, pressure=ALCOR_PRESSURE,
+                      temperature=ALCOR_TEMPERATURE, relative_humidity=ALCOR_HUMIDITY,
+                      obswl=ALCOR_OBSWL)
+    else:
+        frame = AltAz(obstime=time, location=location)
+    altaz = coords.transform_to(frame)
+    cat["Alt"] = altaz.alt.deg
+    cat["Az"] = altaz.az.deg
+    cat = cat[cat["Alt"] >= min_alt]
+    return cat
+
+
+def alcor_photometry_reference_altaz(time, vmag_limit=5.5, min_alt=20.0,
+                                     refraction=True, variables=True,
+                                     location=MMT_LOCATION,
+                                     match_radius=20.0):
+    """
+    The combined star list a photometry pass measures, with a ``Variable`` flag.
+
+    Concatenates :func:`alcor_named_reference_altaz` with
+    :func:`alcor_variable_reference_altaz`, dropping variables that are already
+    in the calibration catalog (matched within ``match_radius`` arcsec) so no
+    star is measured twice. A star present in both keeps its calibration-catalog
+    row -- it has real catalog magnitudes, so its ``ext_*`` stays meaningful --
+    and is merely flagged. Returns a table with at least ``NAME``, ``HD``,
+    ``Alt``, ``Az`` and ``Variable``.
+    """
+    named = alcor_named_reference_altaz(
+        time, vmag_limit=vmag_limit, min_alt=min_alt, refraction=refraction,
+        location=location)
+    out = named[[c for c in ("NAME", "HD", "Alt", "Az")
+                 if c in named.colnames]].copy()
+    out["Variable"] = np.zeros(len(out), dtype=bool)
+    if not variables:
+        return out
+
+    var = alcor_variable_reference_altaz(
+        time, vmag_limit=vmag_limit, min_alt=min_alt, refraction=refraction,
+        location=location)
+    can_match = all(c in named.colnames for c in ("_RAJ2000", "_DEJ2000"))
+    if len(var) and len(named) and can_match:
+        vc = SkyCoord(var["_RAJ2000"], var["_DEJ2000"], unit="deg")
+        nc = SkyCoord(named["_RAJ2000"], named["_DEJ2000"], unit="deg")
+        _, sep, _ = vc.match_to_catalog_sky(nc)
+        already = sep.arcsec < match_radius
+        # flag the calibration rows that are known variables
+        _, sep_n, _ = nc.match_to_catalog_sky(vc)
+        out["Variable"] = sep_n.arcsec < match_radius
+        var = var[~already]
+    if len(var) == 0:
+        return out
+
+    add = Table()
+    add["NAME"] = [str(n).strip() for n in var["NAME"]]
+    add["HD"] = np.array(var["HD"], dtype=int)
+    add["Alt"] = np.array(var["Alt"], dtype=float)
+    add["Az"] = np.array(var["Az"], dtype=float)
+    add["Variable"] = np.ones(len(add), dtype=bool)
+    return vstack([out, add], metadata_conflicts="silent")
+
+
 def _alcor_star_labels(cat):
     """
     Return stable, unique row labels for the named bright-star catalog.
@@ -2247,6 +2339,20 @@ def _catalog_calibration_map():
         bv = _value("B-V")
         vr = _value("V-R")
         out[label] = {"BV": bv, "V": v, "R": v - vr, "B": v + bv}
+
+    # Variables contribute a colour but NO catalog magnitude. That is the whole
+    # point: cal_* is the light curve, while ext_* (= cal - catalog) would
+    # conflate cloud extinction with the star's own variation, so it must stay
+    # nan -- which falls out of subtracting nan. Calibration-catalog entries win
+    # on a label collision, since those stars do have a defensible catalog mag.
+    varpath = files(__package__) / "data" / "bright_variable_vsx.fits"
+    var = Table.read(str(varpath))
+    for label, row in zip(_alcor_star_labels(var), var):
+        if label in out:
+            continue
+        bv = _catalog_value_to_python(row["B-V"])
+        out[label] = {"BV": np.nan if bv is None else float(bv),
+                      "V": np.nan, "R": np.nan, "B": np.nan}
     return out
 
 
@@ -2309,7 +2415,12 @@ def alcor_calibrate_photometry(df, time=None):
     else the most recent epoch. Star names come from a ``name`` column when
     present, else the index. ``B-V`` and the catalog Johnson R/V/B are looked up
     by name (channel->catalog G->V, R->R, B->B); stars absent from the catalog or
-    lacking the needed color get ``nan``. Requires an ``altitude`` column.
+    lacking the needed color get ``nan`` -- except that a colour-flat band (see
+    :data:`ALCOR_COLOR_FLAT_TOL`) falls back to ``B-V = 0`` rather than discard
+    the measurement. Variable stars carry a colour but no catalog magnitude, so
+    they get a real ``cal_*`` -- the light curve -- and ``ext_*`` of ``nan``,
+    since differencing against a catalog magnitude would conflate cloud
+    extinction with the star's own variation. Requires an ``altitude`` column.
     Returns a new DataFrame.
     """
     if "altitude" not in df.columns:
@@ -2330,13 +2441,17 @@ def alcor_calibrate_photometry(df, time=None):
     airmass = _airmass(df["altitude"].to_numpy(dtype=float))
     zp, color = _zeropoint_row_params(df, time)
     for band in ALCOR_ZEROPOINT_BANDS:
+        # For a colour-flat band a missing B-V costs less than the photometric
+        # scatter, so assume zero rather than throw the measurement away.
+        flat = bool(np.all(np.abs(color[band]) <= ALCOR_COLOR_FLAT_TOL))
+        bv_band = np.where(np.isfinite(bv), bv, 0.0) if flat else bv
         for col in (f"mag_{band}", f"mag_{band}_ap", f"mag_{band}_gauss"):
             if col not in df.columns:
                 continue
             suffix = col[len(f"mag_{band}"):]
             instr = df[col].to_numpy(dtype=float)
             cal = (instr - ALCOR_AIRMASS_TERM * airmass
-                   + zp[band] + color[band] * bv)
+                   + zp[band] + color[band] * bv_band)
             cal = np.where(np.isfinite(instr) & (instr > ALCOR_BRIGHT_CUT),
                            cal, np.nan)
             df[f"cal_{band}{suffix}"] = cal
@@ -2347,6 +2462,7 @@ def alcor_calibrate_photometry(df, time=None):
 def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
                           annulus_width=1.0, min_altitude=20.0,
                           vmag_limit=5.5, refraction=True, masks_dir=None,
+                          variables=True,
                           check_plot=False, check_radius=680,
                           sun_alt_max=-12.0, saturation=ALCOR_SATURATION,
                           gaussian=False,
@@ -2391,6 +2507,12 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
     (a structural failure, distinct from a measured zero). Rows sort by
     ``flux_g_ap``. ``both`` takes precedence over ``gaussian``.
 
+    With ``variables`` (the default) the bright-variable catalog is measured
+    alongside the calibration stars and every row carries a ``variable`` flag.
+    Those stars have no single catalog magnitude, so their ``ext_*`` is NaN while
+    ``cal_*`` -- the light curve -- is real. See
+    :func:`alcor_photometry_reference_altaz`.
+
     Every measured magnitude is calibrated to the catalog system via
     :func:`alcor_calibrate_photometry` (using the frame time to resolve the
     zeropoint epoch), adding per-channel ``cal_*`` (calibrated catalog-system
@@ -2410,7 +2532,7 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
     -------
     phot : `pandas.DataFrame`
         Rows indexed by star name. Columns are ``altitude``, ``azimuth``,
-        ``xcen``, ``ycen`` and per-channel ``flux_*``, ``mag_*``, ``cal_*``,
+        ``variable``, ``xcen``, ``ycen`` and per-channel ``flux_*``, ``mag_*``, ``cal_*``,
         ``ext_*``, ``background_*``, ``sat_*`` for ``r``, ``g``, ``b`` (suffixed
         ``_ap``/``_gauss`` in ``both`` mode). One row per catalog star above
         ``min_altitude``; non-detections carry ``flux = 0`` / ``mag = NaN``. Rows
@@ -2425,7 +2547,7 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
         raise ValueError("annulus_width must be positive")
     channels = ("r", "g", "b")
     if both:
-        columns = ["altitude", "azimuth", "xcen", "ycen"]
+        columns = ["altitude", "azimuth", "variable", "xcen", "ycen"]
         for channel in channels:
             columns += [f"flux_{channel}_ap", f"mag_{channel}_ap",
                         f"cal_{channel}_ap", f"ext_{channel}_ap",
@@ -2437,7 +2559,7 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
                         f"background_{channel}_gauss", f"sat_{channel}_gauss"]
         sort_key = "flux_g_ap"
     else:
-        columns = ["altitude", "azimuth", "xcen", "ycen", "fwhm"]
+        columns = ["altitude", "azimuth", "variable", "xcen", "ycen", "fwhm"]
         for channel in channels:
             columns += [f"flux_{channel}", f"mag_{channel}",
                         f"cal_{channel}", f"ext_{channel}",
@@ -2467,9 +2589,9 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
     bias = _corner_bias(cube, size=10)
     data = cube.astype(float, copy=False) - bias[:, None, None]
 
-    cat = alcor_named_reference_altaz(
+    cat = alcor_photometry_reference_altaz(
         time, vmag_limit=vmag_limit, min_alt=min_altitude,
-        refraction=refraction,
+        refraction=refraction, variables=variables,
     )
     # all_world2pix with quiet=True returns the best (possibly unconverged)
     # estimate instead of warning: the iterative SIP/radial inverse fails its
@@ -2487,7 +2609,9 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
     lum_frame = data.sum(axis=0) if (gaussian or both) else None
     for i, (x, y) in enumerate(zip(xcen, ycen)):
         base = {"altitude": float(cat["Alt"][i]),
-                "azimuth": float(cat["Az"][i])}
+                "azimuth": float(cat["Az"][i]),
+                "variable": bool(cat["Variable"][i])
+                            if "Variable" in cat.colnames else False}
         if both:
             ap = _aperture_measure(data, cube, x, y, aperture_radius,
                                    annulus_width, saturation, channels)
@@ -4849,6 +4973,10 @@ def alcor_process_night_cli():
                         help="Minimum catalog-star altitude to measure (deg).")
     parser.add_argument("--vmag-limit", type=float, default=5.5,
                         help="Faintest catalog star Vmag to measure.")
+    parser.add_argument("--no-variables", dest="variables", action="store_false",
+                        help="Do not measure the bright-variable catalog "
+                             "(bright_variable_vsx.fits) alongside the "
+                             "calibration stars.")
     parser.add_argument("--gaussian", action="store_true",
                         help="Use constrained-Gaussian PSF photometry instead of apertures.")
     parser.add_argument("--both", action="store_true",
@@ -4893,6 +5021,7 @@ def alcor_process_night_cli():
         annulus_width=args.annulus_width,
         min_altitude=args.min_altitude,
         vmag_limit=args.vmag_limit,
+        variables=args.variables,
         gaussian=args.gaussian,
         both=args.both,
     )
@@ -4935,6 +5064,10 @@ def alcor_star_photometry_cli():
                         help="Reject images with Sun altitude greater than this (deg).")
     parser.add_argument("--saturation", type=float, default=ALCOR_SATURATION,
                         help="Raw-ADU level at/above which an aperture pixel flags the channel saturated.")
+    parser.add_argument("--no-variables", dest="variables", action="store_false",
+                        help="Do not measure the bright-variable catalog "
+                             "(bright_variable_vsx.fits) alongside the "
+                             "calibration stars.")
     parser.add_argument("--gaussian", action="store_true",
                         help="Use constrained-Gaussian PSF photometry instead of aperture sums.")
     parser.add_argument("--both", action="store_true",
@@ -4956,6 +5089,7 @@ def alcor_star_photometry_cli():
         annulus_width=args.annulus_width,
         min_altitude=args.min_altitude,
         vmag_limit=args.vmag_limit,
+        variables=args.variables,
         refraction=not args.no_refraction,
         masks_dir=args.masks_dir,
         check_plot=args.check_plot,

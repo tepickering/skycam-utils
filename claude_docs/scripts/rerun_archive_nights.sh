@@ -1,33 +1,37 @@
 #!/bin/bash
 #
-# Overnight re-run of the five archived alcor nights.
+# Re-process the five archived alcor nights. This is the single canonical
+# re-run script; it supersedes the earlier rerun_after_badpix.sh (which chained
+# off a bad-pixel mask rebuild that has since been done).
 #
-# Why a re-run is needed:
-#   1. sky_brightness.csv gained the allsky_mv_best / best_az / best_alt columns
-#      (darkest 5 deg cone above alt 30), so the existing CSVs are stale.
-#   2. 2026-01-11, 2026-03-11 and 2026-06-09 have no bad-pixel mask of their own
-#      and fall back to the 2026-05-18 mask, which does not flag a pixel that was
-#      hot months earlier. It shows up as a bright horizontal line at alt ~31.7 N
-#      in those nights' calibrated keograms (0.19 mag above the local sky), and
-#      as a stronger one near the S horizon on 2026-06-09 (0.66 mag). Building
-#      each night its own mask removes it. All three have enough Sun<-18/Moon<-6
-#      dark frames (877 / 850 / 548, need >=500) -- verified.
+# Why this run:
+#   The per-frame *_phot.csv files predate the bright-variable catalog
+#   (bright_variable_vsx.fits, 637 stars, measured by default since 0203e94),
+#   so they carry no `variable` column and no variable rows.
 #
-# Masks MUST be built before the re-processing pass, since load_alcor_fits
-# resolves the nearest-in-date mask at load time.
+# Why --reprocess is REQUIRED, not optional:
+#   alcor_process_night's resume path reuses any existing non-empty
+#   <frame>_phot.csv without re-measuring. Those files are all present, so
+#   without --reprocess this run would change nothing in the photometry, and
+#   collect_alcor_photometry would pool the old schema. --reprocess forces
+#   re-measurement, which is the whole point.
 #
-# Runtime: ~30 min for the three masks, then ~2 h for the five nights (the
-# per-frame *_phot.csv files all exist, so photometry is skipped throughout).
-# Uses all cores. ~11 GB of scratch at a time, deleted after each mask.
+# Why NOT --median-stack:
+#   <night>_median.fits already exists for every night and depends only on the
+#   raw frames, which have not changed. Rebuilding it would cost ~19 GB of
+#   scratch and a full memmap pass per night for a byte-identical result.
 #
-# New masks land in the packaged skycam_utils/data/badpix/ and will show up as
-# untracked files to review and commit.
+# --day-keogram is kept: the night columns come free from the main pass, and the
+# sky-brightness keograms are regenerated natively with the ALCOR_FIELD_RADIUS
+# cut (9cf7069), superseding the in-place fixup that
+# claude_docs/scripts/blank_keogram_field.py applied to the previous run.
+#
+# Runtime: ~25 min per night, so ~2 h total. Needs the Samsung_4TB drive.
 #
 # Usage:  claude_docs/scripts/rerun_archive_nights.sh
 #         tail -f /private/tmp/alcor_rerun/rerun.log
 
 set -u
-
 export PATH="/Users/tim/conda/envs/skycam/bin:$PATH"
 
 SCRATCH="${SCRATCH:-/private/tmp/alcor_rerun}"
@@ -45,13 +49,6 @@ NIGHTS=(
     "$EXT_ROOT/2026-06-09"
 )
 
-# nights lacking a bad-pixel mask of their own
-NEED_MASK=(
-    "$EXT_ROOT/2026-01-11"
-    "$EXT_ROOT/2026-03-11"
-    "$EXT_ROOT/2026-06-09"
-)
-
 {
     echo "###### started $(date) ######"
 
@@ -60,16 +57,10 @@ NEED_MASK=(
         exit 1
     fi
 
-    echo "###### phase 1: bad-pixel masks ######"
-    for d in "${NEED_MASK[@]}"; do
-        echo "--- create_badpix_mask $(basename "$d")  $(date +%H:%M:%S) ---"
-        create_badpix_mask "$d" --scratch-dir "$SCRATCH"
-    done
-
-    echo "###### phase 2: re-process nights ######"
     for d in "${NIGHTS[@]}"; do
         echo "--- $(basename "$d")  $(date +%H:%M:%S) ---"
-        alcor_process_night "$d" --day-keogram 2>&1 | grep -v '^\['
+        alcor_process_night "$d" --day-keogram --reprocess \
+            --scratch-dir "$SCRATCH" 2>&1 | grep -v '^\['
         echo "--- done $(basename "$d")  $(date +%H:%M:%S) ---"
     done
 

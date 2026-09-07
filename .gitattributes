@@ -1,0 +1,10 @@
+# FITS is a binary format with an ASCII header, which defeats git's
+# text/binary heuristic: it looks for a NUL byte in the first 8 KB, and a
+# file with a long enough header has none. So detection came down to header
+# length -- wcs_*.fits (header only, no data) read as text outright, and
+# bright_star_sloan.fits diffed as 3490 changed lines when two rows were
+# removed from it, while the identically-formatted bright_variable_vsx.fits
+# was correctly binary because its header is short. Mark them all.
+*.fits binary
+*.fits.gz binary
+*.fits.bz2 binary

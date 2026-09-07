@@ -455,7 +455,7 @@ def test_fit_params_stays_physical_with_mismatches():
     assert abs(fit["ycen"] + 4.0) < 3.0
 
 
-def test_fit_alcor_wcs_aggregates_synthetic_frames(monkeypatch, tmp_path):
+def test_fit_alcor_wcs_aggregates_synthetic_frames(monkeypatch, tmp_path, patch_alcor):
     import skycam_utils.alcor as alcor_mod
     from astropy.table import Table
 
@@ -491,13 +491,13 @@ def test_fit_alcor_wcs_aggregates_synthetic_frames(monkeypatch, tmp_path):
     def fake_frame_time(path):
         return Time("2024-09-05T07:00:00", format="isot", scale="utc")
 
-    monkeypatch.setattr(alcor_mod, "select_dark_frames", fake_select_dark_frames)
-    monkeypatch.setattr(alcor_mod, "load_alcor_fits", fake_load_alcor_fits)
-    monkeypatch.setattr(alcor_mod, "alcor_reference_altaz", fake_reference_altaz)
-    monkeypatch.setattr(alcor_mod, "detect_alcor_stars", fake_detect)
-    monkeypatch.setattr(alcor_mod, "_frame_time", fake_frame_time)
-    monkeypatch.setattr(alcor_mod, "alcor_calibration",
-                        lambda time=None: {"epoch": "2024-09-05", "xcen": 0.0,
+    patch_alcor("select_dark_frames", fake_select_dark_frames)
+    patch_alcor("load_alcor_fits", fake_load_alcor_fits)
+    patch_alcor("alcor_reference_altaz", fake_reference_altaz)
+    patch_alcor("detect_alcor_stars", fake_detect)
+    patch_alcor("_frame_time", fake_frame_time)
+    patch_alcor("alcor_calibration",
+                lambda time=None: {"epoch": "2024-09-05", "xcen": 0.0,
                                            "ycen": 0.0, "rotation": 0.0,
                                            "radial_coeffs": (1.0, 0.0, 0.0), "horizon_radius": 747.0})
 
@@ -511,7 +511,7 @@ def test_fit_alcor_wcs_aggregates_synthetic_frames(monkeypatch, tmp_path):
     assert result["epoch"] == "2024-09-05"
 
 
-def test_fit_alcor_wcs_survives_injected_mismatches(monkeypatch, tmp_path):
+def test_fit_alcor_wcs_survives_injected_mismatches(monkeypatch, tmp_path, patch_alcor):
     import skycam_utils.alcor as alcor_mod
     from astropy.table import Table
 
@@ -562,13 +562,13 @@ def test_fit_alcor_wcs_survives_injected_mismatches(monkeypatch, tmp_path):
     def fake_frame_time(path):
         return Time("2024-09-05T07:00:00", format="isot", scale="utc")
 
-    monkeypatch.setattr(alcor_mod, "select_dark_frames", fake_select_dark_frames)
-    monkeypatch.setattr(alcor_mod, "load_alcor_fits", fake_load_alcor_fits)
-    monkeypatch.setattr(alcor_mod, "alcor_reference_altaz", fake_reference_altaz)
-    monkeypatch.setattr(alcor_mod, "detect_alcor_stars", fake_detect)
-    monkeypatch.setattr(alcor_mod, "_frame_time", fake_frame_time)
-    monkeypatch.setattr(alcor_mod, "alcor_calibration",
-                        lambda time=None: {"epoch": "2024-09-05", "xcen": 0.0,
+    patch_alcor("select_dark_frames", fake_select_dark_frames)
+    patch_alcor("load_alcor_fits", fake_load_alcor_fits)
+    patch_alcor("alcor_reference_altaz", fake_reference_altaz)
+    patch_alcor("detect_alcor_stars", fake_detect)
+    patch_alcor("_frame_time", fake_frame_time)
+    patch_alcor("alcor_calibration",
+                lambda time=None: {"epoch": "2024-09-05", "xcen": 0.0,
                                            "ycen": 0.0, "rotation": 0.0,
                                            "radial_coeffs": (1.0, 0.0, 0.0), "horizon_radius": 747.0})
 
@@ -581,7 +581,7 @@ def test_fit_alcor_wcs_survives_injected_mismatches(monkeypatch, tmp_path):
     assert 0.0 < result["matched_fraction"] <= 1.0
 
 
-def test_fit_alcor_wcs_parallel_matches_serial(monkeypatch, tmp_path):
+def test_fit_alcor_wcs_parallel_matches_serial(monkeypatch, tmp_path, patch_alcor):
     """The workers>1 path must recover the same geometry as the serial path.
 
     Real subprocesses can't see monkeypatched module functions, so the
@@ -647,15 +647,15 @@ def test_fit_alcor_wcs_parallel_matches_serial(monkeypatch, tmp_path):
         def submit(self, fn, task):
             return _SyncFuture(fn(task))
 
-    monkeypatch.setattr(alcor_mod, "select_dark_frames", fake_select_dark_frames)
-    monkeypatch.setattr(alcor_mod, "load_alcor_fits", fake_load_alcor_fits)
-    monkeypatch.setattr(alcor_mod, "alcor_reference_altaz", fake_reference_altaz)
-    monkeypatch.setattr(alcor_mod, "detect_alcor_stars", fake_detect)
-    monkeypatch.setattr(alcor_mod, "_frame_time", fake_frame_time)
-    monkeypatch.setattr(alcor_mod, "ProcessPoolExecutor", _SyncExecutor)
-    monkeypatch.setattr(alcor_mod, "as_completed", lambda futures: list(futures))
-    monkeypatch.setattr(alcor_mod, "alcor_calibration",
-                        lambda time=None: {"epoch": "2024-09-05", "xcen": 0.0,
+    patch_alcor("select_dark_frames", fake_select_dark_frames)
+    patch_alcor("load_alcor_fits", fake_load_alcor_fits)
+    patch_alcor("alcor_reference_altaz", fake_reference_altaz)
+    patch_alcor("detect_alcor_stars", fake_detect)
+    patch_alcor("_frame_time", fake_frame_time)
+    patch_alcor("ProcessPoolExecutor", _SyncExecutor)
+    patch_alcor("as_completed", lambda futures: list(futures))
+    patch_alcor("alcor_calibration",
+                lambda time=None: {"epoch": "2024-09-05", "xcen": 0.0,
                                            "ycen": 0.0, "rotation": 0.0,
                                            "radial_coeffs": (1.0, 0.0, 0.0), "horizon_radius": 747.0})
 
@@ -674,7 +674,7 @@ def test_fit_alcor_wcs_rejects_invalid_workers(tmp_path):
         fit_alcor_wcs(tmp_path, pattern="*.fits", workers=0)
 
 
-def test_fit_alcor_wcs_log_reports_dispositions(monkeypatch, tmp_path):
+def test_fit_alcor_wcs_log_reports_dispositions(monkeypatch, tmp_path, patch_alcor):
     """The log callback receives one line per file: Sun-rejected, no-stars, used."""
     import skycam_utils.alcor as alcor_mod
     from astropy.table import Table
@@ -712,13 +712,13 @@ def test_fit_alcor_wcs_log_reports_dispositions(monkeypatch, tmp_path):
         fake_detect.empty = Path(path).name == "f_empty.fits"
         return Time("2024-09-05T07:00:00", format="isot", scale="utc")
 
-    monkeypatch.setattr(alcor_mod, "select_dark_frames", fake_select_dark_frames)
-    monkeypatch.setattr(alcor_mod, "load_alcor_fits", fake_load_alcor_fits)
-    monkeypatch.setattr(alcor_mod, "alcor_reference_altaz", fake_reference_altaz)
-    monkeypatch.setattr(alcor_mod, "detect_alcor_stars", fake_detect)
-    monkeypatch.setattr(alcor_mod, "_frame_time", fake_frame_time)
-    monkeypatch.setattr(alcor_mod, "alcor_calibration",
-                        lambda time=None: {"epoch": "2024-09-05", "xcen": 0.0,
+    patch_alcor("select_dark_frames", fake_select_dark_frames)
+    patch_alcor("load_alcor_fits", fake_load_alcor_fits)
+    patch_alcor("alcor_reference_altaz", fake_reference_altaz)
+    patch_alcor("detect_alcor_stars", fake_detect)
+    patch_alcor("_frame_time", fake_frame_time)
+    patch_alcor("alcor_calibration",
+                lambda time=None: {"epoch": "2024-09-05", "xcen": 0.0,
                                            "ycen": 0.0, "rotation": 0.0,
                                            "radial_coeffs": (1.0, 0.0, 0.0),
                                            "horizon_radius": 662.0})
@@ -757,7 +757,7 @@ def test_load_alcor_fits_world_pixel_round_trip():
     np.testing.assert_allclose(alt2, alt, atol=0.02)
 
 
-def test_alcor_calibration_nearest_in_time(monkeypatch):
+def test_alcor_calibration_nearest_in_time(monkeypatch, patch_alcor):
     import skycam_utils.alcor as alcor_mod
     table = [
         {"epoch": "2024-09-04", "xcen": -4.5, "ycen": 4.4,
@@ -765,7 +765,7 @@ def test_alcor_calibration_nearest_in_time(monkeypatch):
         {"epoch": "2026-05-19", "xcen": -12.0, "ycen": 9.9,
          "rotation": 0.31, "radial_coeffs": (1.0, 0.084, 0.0)},
     ]
-    monkeypatch.setattr(alcor_mod, "ALCOR_CALIBRATIONS", table)
+    patch_alcor("ALCOR_CALIBRATIONS", table)
 
     # well inside the 2024 side
     c = alcor_mod.alcor_calibration(Time("2024-10-01T00:00:00"))
@@ -792,7 +792,7 @@ def test_alcor_calibration_nearest_in_time(monkeypatch):
     assert table[0]["xcen"] == -4.5
 
 
-def test_load_alcor_fits_resolves_and_overrides(monkeypatch):
+def test_load_alcor_fits_resolves_and_overrides(monkeypatch, patch_alcor):
     import skycam_utils.alcor as alcor_mod
     test_fits = Path(__file__).with_name("test.fits.bz2")
 
@@ -803,7 +803,7 @@ def test_load_alcor_fits_resolves_and_overrides(monkeypatch):
         calls["n"] += 1
         return real(time)
 
-    monkeypatch.setattr(alcor_mod, "alcor_calibration", spy)
+    patch_alcor("alcor_calibration", spy)
 
     # wcs=None -> the calibration epoch resolver is consulted to build the WCS
     _, wcs, _ = alcor_mod.load_alcor_fits(test_fits)
@@ -821,7 +821,7 @@ def test_load_alcor_fits_resolves_and_overrides(monkeypatch):
     assert list(wcs.wcs.crpix) == [1.0, 1.0]
 
 
-def test_alcor_frame_calibration_uses_filename_then_header(monkeypatch, tmp_path):
+def test_alcor_frame_calibration_uses_filename_then_header(monkeypatch, tmp_path, patch_alcor):
     import skycam_utils.alcor as alcor_mod
     from astropy.io import fits
 
@@ -831,7 +831,7 @@ def test_alcor_frame_calibration_uses_filename_then_header(monkeypatch, tmp_path
         {"epoch": "2026-05-19", "xcen": -12.0, "ycen": 9.9,
          "rotation": 0.31, "radial_coeffs": (1.0, 0.084, 0.0)},
     ]
-    monkeypatch.setattr(alcor_mod, "ALCOR_CALIBRATIONS", table)
+    patch_alcor("ALCOR_CALIBRATIONS", table)
 
     # filename parses -> no file access needed, resolves by filename time
     assert alcor_mod._alcor_frame_calibration(
@@ -889,7 +889,7 @@ def test_cli_geometry_flags_removed(monkeypatch):
             assert not hasattr(seen["ns"], gone), f"{cli.__name__} still has --{gone}"
 
 
-def test_fit_alcor_wcs_cli_passes_new_flags(monkeypatch, capsys):
+def test_fit_alcor_wcs_cli_passes_new_flags(monkeypatch, capsys, patch_alcor):
     import sys
     import skycam_utils.alcor as alcor_mod
 
@@ -904,7 +904,7 @@ def test_fit_alcor_wcs_cli_passes_new_flags(monkeypatch, capsys):
                 "alt": np.array([]), "az": np.array([]),
                 "x": np.array([]), "y": np.array([])}
 
-    monkeypatch.setattr(alcor_mod, "fit_alcor_wcs", fake_fit)
+    patch_alcor("fit_alcor_wcs", fake_fit)
     monkeypatch.setattr(sys, "argv",
                         ["fit_alcor_wcs", "/tmp/night", "--max-detections", "150",
                          "--pattern-tol", "5", "--min-corroborating", "1",
@@ -924,7 +924,7 @@ def test_fit_alcor_wcs_cli_passes_new_flags(monkeypatch, capsys):
     assert "matched fraction" in out.lower()
 
 
-def test_fit_alcor_wcs_forwards_matcher_knobs(monkeypatch, tmp_path):
+def test_fit_alcor_wcs_forwards_matcher_knobs(monkeypatch, tmp_path, patch_alcor):
     """fit_alcor_wcs must thread the asterism knobs into assign_alcor_matches."""
     import skycam_utils.alcor as alcor_mod
     from astropy.table import Table, hstack
@@ -936,21 +936,21 @@ def test_fit_alcor_wcs_forwards_matcher_knobs(monkeypatch, tmp_path):
     x, y = _predict_pixels(alt, az, xcen=0.0, ycen=0.0, rotation=0.0,
                            radial_coeffs=(1.0, 0.0, 0.0))
 
-    monkeypatch.setattr(alcor_mod, "select_dark_frames", lambda fs, **kw: list(files))
-    monkeypatch.setattr(alcor_mod, "load_alcor_fits",
-                        lambda p, **kw: (np.zeros((3, 2 * ALCOR_RADIUS, 2 * ALCOR_RADIUS)), None, None))
-    monkeypatch.setattr(alcor_mod, "alcor_reference_altaz",
-                        lambda t, **kw: Table({"Alt": alt, "Az": az,
+    patch_alcor("select_dark_frames", lambda fs, **kw: list(files))
+    patch_alcor("load_alcor_fits",
+                lambda p, **kw: (np.zeros((3, 2 * ALCOR_RADIUS, 2 * ALCOR_RADIUS)), None, None))
+    patch_alcor("alcor_reference_altaz",
+                lambda t, **kw: Table({"Alt": alt, "Az": az,
                                                "Vmag": [1.0, 2.0, 3.0, 4.0],
                                                "HD": np.arange(4)}))
-    monkeypatch.setattr(alcor_mod, "detect_alcor_stars",
-                        lambda im, **kw: Table({"xcentroid": np.asarray(x),
+    patch_alcor("detect_alcor_stars",
+                lambda im, **kw: Table({"xcentroid": np.asarray(x),
                                                 "ycentroid": np.asarray(y),
                                                 "flux": [4.0, 3.0, 2.0, 1.0]}))
-    monkeypatch.setattr(alcor_mod, "_frame_time",
-                        lambda p: Time("2024-09-05T07:00:00", format="isot", scale="utc"))
-    monkeypatch.setattr(alcor_mod, "alcor_calibration",
-                        lambda time=None: {"epoch": "2024-09-05", "xcen": 0.0,
+    patch_alcor("_frame_time",
+                lambda p: Time("2024-09-05T07:00:00", format="isot", scale="utc"))
+    patch_alcor("alcor_calibration",
+                lambda time=None: {"epoch": "2024-09-05", "xcen": 0.0,
                                            "ycen": 0.0, "rotation": 0.0,
                                            "radial_coeffs": (1.0, 0.0, 0.0), "horizon_radius": 747.0})
 
@@ -960,7 +960,7 @@ def test_fit_alcor_wcs_forwards_matcher_knobs(monkeypatch, tmp_path):
         seen.update(kw)
         return hstack([Table(cat), Table(det)])
 
-    monkeypatch.setattr(alcor_mod, "assign_alcor_matches", fake_assign)
+    patch_alcor("assign_alcor_matches", fake_assign)
 
     fit_alcor_wcs(tmp_path, pattern="*.fits",
                   n_neighbors=8, min_corroborating=1, pattern_tol=4.5)
@@ -969,12 +969,12 @@ def test_fit_alcor_wcs_forwards_matcher_knobs(monkeypatch, tmp_path):
     assert seen["pattern_tol"] == 4.5
 
 
-def test_alcor_calibration_defaults_tangential_coeffs(monkeypatch):
+def test_alcor_calibration_defaults_tangential_coeffs(monkeypatch, patch_alcor):
     # Epochs without a tangential_coeffs key: the resolver must fill it.
     import skycam_utils.alcor as alcor_mod
     table = [{"epoch": "2024-09-04", "xcen": 0.0, "ycen": 0.0,
               "rotation": 0.0, "radial_coeffs": (1.0, 0.0, 0.0)}]
-    monkeypatch.setattr(alcor_mod, "ALCOR_CALIBRATIONS", table)
+    patch_alcor("ALCOR_CALIBRATIONS", table)
     cal = alcor_mod.alcor_calibration()
     assert cal["tangential_coeffs"] == (0.0, 0.0)
     cal = alcor_mod.alcor_calibration(Time("2024-09-05", scale="utc"))
@@ -1100,7 +1100,7 @@ def test_fit_params_recovers_tangential_coeffs():
     assert abs(fit5["tangential_coeffs"][1] + 0.003) < 5e-4
 
 
-def test_fit_alcor_wcs_recovers_tangential_terms(monkeypatch, tmp_path):
+def test_fit_alcor_wcs_recovers_tangential_terms(monkeypatch, tmp_path, patch_alcor):
     import skycam_utils.alcor as alcor_mod
     from astropy.table import Table
 
@@ -1133,17 +1133,17 @@ def test_fit_alcor_wcs_recovers_tangential_terms(monkeypatch, tmp_path):
         return Table({"xcentroid": x, "ycentroid": y,
                       "flux": np.linspace(1e3, 1e2, 30)})
 
-    monkeypatch.setattr(alcor_mod, "select_dark_frames",
-                        lambda fs, **kw: list(files))
-    monkeypatch.setattr(alcor_mod, "load_alcor_fits", fake_load_alcor_fits)
-    monkeypatch.setattr(alcor_mod, "alcor_reference_altaz", fake_reference_altaz)
-    monkeypatch.setattr(alcor_mod, "detect_alcor_stars", fake_detect)
-    monkeypatch.setattr(alcor_mod, "_frame_time",
-                        lambda path: Time("2024-09-05T07:00:00", format="isot",
+    patch_alcor("select_dark_frames",
+                lambda fs, **kw: list(files))
+    patch_alcor("load_alcor_fits", fake_load_alcor_fits)
+    patch_alcor("alcor_reference_altaz", fake_reference_altaz)
+    patch_alcor("detect_alcor_stars", fake_detect)
+    patch_alcor("_frame_time",
+                lambda path: Time("2024-09-05T07:00:00", format="isot",
                                           scale="utc"))
     # No tangential_coeffs key: the night fit must default it to (0, 0).
-    monkeypatch.setattr(alcor_mod, "alcor_calibration",
-                        lambda time=None: {"epoch": "2024-09-05", "xcen": 0.0,
+    patch_alcor("alcor_calibration",
+                lambda time=None: {"epoch": "2024-09-05", "xcen": 0.0,
                                            "ycen": 0.0, "rotation": 0.0,
                                            "radial_coeffs": (1.0, 0.0, 0.0),
                                            "horizon_radius": 747.0})
@@ -1156,12 +1156,12 @@ def test_fit_alcor_wcs_recovers_tangential_terms(monkeypatch, tmp_path):
     assert result["residual_rms"] < 0.1
 
 
-def test_alcor_calibration_defaults_axis_tilt(monkeypatch):
+def test_alcor_calibration_defaults_axis_tilt(monkeypatch, patch_alcor):
     # Epochs without an axis_tilt key: the resolver must fill it.
     import skycam_utils.alcor as alcor_mod
     table = [{"epoch": "2024-09-04", "xcen": 0.0, "ycen": 0.0,
               "rotation": 0.0, "radial_coeffs": (1.0, 0.0, 0.0)}]
-    monkeypatch.setattr(alcor_mod, "ALCOR_CALIBRATIONS", table)
+    patch_alcor("ALCOR_CALIBRATIONS", table)
     cal = alcor_mod.alcor_calibration()
     assert cal["axis_tilt"] == (0.0, 0.0)
     cal = alcor_mod.alcor_calibration(Time("2024-09-05", scale="utc"))
@@ -1305,7 +1305,7 @@ def test_fit_params_recovers_axis_tilt():
     assert abs(fit5["axis_tilt"][1] + 0.2) < 0.01
 
 
-def test_fit_alcor_wcs_recovers_axis_tilt(monkeypatch, tmp_path):
+def test_fit_alcor_wcs_recovers_axis_tilt(monkeypatch, tmp_path, patch_alcor):
     import skycam_utils.alcor as alcor_mod
     from astropy.table import Table
 
@@ -1339,17 +1339,17 @@ def test_fit_alcor_wcs_recovers_axis_tilt(monkeypatch, tmp_path):
         return Table({"xcentroid": x, "ycentroid": y,
                       "flux": np.linspace(1e3, 1e2, 30)})
 
-    monkeypatch.setattr(alcor_mod, "select_dark_frames",
-                        lambda fs, **kw: list(files))
-    monkeypatch.setattr(alcor_mod, "load_alcor_fits", fake_load_alcor_fits)
-    monkeypatch.setattr(alcor_mod, "alcor_reference_altaz", fake_reference_altaz)
-    monkeypatch.setattr(alcor_mod, "detect_alcor_stars", fake_detect)
-    monkeypatch.setattr(alcor_mod, "_frame_time",
-                        lambda path: Time("2024-09-05T07:00:00", format="isot",
+    patch_alcor("select_dark_frames",
+                lambda fs, **kw: list(files))
+    patch_alcor("load_alcor_fits", fake_load_alcor_fits)
+    patch_alcor("alcor_reference_altaz", fake_reference_altaz)
+    patch_alcor("detect_alcor_stars", fake_detect)
+    patch_alcor("_frame_time",
+                lambda path: Time("2024-09-05T07:00:00", format="isot",
                                           scale="utc"))
     # No axis_tilt key: the night fit must default it to (0, 0).
-    monkeypatch.setattr(alcor_mod, "alcor_calibration",
-                        lambda time=None: {"epoch": "2024-09-05", "xcen": 0.0,
+    patch_alcor("alcor_calibration",
+                lambda time=None: {"epoch": "2024-09-05", "xcen": 0.0,
                                            "ycen": 0.0, "rotation": 0.0,
                                            "radial_coeffs": (1.0, 0.0, 0.0),
                                            "horizon_radius": 747.0})

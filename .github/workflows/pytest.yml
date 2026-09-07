@@ -1,7 +1,14 @@
 name: pytest
 
+# `push` with no branch filter plus `pull_request` runs CI twice on every
+# commit of a branch that has a PR open -- once for the branch ref and once
+# for the PR merge ref, same SHA. Restricting push to the default branch
+# leaves exactly one run per commit: pull_request while a PR is open, push
+# once it merges. A feature branch with no PR yet gets no run, which is the
+# intended trade -- it is covered the moment the PR is opened.
 on:
   push:
+    branches: [main]
   pull_request:
 
 jobs:

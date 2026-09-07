@@ -585,3 +585,56 @@ def alcor_process_archive(archive_dir, out_dir, start=None, end=None,
             "skipped_recent": skipped_recent, "skipped_failed": skipped_failed,
             "pruned_files": pruned_files, "pruned_bytes": pruned_bytes,
             "stopped": stop["requested"]}
+def alcor_archive_status(out_dir, log=print):
+    """
+    Summarise an archive run's ledger without disturbing it.
+
+    Reads only ``<out_dir>/.archive_state/ledger.json``, so it works while a run
+    is in flight and on a machine where the archive itself is not mounted.
+
+    Parameters
+    ----------
+    out_dir : str or `~pathlib.Path`
+        The products tree given to :func:`alcor_process_archive`.
+    log : callable (default `print`)
+        Called with each line of the report.
+
+    Returns
+    -------
+    dict
+        ``counts`` (nights by state), ``elapsed_mean`` (seconds per completed
+        night, or None), ``eta`` (seconds to finish the pending nights, or
+        None), ``failed`` (night names), and ``pruned_bytes``.
+
+    Raises
+    ------
+    FileNotFoundError
+        If no ledger exists under `out_dir`.
+    """
+    state_dir = Path(out_dir) / ".archive_state"
+    ledger = ArchiveLedger(state_dir)
+    if not ledger.path.exists():
+        raise FileNotFoundError(f"no ledger.json under {state_dir}")
+
+    counts = ledger.counts()
+    done, mean = ledger.timing()
+    remaining = counts["pending"] + counts["running"]
+    eta = remaining * mean if mean else None
+    failed = sorted(night for night, entry in ledger.data["nights"].items()
+                    if entry.get("state") == "failed")
+    pruned_bytes = sum(entry.get("bytes_freed") or 0
+                       for entry in ledger.data["nights"].values())
+
+    log(f"ledger: {ledger.path}")
+    log(f"  done {counts['done']} · failed {counts['failed']} · "
+        f"pending {counts['pending']} · running {counts['running']}")
+    if mean:
+        log(f"  {_duration(mean)} per night · {remaining} left · "
+            f"ETA {_duration(eta)}")
+    if pruned_bytes:
+        log(f"  jpegs pruned: {pruned_bytes / 1e9:.1f} GB freed")
+    for night in failed:
+        log(f"  FAILED {night}: {(ledger.entry(night) or {}).get('error')}")
+
+    return {"counts": counts, "elapsed_mean": mean, "eta": eta,
+            "failed": failed, "pruned_bytes": pruned_bytes}

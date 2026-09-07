@@ -688,3 +688,34 @@ def test_pruning_can_be_enabled_on_a_later_pass(tmp_path, patch_alcor):
                           prune_jpegs=True)
 
     assert not (archive / "2025-01-01" / "a.jpg").exists()
+from skycam_utils.alcor import alcor_archive_status
+
+
+def test_status_summarises_a_ledger_without_the_archive(tmp_path, patch_alcor):
+    archive = _aged_archive(tmp_path / "archive")
+    patch_alcor("alcor_process_night", _stub_night([], fail_on=("2025-01-03",)))
+    alcor_process_archive(archive, out_dir=tmp_path / "out")
+
+    lines = []
+    status = alcor_archive_status(tmp_path / "out", log=lines.append)
+
+    assert status["counts"]["done"] == 2
+    assert status["counts"]["failed"] == 1
+    assert status["failed"] == ["2025-01-03"]
+    assert any("done" in line for line in lines)
+
+
+def test_status_reports_the_reason_a_night_failed(tmp_path, patch_alcor):
+    archive = _aged_archive(tmp_path / "archive")
+    patch_alcor("alcor_process_night", _stub_night([], fail_on=("2025-01-03",)))
+    alcor_process_archive(archive, out_dir=tmp_path / "out")
+
+    lines = []
+    alcor_archive_status(tmp_path / "out", log=lines.append)
+
+    assert any("synthetic failure" in line for line in lines)
+
+
+def test_status_raises_without_a_ledger(tmp_path):
+    with pytest.raises(FileNotFoundError, match="ledger.json"):
+        alcor_archive_status(tmp_path / "nowhere")

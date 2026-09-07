@@ -509,8 +509,8 @@ def plot_alcor_sb_summary(filename, output_file=None, title=None,
         axb.set_ylim(0, 95)
 
     axm.xaxis.set_major_locator(mdates.HourLocator(interval=1))
-    axm.xaxis.set_major_formatter(mdates.DateFormatter("%H"))
-    axm.set_xlabel("UT hour")
+    axm.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+    axm.set_xlabel("UT")
 
     fig.savefig(output_file, dpi=dpi, bbox_inches="tight")
     plt.close(fig)

@@ -312,3 +312,103 @@ def test_duration_formats_readably(seconds, expected):
 def test_duration_handles_an_unknown_rate():
     assert _duration(float("nan")) == "?"
     assert _duration(float("inf")) == "?"
+from skycam_utils.alcor import prune_night_jpegs
+
+
+def _make_night_with_jpegs(root, name="2025-01-01", n=3):
+    """A night directory holding both JPEG series and the FITS frames."""
+    night = Path(root) / name
+    night.mkdir(parents=True, exist_ok=True)
+    for i in range(n):
+        stamp = f"2025_01_01__20_00_{i:02d}"
+        (night / f"{stamp}.jpg").write_bytes(b"j" * 100)
+        (night / f"Unwrap_{stamp}.jpg").write_bytes(b"u" * 50)
+        (night / f"{stamp}.fits.bz2").write_bytes(b"f" * 10)
+    return night
+
+
+def _good_products(out_dir):
+    """The two product files pruning is gated on, written non-empty."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    summary = out_dir / "sky_brightness.csv"
+    photometry = out_dir / "2025-01-01_phot.csv"
+    summary.write_text("filename,OBSTIME\n")
+    photometry.write_text("name,OBSTIME\n")
+    return {"summary_file": summary, "photometry_file": photometry}
+
+
+def test_prune_deletes_both_jpeg_series_but_no_fits(tmp_path):
+    night = _make_night_with_jpegs(tmp_path / "archive")
+    products = _good_products(tmp_path / "out" / "2025-01-01")
+
+    n_files, n_bytes, reason = prune_night_jpegs(night, products, n_frames=3,
+                                                 n_errors=0)
+
+    assert reason is None
+    assert n_files == 6
+    assert n_bytes == 3 * 150
+    assert sorted(p.name for p in night.iterdir()) == [
+        "2025_01_01__20_00_00.fits.bz2",
+        "2025_01_01__20_00_01.fits.bz2",
+        "2025_01_01__20_00_02.fits.bz2",
+    ]
+
+
+def test_prune_dry_run_reports_but_deletes_nothing(tmp_path):
+    night = _make_night_with_jpegs(tmp_path / "archive")
+    products = _good_products(tmp_path / "out" / "2025-01-01")
+
+    n_files, n_bytes, reason = prune_night_jpegs(night, products, n_frames=3,
+                                                 n_errors=0, dry_run=True)
+
+    assert (n_files, n_bytes, reason) == (6, 450, None)
+    assert len(list(night.glob("*.jpg"))) == 6
+
+
+def test_prune_refuses_when_the_summary_is_missing(tmp_path):
+    """The JPEGs are the only other copy of the imagery; no products, no prune."""
+    night = _make_night_with_jpegs(tmp_path / "archive")
+    products = _good_products(tmp_path / "out" / "2025-01-01")
+    Path(products["summary_file"]).unlink()
+
+    n_files, n_bytes, reason = prune_night_jpegs(night, products, n_frames=3,
+                                                 n_errors=0)
+
+    assert (n_files, n_bytes) == (0, 0)
+    assert "sky_brightness.csv" in reason
+    assert len(list(night.glob("*.jpg"))) == 6
+
+
+def test_prune_refuses_when_the_photometry_rollup_is_empty(tmp_path):
+    night = _make_night_with_jpegs(tmp_path / "archive")
+    products = _good_products(tmp_path / "out" / "2025-01-01")
+    Path(products["photometry_file"]).write_text("")
+
+    n_files, _, reason = prune_night_jpegs(night, products, n_frames=3, n_errors=0)
+
+    assert n_files == 0
+    assert "photometry" in reason
+
+
+def test_prune_refuses_when_too_many_frames_failed(tmp_path):
+    night = _make_night_with_jpegs(tmp_path / "archive")
+    products = _good_products(tmp_path / "out" / "2025-01-01")
+
+    n_files, _, reason = prune_night_jpegs(night, products, n_frames=100,
+                                           n_errors=20)
+
+    assert n_files == 0
+    assert "20 of 100" in reason
+    assert len(list(night.glob("*.jpg"))) == 6
+
+
+def test_prune_allows_a_few_frame_errors(tmp_path):
+    night = _make_night_with_jpegs(tmp_path / "archive")
+    products = _good_products(tmp_path / "out" / "2025-01-01")
+
+    n_files, _, reason = prune_night_jpegs(night, products, n_frames=100,
+                                           n_errors=5)
+
+    assert reason is None
+    assert n_files == 6

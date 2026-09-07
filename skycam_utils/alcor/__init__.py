@@ -199,6 +199,7 @@ from .night import (  # noqa: F401
 from .archive import (  # noqa: F401
     ALCOR_ARCHIVE_LOG_INTERVAL,
     ALCOR_ARCHIVE_MIN_AGE,
+    ALCOR_ARCHIVE_PRUNE_MAX_ERROR_FRACTION,
     NIGHT_NAME_RE,
     ThrottledLog,
     _FRAME_LINE_RE,
@@ -208,6 +209,7 @@ from .archive import (  # noqa: F401
     discover_nights,
     is_too_recent,
     night_last_modified,
+    prune_night_jpegs,
 )
 from .cli import (  # noqa: F401
     alcor_proc_fits_cli,
@@ -229,6 +231,7 @@ __all__ = [
     "ALCOR_AIRMASS_TERM",
     "ALCOR_ARCHIVE_LOG_INTERVAL",
     "ALCOR_ARCHIVE_MIN_AGE",
+    "ALCOR_ARCHIVE_PRUNE_MAX_ERROR_FRACTION",
     "ALCOR_AXIS_TILT",
     "ALCOR_BADPIX_POLE_RADIUS",
     "ALCOR_BADPIX_RIM_DILATION",
@@ -319,6 +322,7 @@ __all__ = [
     "plot_alcor_sb_keogram_fits_cli",
     "plot_alcor_sky_brightness",
     "plot_alcor_sky_brightness_cli",
+    "prune_night_jpegs",
     "save_alcor_keogram_fits",
     "save_alcor_keogram_plot",
     "save_alcor_photometry_check_plot",

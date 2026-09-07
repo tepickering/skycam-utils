@@ -246,3 +246,56 @@ class ThrottledLog:
         left = (self.total - self.done) / rate if rate > 0 else float("nan")
         return (f"frames {self.done}/{self.total} · {rate:.2f} f/s · "
                 f"{_duration(left)} left")
+#: Fraction of a night's frames that may fail and still allow its JPEGs to go.
+ALCOR_ARCHIVE_PRUNE_MAX_ERROR_FRACTION = 0.10
+
+
+def prune_night_jpegs(night_dir, products, n_frames, n_errors, dry_run=False,
+                      max_error_fraction=ALCOR_ARCHIVE_PRUNE_MAX_ERROR_FRACTION):
+    """
+    Delete a completed night's vendor JPEGs, or report what would go.
+
+    The camera's vendor software writes two JPEGs per frame, ``<stamp>.jpg`` and
+    ``Unwrap_<stamp>.jpg`` -- about 7.3 GB a night. Better renderings are
+    derivable from the raw FITS on demand, so they are redundant, and deleting
+    them is what makes an archive-wide run fit on the volume. It is also the one
+    irreversible thing the driver does, so it is gated: the night's products
+    must exist and be non-empty, and its frames must have mostly succeeded.
+
+    Parameters
+    ----------
+    night_dir : str or `~pathlib.Path`
+        The archive night directory to prune.
+    products : dict
+        The night's product paths, as returned by :func:`alcor_process_night`.
+        ``summary_file`` and ``photometry_file`` are the two that are checked.
+    n_frames, n_errors : int
+        Frames processed, and frames that failed.
+    dry_run : bool (default=False)
+        Report what would be deleted without deleting it.
+    max_error_fraction : float (default ALCOR_ARCHIVE_PRUNE_MAX_ERROR_FRACTION)
+        Refuse to prune when more than this fraction of frames failed.
+
+    Returns
+    -------
+    tuple
+        ``(n_files, n_bytes, reason)``. `reason` is None when the prune ran, or
+        would have under `dry_run`, and otherwise says why the night was left
+        alone.
+    """
+    checks = (("sky_brightness.csv", products.get("summary_file")),
+              ("the photometry rollup", products.get("photometry_file")))
+    for label, value in checks:
+        path = Path(value) if value else None
+        if path is None or not path.exists() or path.stat().st_size == 0:
+            return 0, 0, f"{label} is missing or empty"
+    if n_frames and n_errors / n_frames > max_error_fraction:
+        return 0, 0, (f"{n_errors} of {n_frames} frames failed, over the "
+                      f"{max_error_fraction:.0%} limit")
+    # One glob: "*.jpg" matches the Unwrap_ series too.
+    jpegs = sorted(Path(night_dir).glob("*.jpg"))
+    n_bytes = sum(path.stat().st_size for path in jpegs)
+    if not dry_run:
+        for path in jpegs:
+            path.unlink()
+    return len(jpegs), n_bytes, None

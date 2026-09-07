@@ -42,7 +42,7 @@ It is CPU-bound once the worker pool is full, not I/O-bound.
 | Per-frame CSVs | Kept | They are the frame-level resume mechanism and stay inspectable |
 | Products | Baseline + `--day-keogram` + `--median-stack` + `--both` | Complete archive; ~30 min and ~1.4 GB per night |
 | Ledger | JSON, atomically replaced | 613 rows; inspectable and hand-editable beats SQLite here |
-| Control | Ledger + `PAUSE` sentinel file | Pausing a detached 13-day run must not require a PID |
+| Control | Ledger + a `PAUSE` sentinel at `<out-dir>/.archive_state/PAUSE` | Pausing a detached 13-day run must not require a PID |
 | JPEG pruning | Opt-in `--prune-jpegs` flag on the driver | Frees space as the run proceeds so the drive never fills |
 
 ## Architecture
@@ -79,11 +79,18 @@ local storage rather than the USB archive.
 
 ### Ledger and resume
 
-State lives in `<out-dir>/.archive_state/`:
+All run state lives in one directory, `<out-dir>/.archive_state/` — that is, inside the
+products tree named by `-o/--out-dir`, never in the archive and never in the current
+working directory. It is created on the first run and holds exactly three things:
 
-* `ledger.json` — rewritten atomically (temp file + `os.replace`) after each night.
-* `PAUSE` — the control sentinel, created and removed by the operator.
-* `archive.log` — the appended run log.
+| Path | Written by | Purpose |
+| --- | --- | --- |
+| `<out-dir>/.archive_state/ledger.json` | the driver | Per-night state; rewritten atomically (temp file + `os.replace`) after each night |
+| `<out-dir>/.archive_state/PAUSE` | **the operator** | Presence of this file pauses the run. Contents are ignored |
+| `<out-dir>/.archive_state/archive.log` | the driver | The appended run log |
+
+The driver prints the absolute path of its state directory as the first line of every
+run, so the pause switch never has to be guessed at from a detached session.
 
 Each ledger entry records the night name, state (`pending` / `running` / `done` /
 `failed`), start and finish timestamps, elapsed seconds, frame count, per-frame error
@@ -109,12 +116,32 @@ Resume works at two levels:
 exists for one level down: a rollup assembled from per-frame CSVs written in two
 different modes is a silently mixed schema, and nothing downstream would notice.
 
-### Pause, stop, and progress
+### Pause and stop
 
-Before each night the driver checks for `PAUSE`. If present it logs the pause and polls
-every 30 s until the file is removed, so `rm PAUSE` resumes a detached run with no
-relaunch. The first `SIGINT`/`SIGTERM` finishes the current night and exits cleanly; a
-second aborts immediately, leaving that night `pending`.
+**Pausing is done by creating `<out-dir>/.archive_state/PAUSE`.** Any means of creating
+the file works — `touch`, an editor, `scp` — and its contents are ignored; only its
+existence matters. For a run started with `-o /Volumes/Seagate_24TB/skycam_products`:
+
+```bash
+touch /Volumes/Seagate_24TB/skycam_products/.archive_state/PAUSE   # pause
+rm    /Volumes/Seagate_24TB/skycam_products/.archive_state/PAUSE   # resume
+```
+
+The driver checks for the file **between nights, not during one**, so a pause takes
+effect at the next night boundary — up to ~30 min after the file appears, and the night
+in flight always runs to completion and is recorded `done`. Once paused it logs
+`paused — waiting on <path>` and polls every 30 s until the file is removed, at which
+point the same process picks up at the next night. Nothing needs relaunching, and no PID
+needs finding: this is the entire reason the mechanism is a file rather than a signal.
+
+Pausing is *not* required before killing the run. `SIGINT`/`SIGTERM` (Ctrl-C) makes the
+driver finish the current night and exit cleanly; a second one aborts immediately,
+leaving that night `pending` to be resumed, with its already-written per-frame CSVs
+reused. A `PAUSE` file left in place will pause the *next* run at its very first night,
+which is a deliberate property — it lets a run be staged and held — but it means the file
+must be removed before restarting.
+
+### Progress reporting
 
 Progress goes to stderr and to `archive.log`. The night driver emits one line per frame
 — about 1.2M lines over the archive — so the archive driver wraps the `log` callable it
@@ -179,7 +206,10 @@ logic is state management, so no real frames are needed.
 5. A raising night is recorded `failed` and the run continues to the next night.
 6. `--retry-failed` re-attempts a failed night; without it, the night stays skipped.
 7. An options-fingerprint mismatch refuses to run; `--force-options` overrides.
-8. A `PAUSE` sentinel halts before the next night, and removing it resumes.
+8. Creating `<out-dir>/.archive_state/PAUSE` halts the run before the next night;
+    removing it resumes in the same process. A `PAUSE` present at startup pauses before
+    the first night. The night already in flight when the file appears still completes
+    and is recorded `done`.
 9. `--max-consecutive-failures` aborts the run after the configured streak.
 10. `--prune-jpegs` deletes JPEGs for a `done` night, and does not for a `failed` one
     or one whose error fraction is too high; `--prune-dry-run` deletes nothing.

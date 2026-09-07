@@ -176,6 +176,12 @@ from .keogram import (  # noqa: F401
     plot_alcor_sb_keogram_fits,
     _parse_timestamps,
 )
+from .ledger import (  # noqa: F401
+    LEDGER_VERSION,
+    FINGERPRINT_KEYS,
+    ArchiveLedger,
+    options_fingerprint,
+)
 from .night import (  # noqa: F401
     _alcor_frame_stem,
     _NIGHT_CONES,
@@ -238,6 +244,9 @@ __all__ = [
     "ALCOR_YCEN",
     "ALCOR_ZEROPOINTS",
     "ALCOR_ZEROPOINT_BANDS",
+    "ArchiveLedger",
+    "FINGERPRINT_KEYS",
+    "LEDGER_VERSION",
     "alcor_badpix_search_region",
     "alcor_calibrate_photometry",
     "alcor_calibration",
@@ -278,6 +287,7 @@ __all__ = [
     "load_alcor_keogram_fits",
     "load_alcor_sb_keogram_fits",
     "lookup_sloan_photometry",
+    "options_fingerprint",
     "plot_alcor_fits",
     "plot_alcor_fits_cli",
     "plot_alcor_keogram_fits",

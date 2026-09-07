@@ -83,6 +83,22 @@ alcor_sky_brightness <input.fits> [-o OUT.fits] [--horizon-mask] [--saturation N
 #   SATLEVEL, HORIZMSK). Reusable as alcor_sky_brightness_fits(filename, ...).
 #   Default output: <input>_sb.fits.
 
+plot_alcor_sb_summary <sky_brightness.csv> [-o OUT.png] [--title T] [--figsize W H] [--dpi 140]
+#   Plots one night's sky_brightness.csv (from alcor_process_night) as a time
+#   series: every allsky_mv_* track vs UT with the magnitude axis INVERTED so a
+#   brighter sky runs downward (matching the SB maps and keograms), astronomical
+#   twilight (Sun > -18) shaded, and a lower panel carrying the Moon's altitude
+#   plus, on a right-hand axis, the altitude where the floating darkest cone was
+#   found. The title's dark-sky medians are computed over Sun < -18 AND Moon < 0
+#   only, so a moonlit stretch cannot drag them, and report the two SKY tracks
+#   (zenith, darkest cone) -- the light domes are not a darkness measure. The
+#   legend is anchored in DATA coordinates just left of the morning-twilight
+#   band; an axes-fraction anchor is wrong by matplotlib's 5% x-margins and
+#   lands on the shading. Deliberately NOT wired into alcor_process_night: the
+#   archive is already being processed, and the CLI runs over the finished CSVs
+#   afterwards. Reusable as plot_alcor_sb_summary(csv, output_file=None, ...).
+#   Default output: the input with a .png suffix (extension drives the backend).
+
 alcor_star_photometry <input.fits> [-o OUT.csv] [--aperture-radius 4] [--annulus-width 1] [--min-altitude 20] [--vmag-limit 5.5] [--no-refraction] [--no-variables] [--sun-alt-max -12] [--saturation 32767] [--gaussian] [--both] [--mask-threshold 15000] [--check-plot] [--check-radius 680]
 #   Fixed-position RGB aperture photometry of named bright stars at their
 #   WCS-predicted pixels (no detection step). Writes <input>_phot.csv indexed

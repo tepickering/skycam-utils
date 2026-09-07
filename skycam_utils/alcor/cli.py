@@ -23,7 +23,10 @@ from .photometry import (
     _default_alcor_photometry_check_plot_output, alcor_star_photometry
 )
 from .display import plot_alcor_fits
-from .skybright import alcor_sky_brightness_fits, plot_alcor_sky_brightness
+from .skybright import (
+    alcor_sky_brightness_fits, plot_alcor_sb_summary,
+    plot_alcor_sky_brightness
+)
 from .keogram import (
     _keogram_row_altitude, alcor_keogram, plot_alcor_keogram_fits,
     plot_alcor_sb_keogram_fits, save_alcor_keogram_fits,
@@ -364,6 +367,38 @@ def plot_alcor_sb_keogram_fits_cli():
     )
     print(out)
 
+
+
+def plot_alcor_sb_summary_cli():
+    """
+    CLI entry point for :func:`plot_alcor_sb_summary`: render a night's
+    ``sky_brightness.csv`` as a time-series figure. Kept separate from
+    :func:`alcor_process_night` so a whole archive's summaries can be plotted
+    after the fact without reprocessing any frames.
+    """
+    parser = argparse.ArgumentParser(
+        description="Plot a night's alcor sky-brightness summary CSV.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("filename",
+                        help="Input sky_brightness.csv written by alcor_process_night.")
+    parser.add_argument("-o", "--output", default=None,
+                        help="Output plot path (default: the input with a .png suffix).")
+    parser.add_argument("--title", default=None,
+                        help="Figure title (default: the CSV's parent directory name).")
+    parser.add_argument("--figsize", type=float, nargs=2, default=(13, 8),
+                        metavar=("WIDTH", "HEIGHT"))
+    parser.add_argument("--dpi", type=int, default=140, help="Output figure resolution.")
+    args = parser.parse_args()
+
+    out = plot_alcor_sb_summary(
+        args.filename,
+        output_file=args.output,
+        title=args.title,
+        figsize=tuple(args.figsize),
+        dpi=args.dpi,
+    )
+    print(out)
 
 
 def alcor_process_night_cli():

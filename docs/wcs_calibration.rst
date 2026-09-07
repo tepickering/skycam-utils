@@ -70,7 +70,7 @@ Fitting the calibration
 The calibration is produced by :func:`~skycam_utils.alcor.fit_alcor_wcs`, which
 aggregates bright-star matches across **all dark frames of a whole night** and
 prints a ready-to-paste ``ALCOR_CALIBRATIONS`` epoch dict (stamped with the
-night's UT date) to add to ``alcor.py`` and commit.
+night's UT date) to add to ``alcor/config.py`` and commit.
 
 - **Reference catalog** — ``bright_star_sloan.fits``, stars with ``Vmag <= 4`` by
   default (configurable via ``--vmag-limit``).

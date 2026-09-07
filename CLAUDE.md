@@ -197,6 +197,54 @@ alcor_process_night <night-dir> [-o OUT-DIR] [--pattern *.fits.bz2] [--sun-alt-m
 #   scripts/make_movies.sh calls this (with --day-keogram) in place of its old
 #   alcor_keogram call, then publishes both keograms to keograms/<year>/{png,fits}/.
 
+alcor_process_archive <archive-dir> -o <out-dir> [--status] [--start YYYY-MM-DD] [--end YYYY-MM-DD] [--nights N ...] [--reverse] [--min-age 24] [--prune-jpegs] [--prune-dry-run] [--retry-failed] [--force-options] [--max-consecutive-failures 10] [--verbose] [--day-keogram] [--median-stack] [--both] [--workers N] [--scratch-dir DIR]
+#   Archive-wide driver: runs alcor_process_night over every YYYY-MM-DD night
+#   directory under <archive-dir>, resumably. Hundreds of nights and days of wall
+#   clock, so it adds only what that scale needs and no science of its own.
+#   ALL STATE LIVES IN <out-dir>/.archive_state/, whose absolute path is the first
+#   line of every run:
+#     ledger.json   per-night state (pending/running/done/failed), timings, frame
+#                   and error counts, product paths, jpegs pruned. Rewritten
+#                   atomically after each night; `done` nights are skipped on a
+#                   rerun, and a night left `running` by a crash is reset to
+#                   `pending`. Frame-level resume then comes free, since
+#                   alcor_process_night reuses a non-empty <frame>_phot.csv.
+#                   It also stores an OPTIONS FINGERPRINT (both/gaussian/
+#                   aperture_radius/annulus_width/min_altitude/vmag_limit/
+#                   variables); resuming with any of them changed is REFUSED
+#                   unless --force-options, because a rollup built from CSVs
+#                   written in two modes is a silently mixed schema.
+#     PAUSE         create this file to pause: `touch <out-dir>/.archive_state/PAUSE`
+#                   and `rm` it to resume. Checked BETWEEN nights, so a pause lands
+#                   at the next boundary (up to ~30 min) and the night in flight
+#                   always completes. It is a file, not a signal, so a detached
+#                   run can be held without finding its PID. One left in place
+#                   holds the NEXT run at its first night.
+#     archive.log   the run log, also echoed to stderr.
+#   Each night's products go to <out-dir>/<night>/. The archive is read-only
+#   except for --prune-jpegs.
+#   SKIPS NIGHTS STILL ARRIVING: the archive syncs from the camera host, so a night
+#   whose mtime is inside --min-age (24 h) is skipped, logged, and left `pending`
+#   -- not `failed`, since nothing failed. The test is MTIME, never the filename
+#   timestamps: the current night is still being observed (recent names), while an
+#   old night being back-filled has old names and fresh mtimes, and only mtime
+#   catches both. Without this a half-arrived night would be recorded `done` and
+#   never revisited. --min-age 0 disables it.
+#   --prune-jpegs DELETES a night's vendor JPEGs (~7.3 GB/night; "*.jpg" covers the
+#   Unwrap_ series too) after its products are written, gated on sky_brightness.csv
+#   and <night>_phot.csv existing non-empty and under 10% frame errors. Never
+#   prunes a night skipped as too recent. It also prunes already-`done` nights that
+#   were never pruned, so it can be enabled partway through or as a later pass.
+#   --prune-dry-run reports and deletes nothing.
+#   Per-frame log lines are throttled to one progress line a minute (--verbose
+#   disables); other messages pass through. One bad night is recorded `failed` and
+#   the run continues, but --max-consecutive-failures (10) aborts the run, which is
+#   what catches the archive unmounting mid-run. --retry-failed re-attempts them.
+#   --status reports counts, per-night timing, an ETA, and the failure list from the
+#   ledger alone -- no archive needed, and safe while a run is in flight.
+#   Reusable as alcor_process_archive(archive_dir, out_dir, ...) and
+#   alcor_archive_status(out_dir).
+
 alcor_keogram <input-dir> [-o OUT.png] [--fits-output OUT.fits] [--pattern ...] [--workers N] [--no-progress] [--powerstretch ...] [--gscale ...] [--bscale ...]
 #   Standalone raw RGB keogram over a whole day: the zenith column of each frame's
 #   raw cube stacked into an (ny, nframes, 3) image + DATE timestamps. Still useful
@@ -292,7 +340,7 @@ create_horizon_mask <median.fits> [--epoch YYYY-MM-DD] [--out-dir DIR] [--phot-n
 #   it needs local raw data and is not reproducible from a bare pip install.
 ```
 
-`alcor` is a **package**, split by concern out of what was a single 5700-line `alcor.py`: `config` (constants, `ALCOR_CALIBRATIONS`, `ALCOR_ZEROPOINTS`), `timeutils` (frame time, Sun/Moon, dark-frame selection), `wcs` (ARC WCS + distortion model), `wcsfit` (detection, matching, `fit_alcor_wcs`), `masks` (loading the badpix/horizon assets), `badpix`, `horizon`, `catalogs`, `io` (`load_alcor_fits`, `_corner_bias`), `photometry`, `display`, `skybright`, `keogram`, `night` (`alcor_process_night`), and `cli` (all 14 entry points). **`alcor/__init__.py` re-exports the entire namespace**, private names included, so `from skycam_utils.alcor import <anything>` and the `skycam_utils.alcor:*_cli` entry points work exactly as before — nothing outside the package had to change. Dependencies run one way (`config → timeutils → wcs → masks → {badpix, horizon, catalogs} → io → {photometry, display, skybright} → keogram → night → cli`); the two cycles that a naive split creates are worth knowing about, since both are easy to reintroduce: `badpix` needs the horizon mask while `horizon` needs the badpix mask (broken by keeping both *loaders* in `masks`, separate from the *builders*), and `photometry` needs the check plot while `display` needs `_corner_bias` (broken by `_corner_bias` living in `io`, where a frame-level bias estimate belongs). `claude_docs/scripts/split_alcor.py` is the record of how the split was done.
+`alcor` is a **package**, split by concern out of what was a single 5700-line `alcor.py`: `config` (constants, `ALCOR_CALIBRATIONS`, `ALCOR_ZEROPOINTS`), `timeutils` (frame time, Sun/Moon, dark-frame selection), `wcs` (ARC WCS + distortion model), `wcsfit` (detection, matching, `fit_alcor_wcs`), `masks` (loading the badpix/horizon assets), `badpix`, `horizon`, `catalogs`, `io` (`load_alcor_fits`, `_corner_bias`), `photometry`, `display`, `skybright`, `keogram`, `night` (`alcor_process_night`), `ledger` (the archive run ledger), `archive` (`alcor_process_archive`), and `cli` (all 15 entry points). **`alcor/__init__.py` re-exports the entire namespace**, private names included, so `from skycam_utils.alcor import <anything>` and the `skycam_utils.alcor:*_cli` entry points work exactly as before — nothing outside the package had to change. Dependencies run one way (`config → timeutils → wcs → masks → {badpix, horizon, catalogs} → io → {photometry, display, skybright} → keogram → night → archive → cli`, with `ledger` a dependency-free leaf that only `archive` imports); the two cycles that a naive split creates are worth knowing about, since both are easy to reintroduce: `badpix` needs the horizon mask while `horizon` needs the badpix mask (broken by keeping both *loaders* in `masks`, separate from the *builders*), and `photometry` needs the check plot while `display` needs `_corner_bias` (broken by `_corner_bias` living in `io`, where a frame-level bias estimate belongs). `claude_docs/scripts/split_alcor.py` is the record of how the split was done.
 
 **Tests must patch with the `patch_alcor` fixture** (`skycam_utils/tests/conftest.py`), not `monkeypatch.setattr(alcor, ...)`. When `alcor` was one module there was one namespace, so patching it reached every caller; now each submodule binds its own name (`from .io import load_alcor_fits`), and patching the package re-export leaves the real consumers running the real function — **the test still passes, for the wrong reason**. `patch_alcor(name, value)` replaces the name in every submodule that binds it, which is what the old single-namespace patch actually meant, and raises rather than silently doing nothing if the name is bound nowhere.
 

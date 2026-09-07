@@ -38,9 +38,11 @@ Usage:  python claude_docs/scripts/build_variable_catalog.py [--dry-run]
 """
 import argparse
 import re
+from pathlib import Path
 
 import numpy as np
 from astropy.coordinates import SkyCoord
+from astropy.io import fits
 from astropy.table import Table
 import astropy.units as u
 from astroquery.vizier import Vizier
@@ -73,6 +75,45 @@ ERUPTIVE = re.compile(r"^(N[ABCLR]?|SN|UG[SZ]?|ZAND|RCB|V838MON)($|[\s/:+])")
 CAL_CATALOG = "skycam_utils/data/bright_star_sloan_named.fits"
 CAL_CATALOG_PLAIN = "skycam_utils/data/bright_star_sloan.fits"
 OUT = "skycam_utils/data/bright_variable_vsx.fits"
+
+
+def drop_rows_in_place(path, drop):
+    """Delete rows from a FITS bintable without disturbing anything else.
+
+    The obvious ``Table.read(path)[~drop].write(path)`` is destructive here:
+    it round-trips through Table, which discards the primary HDU and every
+    column description VizieR ships (``[1/225300] HD catalog number``, and so
+    on), leaving a file that is smaller, less informative, and diffs against
+    its predecessor in its entirety. These catalogs are provenance, so the
+    edit is done on the raw bytes instead -- the records are fixed width, so
+    dropping rows is a splice plus a new NAXIS2. Both headers survive intact
+    and the diff is confined to the rows actually removed.
+    """
+    with fits.open(path) as hdul:
+        info = hdul.fileinfo(1)
+        nrow = hdul[1].header["NAXIS2"]
+        width = hdul[1].header["NAXIS1"]
+        hdr_start, dat_start = info["hdrLoc"], info["datLoc"]
+
+    raw = Path(path).read_bytes()
+    keep = [i for i in range(nrow) if not drop[i]]
+    records = raw[dat_start:dat_start + nrow * width]
+    data = b"".join(records[i * width:(i + 1) * width] for i in keep)
+    data += b"\0" * (-len(data) % 2880)
+
+    header = bytearray(raw[hdr_start:dat_start])
+    for pos in range(0, len(header), 80):
+        if bytes(header[pos:pos + 8]) == b"NAXIS2  ":
+            card = fits.Card("NAXIS2", len(keep),
+                             fits.Header.fromstring(
+                                 bytes(header).decode("ascii")).comments["NAXIS2"])
+            header[pos:pos + 80] = str(card).ljust(80).encode("ascii")
+            break
+    else:
+        raise ValueError(f"{path}: no NAXIS2 card in the bintable header")
+
+    Path(path).write_bytes(raw[:hdr_start] + bytes(header) + data)
+    return nrow, len(keep)
 
 
 def main(dry_run=False):
@@ -180,9 +221,9 @@ def main(dry_run=False):
             _, sep_cal, _ = coords.match_to_catalog_sky(badcoord)
             drop = sep_cal < MATCH_RADIUS
             if drop.any():
-                t[~drop].write(path, overwrite=True)
+                before, after = drop_rows_in_place(path, drop)
                 print(f"  {path}: dropped {int(drop.sum())}, "
-                      f"{len(t)} -> {int((~drop).sum())} rows")
+                      f"{before} -> {after} rows")
 
 
 if __name__ == "__main__":

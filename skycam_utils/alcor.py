@@ -23,7 +23,7 @@ from matplotlib.patches import Circle
 import matplotlib.dates as mdates
 from astropy.io import fits
 from astropy.stats import sigma_clipped_stats
-from astropy.table import Table, hstack
+from astropy.table import Table, hstack, vstack
 from astropy.time import Time
 from astropy.wcs import WCS, Sip
 from photutils.detection import DAOStarFinder
@@ -55,10 +55,91 @@ ALCOR_NONLINEAR_THRESHOLD = 15000   # raw ADU; per-pixel non-linearity onset
 # reference before the zeropoint is applied (see plot_alcor_sky_brightness).
 ALCOR_CALIB_EXPTIME = 20.0   # seconds
 # Sky-brightness saturation / strong-non-linearity ceiling: raw pixels at or
-# above this are clipped or badly non-linear and are masked in surface-brightness
-# maps. Lower than the 15-bit hard ceiling ALCOR_SATURATION used for star sat_*
-# flags, because the per-pixel response departs from linear well before clipping.
+# above this are clipped or badly non-linear. Lower than the 15-bit hard ceiling
+# ALCOR_SATURATION used for star sat_* flags, because the per-pixel response
+# departs from linear well before clipping.
+#
+# NOT applied by default any more. Blanking these pixels was actively
+# misleading on a surface-brightness map: a NaN renders as the axes background,
+# so the very brightest sources -- a saturated star or planet crossing the
+# frame -- appeared as DARK holes when the truth is that they are too bright to
+# measure. Keeping the value is the lesser error. Clipping loses flux, so a
+# saturated pixel reads slightly too FAINT, which makes the rendered peak a
+# lower bound on the real surface brightness rather than an inversion of it.
+# Pass an explicit `saturation` to restore the mask.
 ALCOR_SB_SATURATION = 25000   # raw ADU
+
+# Bad-pixel detection is restricted to sky pixels. The 5 px median high-pass that
+# isolates hot pixels also fires on any sharp edge, and the horizon is full of
+# them -- terrain, buildings, ground lights, the rim itself. Measured on the
+# 2026-01-11 night median, 78% of the z>25 candidates fell inside the horizon
+# mask or within a few pixels of its rim, so the mask was mostly a map of the
+# skyline rather than of the sensor (which also made the NBAD* aging counts
+# meaningless). The horizon mask is dilated by this many pixels so the rim
+# gradient itself is excluded, not just the not-sky side of it.
+ALCOR_BADPIX_RIM_DILATION = 4   # pixels
+
+# Radius in pixels, about the OPTICAL AXIS, of the camera's illuminated image
+# circle. Beyond it the fisheye simply delivers no light: measured on four night
+# medians spanning 2026-01 to 2026-06, the median signal above bias falls from
+# ~180 counts at radius 676-679 to 42 at 679-682 and then flat at a few counts,
+# an unambiguous optical edge at the same radius on every night. It sits at
+# altitude ~-2.5 deg, INSIDE the nominal ALCOR_HORIZON_RADIUS (747) where alt=0
+# would fall without distortion -- the sensor reaches a couple of degrees below
+# the true horizon and no further. Surface-brightness maps blank everything
+# outside it, because dividing a near-zero signal by a solid angle yields a
+# confident-looking ~25 mag/arcsec^2 that is an artifact, not dark sky.
+# Numerically equal to ALCOR_RADIUS, but that one is a display-crop half-width;
+# this is a property of the optics, so they are kept separate.
+ALCOR_FIELD_RADIUS = 680   # pixels
+
+# A band whose colour coefficient is within this of zero is treated as colour
+# flat, so a star with no catalogued B-V still gets a calibrated magnitude
+# instead of a nan. G's coefficient is -0.038, so even a very red star (B-V=1.5)
+# costs under 0.06 mag -- below the per-frame photometric scatter. R (-0.343)
+# and B (+0.47) are nowhere near flat and correctly stay nan without a colour.
+# This matters for the variable catalog, where 42 of 642 stars have no B-V.
+ALCOR_COLOR_FLAT_TOL = 0.05   # mag per mag of B-V
+
+
+# ...and a disc this big around the north celestial pole is excluded too. The
+# detector assumes a night median is trail-free, which holds everywhere except
+# at the pole: Polaris (V=1.98) moves only ~10 px in a night, so its trail
+# survives the median and gets flagged as a cluster of hot pixels -- a different
+# cluster every night, since the trail lands at a different hour angle. The disc
+# costs ~700 px of sensor area out of 2M.
+ALCOR_BADPIX_POLE_RADIUS = 15   # pixels
+
+# Fixed sky-brightness sampling apertures for the nightly archive summary
+# (alcor_process_night). Each is the median surface brightness of the pixels
+# within ALCOR_SB_APERTURE_RADIUS degrees of a fixed (azimuth, altitude), so the
+# same patch of sky is reported for every frame of every night: the zenith as the
+# dark-sky reference, and two low-altitude cones aimed at the Tucson and Nogales
+# light domes.
+ALCOR_SB_APERTURE_RADIUS = 5.0    # deg, angular radius of each sampling cone
+ALCOR_SB_TARGETS = {              # column name -> (azimuth, altitude) in deg
+    "allsky_mv_zenith": (0.0, 90.0),
+    "allsky_mv_tucson": (0.0, 15.0),
+    "allsky_mv_nogales": (190.0, 15.0),
+}
+ALCOR_SB_TARGET_DESCRIPTIONS = {
+    "allsky_mv_zenith":
+        "Allsky visible magnitude at zenith, median within 5 deg radius aperture",
+    "allsky_mv_tucson":
+        "Allsky visible magnitude toward Tucson, median within 5 deg radius "
+        "aperture centered at az=0, alt=15",
+    "allsky_mv_nogales":
+        "Allsky visible magnitude toward Nogales, median within 5 deg radius "
+        "aperture centered at az=190, alt=15",
+}
+ALCOR_SB_TARGET_UNIT = "V mag/arcsec^2"
+# The fixed cones above sample named directions; allsky_mv_best instead reports the
+# DARKEST such cone anywhere above this altitude. The zenith is not a reliable
+# darkness measure -- the Milky Way transits through it -- so the darkest patch is
+# what says how dark the site actually got. It is the same statistic in the same
+# units (median inside a 5 deg cone), just at a floating position rather than a
+# fixed one, so it is directly comparable to the three named columns.
+ALCOR_SB_BEST_MIN_ALTITUDE = 30.0   # deg
 
 # Adopted photometric calibration (see ALCOR_ZEROPOINTS). A single achromatic
 # extinction term applies to all three bands, and instrument magnitudes brighter
@@ -1332,7 +1413,71 @@ def detect_alcor_stars(im, fwhm=3.0, threshold_sigma=5.0, max_detections=200):
     return out
 
 
-def build_alcor_badpix_mask(median_cube, ksize=5, z_thresh=25.0):
+def alcor_badpix_search_region(shape, time=None, wcs=None, horizon_dir=None,
+                               rim_dilation=ALCOR_BADPIX_RIM_DILATION,
+                               pole_radius=ALCOR_BADPIX_POLE_RADIUS, log=None):
+    """
+    The sky region within which hot-pixel detection is trustworthy.
+
+    Returns an ``(ny, nx)`` bool array, True where a pixel may be considered a
+    bad-pixel candidate. Two regions are excluded, both for the same underlying
+    reason -- the detector's premise is a sharp spike on a smooth, trail-free
+    background, and neither region satisfies it:
+
+    * **Not-sky**, from :func:`load_alcor_horizon_mask` for ``time``, dilated by
+      ``rim_dilation`` pixels so the horizon edge itself goes too. Terrain,
+      buildings and ground lights are sharp structure, and the rim is a step;
+      the high-pass fires on all of them.
+    * **The north celestial pole**, a disc of ``pole_radius`` pixels centered on
+      the pole's pixel from ``wcs``. Stars there barely move, so a night median
+      keeps their trails -- Polaris in particular.
+
+    ``time`` selects the horizon-mask epoch (any `~astropy.time.Time`,
+    ``datetime`` or ``date``); passing ``None`` skips the horizon cut.
+    ``horizon_dir`` overrides where those masks are read from -- note this is the
+    *horizon* mask directory, not the ``masks_dir`` (bad-pixel) argument used
+    elsewhere in this module. ``wcs``
+    is the raw-frame alt/az WCS; passing ``None`` skips the pole cut. Setting
+    either radius to 0 disables that exclusion.
+    """
+    ny, nx = shape
+    valid = np.ones((ny, nx), dtype=bool)
+
+    if time is not None:
+        horizon, horizon_date = load_alcor_horizon_mask(time, masks_dir=horizon_dir)
+        if horizon is None:
+            if log:
+                log("no horizon mask found; searching the whole frame")
+        elif horizon.shape != (ny, nx):
+            if log:
+                log(f"horizon mask shape {horizon.shape} does not match "
+                    f"{(ny, nx)}; not applied")
+        else:
+            not_sky = horizon
+            if rim_dilation > 0:
+                not_sky = ndimage.binary_dilation(not_sky, iterations=int(rim_dilation))
+            valid &= ~not_sky
+            if log:
+                log(f"horizon mask {horizon_date} (dilated {rim_dilation} px): "
+                    f"{int(not_sky.sum())} of {ny * nx} pixels are not sky")
+
+    if wcs is not None and pole_radius > 0:
+        # The north celestial pole sits due true north at an altitude equal to
+        # the site latitude; refraction moves it by ~0.2 px, far inside the disc.
+        px, py = wcs.world_to_pixel_values(0.0, float(MMT_LOCATION.lat.deg))
+        px, py = float(px), float(py)
+        if np.isfinite(px) and np.isfinite(py):
+            yy, xx = np.ogrid[:ny, :nx]
+            pole = (xx - px) ** 2 + (yy - py) ** 2 <= float(pole_radius) ** 2
+            valid &= ~pole
+            if log:
+                log(f"excluding a {pole_radius} px disc at the celestial pole "
+                    f"({px:.1f}, {py:.1f})")
+
+    return valid
+
+
+def build_alcor_badpix_mask(median_cube, ksize=5, z_thresh=25.0, valid=None):
     """
     Detect per-channel hot pixels in a night-median stack.
 
@@ -1351,6 +1496,11 @@ def build_alcor_badpix_mask(median_cube, ksize=5, z_thresh=25.0):
         Local-background median-filter kernel (pixels).
     z_thresh : float (default=25.0)
         Robust-sigma threshold for a hot pixel.
+    valid : ndarray of bool, shape ``(ny, nx)``, optional
+        Where a candidate may be accepted, from
+        :func:`alcor_badpix_search_region`. Candidates outside it are dropped.
+        The robust sigma is still measured over the whole frame, which is what
+        we want: it is a read-noise scale, not a property of the search region.
 
     Returns
     -------
@@ -1368,7 +1518,33 @@ def build_alcor_badpix_mask(median_cube, ksize=5, z_thresh=25.0):
         z[c] = (resid - med) / sigma
     hot = z > z_thresh
     keep = hot.sum(axis=0) <= 2
-    return hot & keep[None, :, :]
+    mask = hot & keep[None, :, :]
+    if valid is not None:
+        valid = np.asarray(valid, dtype=bool)
+        if valid.shape != cube.shape[1:]:
+            raise ValueError(f"valid has shape {valid.shape}, expected "
+                             f"{cube.shape[1:]}")
+        mask &= valid[None, :, :]
+    return mask
+
+
+def _median_stack_tiles(cube_mm, selection, shape, tile=50):
+    """
+    Per-pixel median over the selected frames of an ``(n, 3, ny, nx)`` memmap.
+
+    ``selection`` indexes the frame axis: a slice for a contiguous run, or an
+    index array when only some slots hold valid frames. The median is taken in
+    ``tile``-row slabs so peak memory stays a small multiple of one row block
+    rather than the whole stack. Returns ``(3, ny, nx)`` float32.
+    """
+    nch, ny, nx = shape
+    median = np.empty((nch, ny, nx), dtype=np.float32)
+    for c in range(nch):
+        for r0 in range(0, ny, tile):
+            r1 = min(r0 + tile, ny)
+            slab = np.asarray(cube_mm[selection, c, r0:r1, :], dtype=np.float32)
+            median[c, r0:r1, :] = np.median(slab, axis=0)
+    return median
 
 
 def build_alcor_median_stack(dark_files, max_frames=None, scratch_dir=None,
@@ -1418,13 +1594,7 @@ def build_alcor_median_stack(dark_files, max_frames=None, scratch_dir=None,
         if n == 0:
             raise ValueError("no frames matched the reference shape")
 
-        median = np.empty((nch, ny, nx), dtype=np.float32)
-        for c in range(nch):
-            for r0 in range(0, ny, tile):
-                r1 = min(r0 + tile, ny)
-                slab = np.asarray(cube_mm[:n, c, r0:r1, :], dtype=np.float32)
-                median[c, r0:r1, :] = np.median(slab, axis=0)
-        return median
+        return _median_stack_tiles(cube_mm, slice(0, n), (nch, ny, nx), tile=tile)
     finally:
         del cube_mm
         memmap_path.unlink(missing_ok=True)
@@ -1703,6 +1873,90 @@ def lookup_sloan_photometry(star_name, case_sensitive=False):
 
     row = matches[0]
     return {col: _catalog_value_to_python(row[col]) for col in matches.colnames}
+
+
+def alcor_variable_reference_altaz(time, vmag_limit=5.5, min_alt=20.0,
+                                   refraction=True, location=MMT_LOCATION):
+    """
+    Load ``bright_variable_vsx.fits`` and compute Alt/Az at ``time``.
+
+    The variable-star sibling of :func:`alcor_named_reference_altaz`. The
+    calibration catalog excludes variables by construction -- correctly, since
+    they would corrupt the zeropoints -- which left the camera never measuring
+    any of them; Polaris was not merely unmeasured but was being flagged as a
+    cluster of hot pixels. This catalog is the other half: AAVSO VSX entries
+    brighter than V=6.0 at maximum with amplitude >= 0.05 mag, excluding
+    eruptive/cataclysmic types (see ``claude_docs/scripts/build_variable_catalog.py``).
+
+    ``vmag_limit`` filters on ``Vmax``, the brightness at MAXIMUM light -- what
+    decides whether the star is ever measurable. A large-amplitude Mira spends
+    most of its cycle far below the limit, and those non-detections are data.
+    """
+    catpath = files(__package__) / "data" / "bright_variable_vsx.fits"
+    cat = Table.read(str(catpath))
+    cat = cat[cat["Vmag"] <= vmag_limit]
+
+    coords = SkyCoord(cat["_RAJ2000"], cat["_DEJ2000"], unit="deg", frame="icrs")
+    if refraction:
+        frame = AltAz(obstime=time, location=location, pressure=ALCOR_PRESSURE,
+                      temperature=ALCOR_TEMPERATURE, relative_humidity=ALCOR_HUMIDITY,
+                      obswl=ALCOR_OBSWL)
+    else:
+        frame = AltAz(obstime=time, location=location)
+    altaz = coords.transform_to(frame)
+    cat["Alt"] = altaz.alt.deg
+    cat["Az"] = altaz.az.deg
+    cat = cat[cat["Alt"] >= min_alt]
+    return cat
+
+
+def alcor_photometry_reference_altaz(time, vmag_limit=5.5, min_alt=20.0,
+                                     refraction=True, variables=True,
+                                     location=MMT_LOCATION,
+                                     match_radius=20.0):
+    """
+    The combined star list a photometry pass measures, with a ``Variable`` flag.
+
+    Concatenates :func:`alcor_named_reference_altaz` with
+    :func:`alcor_variable_reference_altaz`, dropping variables that are already
+    in the calibration catalog (matched within ``match_radius`` arcsec) so no
+    star is measured twice. A star present in both keeps its calibration-catalog
+    row -- it has real catalog magnitudes, so its ``ext_*`` stays meaningful --
+    and is merely flagged. Returns a table with at least ``NAME``, ``HD``,
+    ``Alt``, ``Az`` and ``Variable``.
+    """
+    named = alcor_named_reference_altaz(
+        time, vmag_limit=vmag_limit, min_alt=min_alt, refraction=refraction,
+        location=location)
+    out = named[[c for c in ("NAME", "HD", "Alt", "Az")
+                 if c in named.colnames]].copy()
+    out["Variable"] = np.zeros(len(out), dtype=bool)
+    if not variables:
+        return out
+
+    var = alcor_variable_reference_altaz(
+        time, vmag_limit=vmag_limit, min_alt=min_alt, refraction=refraction,
+        location=location)
+    can_match = all(c in named.colnames for c in ("_RAJ2000", "_DEJ2000"))
+    if len(var) and len(named) and can_match:
+        vc = SkyCoord(var["_RAJ2000"], var["_DEJ2000"], unit="deg")
+        nc = SkyCoord(named["_RAJ2000"], named["_DEJ2000"], unit="deg")
+        _, sep, _ = vc.match_to_catalog_sky(nc)
+        already = sep.arcsec < match_radius
+        # flag the calibration rows that are known variables
+        _, sep_n, _ = nc.match_to_catalog_sky(vc)
+        out["Variable"] = sep_n.arcsec < match_radius
+        var = var[~already]
+    if len(var) == 0:
+        return out
+
+    add = Table()
+    add["NAME"] = [str(n).strip() for n in var["NAME"]]
+    add["HD"] = np.array(var["HD"], dtype=int)
+    add["Alt"] = np.array(var["Alt"], dtype=float)
+    add["Az"] = np.array(var["Az"], dtype=float)
+    add["Variable"] = np.ones(len(add), dtype=bool)
+    return vstack([out, add], metadata_conflicts="silent")
 
 
 def _alcor_star_labels(cat):
@@ -2094,6 +2348,20 @@ def _catalog_calibration_map():
         bv = _value("B-V")
         vr = _value("V-R")
         out[label] = {"BV": bv, "V": v, "R": v - vr, "B": v + bv}
+
+    # Variables contribute a colour but NO catalog magnitude. That is the whole
+    # point: cal_* is the light curve, while ext_* (= cal - catalog) would
+    # conflate cloud extinction with the star's own variation, so it must stay
+    # nan -- which falls out of subtracting nan. Calibration-catalog entries win
+    # on a label collision, since those stars do have a defensible catalog mag.
+    varpath = files(__package__) / "data" / "bright_variable_vsx.fits"
+    var = Table.read(str(varpath))
+    for label, row in zip(_alcor_star_labels(var), var):
+        if label in out:
+            continue
+        bv = _catalog_value_to_python(row["B-V"])
+        out[label] = {"BV": np.nan if bv is None else float(bv),
+                      "V": np.nan, "R": np.nan, "B": np.nan}
     return out
 
 
@@ -2156,7 +2424,12 @@ def alcor_calibrate_photometry(df, time=None):
     else the most recent epoch. Star names come from a ``name`` column when
     present, else the index. ``B-V`` and the catalog Johnson R/V/B are looked up
     by name (channel->catalog G->V, R->R, B->B); stars absent from the catalog or
-    lacking the needed color get ``nan``. Requires an ``altitude`` column.
+    lacking the needed color get ``nan`` -- except that a colour-flat band (see
+    :data:`ALCOR_COLOR_FLAT_TOL`) falls back to ``B-V = 0`` rather than discard
+    the measurement. Variable stars carry a colour but no catalog magnitude, so
+    they get a real ``cal_*`` -- the light curve -- and ``ext_*`` of ``nan``,
+    since differencing against a catalog magnitude would conflate cloud
+    extinction with the star's own variation. Requires an ``altitude`` column.
     Returns a new DataFrame.
     """
     if "altitude" not in df.columns:
@@ -2177,13 +2450,17 @@ def alcor_calibrate_photometry(df, time=None):
     airmass = _airmass(df["altitude"].to_numpy(dtype=float))
     zp, color = _zeropoint_row_params(df, time)
     for band in ALCOR_ZEROPOINT_BANDS:
+        # For a colour-flat band a missing B-V costs less than the photometric
+        # scatter, so assume zero rather than throw the measurement away.
+        flat = bool(np.all(np.abs(color[band]) <= ALCOR_COLOR_FLAT_TOL))
+        bv_band = np.where(np.isfinite(bv), bv, 0.0) if flat else bv
         for col in (f"mag_{band}", f"mag_{band}_ap", f"mag_{band}_gauss"):
             if col not in df.columns:
                 continue
             suffix = col[len(f"mag_{band}"):]
             instr = df[col].to_numpy(dtype=float)
             cal = (instr - ALCOR_AIRMASS_TERM * airmass
-                   + zp[band] + color[band] * bv)
+                   + zp[band] + color[band] * bv_band)
             cal = np.where(np.isfinite(instr) & (instr > ALCOR_BRIGHT_CUT),
                            cal, np.nan)
             df[f"cal_{band}{suffix}"] = cal
@@ -2194,11 +2471,12 @@ def alcor_calibrate_photometry(df, time=None):
 def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
                           annulus_width=1.0, min_altitude=20.0,
                           vmag_limit=5.5, refraction=True, masks_dir=None,
+                          variables=True,
                           check_plot=False, check_radius=680,
                           sun_alt_max=-12.0, saturation=ALCOR_SATURATION,
                           gaussian=False,
                           mask_threshold=ALCOR_NONLINEAR_THRESHOLD,
-                          both=False):
+                          both=False, frame=None):
     """
     Measure fixed-position aperture photometry for bright named stars.
 
@@ -2238,6 +2516,12 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
     (a structural failure, distinct from a measured zero). Rows sort by
     ``flux_g_ap``. ``both`` takes precedence over ``gaussian``.
 
+    With ``variables`` (the default) the bright-variable catalog is measured
+    alongside the calibration stars and every row carries a ``variable`` flag.
+    Those stars have no single catalog magnitude, so their ``ext_*`` is NaN while
+    ``cal_*`` -- the light curve -- is real. See
+    :func:`alcor_photometry_reference_altaz`.
+
     Every measured magnitude is calibrated to the catalog system via
     :func:`alcor_calibrate_photometry` (using the frame time to resolve the
     zeropoint epoch), adding per-channel ``cal_*`` (calibrated catalog-system
@@ -2246,11 +2530,18 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
     for measurements brighter than ``ALCOR_BRIGHT_CUT`` (CMOS non-linear regime)
     or for stars lacking a catalog color.
 
+    Pass ``frame`` as an already-loaded ``(cube, wcs, mask)`` tuple (the
+    :func:`load_alcor_fits` return) to skip the internal load. The cube must
+    already be bad-pixel-repaired, since that is what the internal load does.
+    This exists so a batch driver that needs the same frame for something else
+    (see :func:`alcor_process_night`) decompresses each file only once; the Sun
+    check still runs from the filename, so a rejected frame is still rejected.
+
     Returns
     -------
     phot : `pandas.DataFrame`
         Rows indexed by star name. Columns are ``altitude``, ``azimuth``,
-        ``xcen``, ``ycen`` and per-channel ``flux_*``, ``mag_*``, ``cal_*``,
+        ``variable``, ``xcen``, ``ycen`` and per-channel ``flux_*``, ``mag_*``, ``cal_*``,
         ``ext_*``, ``background_*``, ``sat_*`` for ``r``, ``g``, ``b`` (suffixed
         ``_ap``/``_gauss`` in ``both`` mode). One row per catalog star above
         ``min_altitude``; non-detections carry ``flux = 0`` / ``mag = NaN``. Rows
@@ -2265,7 +2556,7 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
         raise ValueError("annulus_width must be positive")
     channels = ("r", "g", "b")
     if both:
-        columns = ["altitude", "azimuth", "xcen", "ycen"]
+        columns = ["altitude", "azimuth", "variable", "xcen", "ycen"]
         for channel in channels:
             columns += [f"flux_{channel}_ap", f"mag_{channel}_ap",
                         f"cal_{channel}_ap", f"ext_{channel}_ap",
@@ -2277,7 +2568,7 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
                         f"background_{channel}_gauss", f"sat_{channel}_gauss"]
         sort_key = "flux_g_ap"
     else:
-        columns = ["altitude", "azimuth", "xcen", "ycen", "fwhm"]
+        columns = ["altitude", "azimuth", "variable", "xcen", "ycen", "fwhm"]
         for channel in channels:
             columns += [f"flux_{channel}", f"mag_{channel}",
                         f"cal_{channel}", f"ext_{channel}",
@@ -2299,14 +2590,17 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
         )
         return empty, None
 
-    cube, wcs, _ = load_alcor_fits(filename, badpix="repair",
-                                   masks_dir=masks_dir)
+    if frame is None:
+        cube, wcs, _ = load_alcor_fits(filename, badpix="repair",
+                                       masks_dir=masks_dir)
+    else:
+        cube, wcs = frame[0], frame[1]
     bias = _corner_bias(cube, size=10)
     data = cube.astype(float, copy=False) - bias[:, None, None]
 
-    cat = alcor_named_reference_altaz(
+    cat = alcor_photometry_reference_altaz(
         time, vmag_limit=vmag_limit, min_alt=min_altitude,
-        refraction=refraction,
+        refraction=refraction, variables=variables,
     )
     # all_world2pix with quiet=True returns the best (possibly unconverged)
     # estimate instead of warning: the iterative SIP/radial inverse fails its
@@ -2324,7 +2618,9 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
     lum_frame = data.sum(axis=0) if (gaussian or both) else None
     for i, (x, y) in enumerate(zip(xcen, ycen)):
         base = {"altitude": float(cat["Alt"][i]),
-                "azimuth": float(cat["Az"][i])}
+                "azimuth": float(cat["Az"][i]),
+                "variable": bool(cat["Variable"][i])
+                            if "Variable" in cat.colnames else False}
         if both:
             ap = _aperture_measure(data, cube, x, y, aperture_radius,
                                    annulus_width, saturation, channels)
@@ -2696,6 +2992,7 @@ def save_alcor_keogram_plot(
     bscale=1.7,
     figsize=(12, 6),
     dpi=150,
+    altitude=None,
 ):
     """
     Save a timestamp-labeled plot of an alcor keogram.
@@ -2720,6 +3017,9 @@ def save_alcor_keogram_plot(
         Matplotlib figure size in inches.
     dpi : int (default=150)
         Output figure resolution.
+    altitude : ndarray or None (default=None)
+        Per-row altitude in degrees (:func:`_keogram_row_altitude`). When given,
+        the horizon crossings are marked.
 
     Returns
     -------
@@ -2743,14 +3043,12 @@ def save_alcor_keogram_plot(
         timestamp_edges = _timestamp_edges(xvalues)
 
     if timestamp_edges is None:
-        ax.imshow(im, aspect="auto", origin="upper")
-        ax.set_yticks([0, (keogram.shape[0] - 1) / 2.0, keogram.shape[0] - 1])
+        ax.imshow(im, aspect="auto", origin="lower")
+        _set_keogram_yaxis(ax, keogram.shape[0], altitude=altitude)
     else:
         yedges = np.arange(keogram.shape[0] + 1)
         ax.pcolormesh(timestamp_edges, yedges, im, shading="flat", rasterized=True)
-        ax.invert_yaxis()
-        ax.set_yticks([0, keogram.shape[0] / 2.0, keogram.shape[0]])
-    ax.set_yticklabels(["N", "Z", "S"])
+        _set_keogram_yaxis(ax, keogram.shape[0], edges=True, altitude=altitude)
     ax.set_xlabel("UT")
 
     if times is None:
@@ -2764,6 +3062,65 @@ def save_alcor_keogram_plot(
     fig.savefig(output_file, dpi=dpi)
     plt.close(fig)
     return output_file
+
+
+def _keogram_row_altitude(wcs, nrows, zcol):
+    """
+    Altitude in degrees of each row of a keogram column.
+
+    A keogram column is the raw zenith pixel column, so its rows run from the
+    south end of the sensor, up through the zenith, to the north end -- crossing
+    altitude 0 twice. This is what lets a plotter mark the horizon and scale on
+    sky pixels alone.
+    """
+    rows = np.arange(int(nrows), dtype=float)
+    _, alt = wcs.pixel_to_world_values(np.full(rows.shape, float(zcol)), rows)
+    return np.asarray(alt, dtype=float)
+
+
+def _keogram_horizon_rows(altitude):
+    """
+    Row indices where a keogram column crosses altitude 0, south end first.
+
+    Returns an empty list when ``altitude`` is None or never crosses (a sensor
+    whose column stays above the horizon).
+    """
+    if altitude is None:
+        return []
+    alt = np.asarray(altitude, dtype=float)
+    sky = alt > 0.0
+    if not sky.any():
+        return []
+    edges = np.flatnonzero(np.diff(sky.astype(int)) != 0)
+    # +0.5: the crossing lies between the two rows that straddle it.
+    return [float(e) + 0.5 for e in edges]
+
+
+def _set_keogram_yaxis(ax, nrows, edges=False, altitude=None):
+    """
+    Label a keogram's y axis north-up, with the row index increasing upward.
+
+    A keogram column is the raw zenith pixel column, and :func:`build_alcor_wcs`
+    puts north at *increasing* y, so row 0 is the south end and row ``nrows - 1``
+    is the north end. The axis must therefore run bottom-to-top as S / Z / N:
+    drawing with ``origin="upper"`` or calling ``invert_yaxis`` silently renders
+    the keogram upside down (north at the bottom under an "N" label at the top).
+    Setting the limits explicitly here keeps that decision in one place.
+
+    ``edges`` selects the tick positions for a ``pcolormesh`` drawn on
+    ``nrows + 1`` cell edges rather than an ``imshow`` on ``nrows`` pixel centres.
+
+    When ``altitude`` (per-row degrees, from :func:`_keogram_row_altitude`) is
+    given, the two altitude-0 crossings are drawn as dashed lines. The column
+    runs past the horizon at both ends -- that band is terrain and the light
+    domes above it, and without the marks it is indistinguishable from low sky.
+    """
+    upper = nrows if edges else nrows - 1
+    ax.set_ylim(0, upper)
+    ax.set_yticks([0, upper / 2.0, upper])
+    ax.set_yticklabels(["S", "Z", "N"])
+    for row in _keogram_horizon_rows(altitude):
+        ax.axhline(row, color="0.65", ls="--", lw=0.8, alpha=0.8)
 
 
 def _timestamp_edges(xvalues):
@@ -2785,7 +3142,31 @@ def _timestamp_edges(xvalues):
     return edges
 
 
-def save_alcor_keogram_fits(keogram, timestamps, output_file="keogram.fits", overwrite=False):
+def _row_altitude_hdu(altitude):
+    """
+    ``ROWALT`` extension carrying the per-row altitude of a keogram column.
+
+    Written alongside ``TIMESTAMPS`` so a saved keogram is self-describing: a
+    plotter can mark the horizon and scale on sky alone without re-resolving the
+    calibration. Returns None when there is nothing to write.
+    """
+    if altitude is None:
+        return None
+    altitude = np.asarray(altitude, dtype=np.float32)
+    column = fits.Column(name="ALTITUDE", format="E", unit="deg", array=altitude)
+    return fits.BinTableHDU.from_columns([column], name="ROWALT")
+
+
+def _load_row_altitude(filename):
+    """Per-row altitude from a keogram FITS, or None for a file written without it."""
+    with fits.open(filename) as hdul:
+        if "ROWALT" not in hdul:
+            return None
+        return np.asarray(hdul["ROWALT"].data["ALTITUDE"], dtype=float)
+
+
+def save_alcor_keogram_fits(keogram, timestamps, output_file="keogram.fits",
+                            overwrite=False, altitude=None):
     """
     Save an alcor keogram and its timestamps to a FITS file.
 
@@ -2800,6 +3181,8 @@ def save_alcor_keogram_fits(keogram, timestamps, output_file="keogram.fits", ove
         Output FITS filename.
     overwrite : bool (default=False)
         Passed through to `fits.HDUList.writeto`.
+    altitude : ndarray or None (default=None)
+        Per-row altitude in degrees; written as a ``ROWALT`` extension.
 
     Returns
     -------
@@ -2820,6 +3203,9 @@ def save_alcor_keogram_fits(keogram, timestamps, output_file="keogram.fits", ove
     table = fits.BinTableHDU.from_columns(columns, name="TIMESTAMPS")
 
     hdul = fits.HDUList([primary, table])
+    rowalt = _row_altitude_hdu(altitude)
+    if rowalt is not None:
+        hdul.append(rowalt)
     hdul.writeto(output_file, overwrite=overwrite)
     return output_file
 
@@ -2875,7 +3261,200 @@ def plot_alcor_keogram_fits(filename, output_file=None, **kwargs):
         output_file = stem + ".png"
 
     keogram, timestamps = load_alcor_keogram_fits(filename)
+    kwargs.setdefault("altitude", _load_row_altitude(filename))
     return save_alcor_keogram_plot(keogram, timestamps, output_file, **kwargs)
+
+
+def save_alcor_sb_keogram_fits(keogram, timestamps, output_file="sb_keogram.fits",
+                               overwrite=False, altitude=None):
+    """
+    Save a calibrated sky-brightness keogram and its timestamps to a FITS file.
+
+    The surface-brightness sibling of :func:`save_alcor_keogram_fits`: the data
+    are a single 2-D ``float32`` plane in V mag/arcsec^2 rather than an RGB cube,
+    with NaN where the sky brightness could not be measured (off-frame, saturated,
+    or a frame that failed to process). The ``TIMESTAMPS`` table extension has the
+    same form, so the two products pair column-for-column.
+
+    Parameters
+    ----------
+    keogram : ndarray
+        Sky-brightness keogram of shape (image_height, number_of_images), as
+        built by :func:`alcor_process_night`.
+    timestamps : sequence of str
+        UT timestamps corresponding to the keogram columns.
+    output_file : str or `~pathlib.Path` (default="sb_keogram.fits")
+        Output FITS filename.
+    overwrite : bool (default=False)
+        Passed through to `fits.HDUList.writeto`.
+    altitude : ndarray or None (default=None)
+        Per-row altitude in degrees; written as a ``ROWALT`` extension.
+
+    Returns
+    -------
+    output_file : `~pathlib.Path`
+        Path to the written FITS file.
+    """
+    output_file = Path(output_file)
+    primary = fits.PrimaryHDU(data=np.asarray(keogram, dtype=np.float32))
+    primary.header["CTYPE1"] = "TIME"
+    primary.header["CTYPE2"] = "OFFSET"
+    primary.header["BUNIT"] = ("mag/arcsec2", "observed V surface brightness")
+
+    timestamps = np.asarray(timestamps, dtype=str)
+    width = max(1, max(len(timestamp) for timestamp in timestamps))
+    columns = [fits.Column(name="DATE", format=f"{width}A", array=timestamps)]
+    table = fits.BinTableHDU.from_columns(columns, name="TIMESTAMPS")
+
+    hdul = fits.HDUList([primary, table])
+    rowalt = _row_altitude_hdu(altitude)
+    if rowalt is not None:
+        hdul.append(rowalt)
+    hdul.writeto(output_file, overwrite=overwrite)
+    return output_file
+
+
+def load_alcor_sb_keogram_fits(filename):
+    """
+    Load a sky-brightness keogram FITS file written by
+    :func:`save_alcor_sb_keogram_fits`.
+
+    Returns ``(keogram, timestamps)``: the 2-D V mag/arcsec^2 plane and the
+    ``DATE`` values from the ``TIMESTAMPS`` extension.
+    """
+    with fits.open(filename) as hdul:
+        keogram = np.asarray(hdul[0].data, dtype=float)
+        timestamps = list(hdul["TIMESTAMPS"].data["DATE"])
+
+    return keogram, timestamps
+
+
+def _sb_keogram_limits(im, altitude, vmin, vmax):
+    """
+    Fill in missing colour limits for a sky-brightness keogram.
+
+    Percentiles are taken over pixels ABOVE THE HORIZON when ``altitude`` is
+    known. The column runs a few degrees below the horizon at both ends, and the
+    terrain and light domes there are a couple of magnitudes brighter than sky;
+    including them would compress away the sky contrast that makes the keogram
+    readable, so they saturate the bright end of the colormap instead.
+    """
+    if vmin is not None and vmax is not None:
+        return vmin, vmax
+    scale_from = im
+    if altitude is not None:
+        sky = np.asarray(altitude, dtype=float) > 0.0
+        if sky.any():
+            scale_from = im[sky]
+    finite = scale_from[np.isfinite(scale_from)]
+    if finite.size:
+        low, high = np.percentile(finite, [1.0, 99.0])
+        vmin = low if vmin is None else vmin
+        vmax = high if vmax is None else vmax
+    return vmin, vmax
+
+
+def save_alcor_sb_keogram_plot(keogram, timestamps, output_file, vmin=None,
+                               vmax=None, cmap="cividis_r", figsize=(12, 6),
+                               dpi=150, altitude=None):
+    """
+    Save a timestamp-labeled plot of a calibrated sky-brightness keogram.
+
+    The surface-brightness sibling of :func:`save_alcor_keogram_plot`. The y axis
+    is the same raw zenith column (north at the top, zenith in the middle, south
+    at the bottom), so this plot stacks row-for-row against the raw RGB keogram;
+    the colour axis is observed V mag/arcsec^2 with a colorbar, and unmeasurable
+    pixels are left blank.
+
+    Parameters
+    ----------
+    keogram : ndarray
+        Sky-brightness keogram of shape (image_height, number_of_images).
+    timestamps : sequence of str
+        UT timestamps corresponding to the keogram columns.
+    output_file : str or `~pathlib.Path`
+        Output figure filename. The format is inferred from the extension.
+    vmin, vmax : float or None (default=None)
+        Colour limits in mag/arcsec^2. When None, the 1st and 99th percentiles
+        are used (the range varies a lot with moonlight) -- taken over pixels
+        ABOVE THE HORIZON when ``altitude`` is given. The column runs several
+        degrees below the horizon at both ends, and terrain and the light domes
+        there are a couple of magnitudes brighter than sky; letting them into
+        the percentile clip would compress away the sky contrast that makes the
+        keogram readable. They saturate the bright end instead, which reads
+        correctly as "brighter than the scale".
+    cmap : str (default="cividis_r")
+        Matplotlib colormap; reversed so bright sky reads bright.
+    figsize : tuple (default=(12, 6))
+        Matplotlib figure size in inches.
+    dpi : int (default=150)
+        Output figure resolution.
+    altitude : ndarray or None (default=None)
+        Per-row altitude in degrees (:func:`_keogram_row_altitude`). When given,
+        the horizon crossings are marked and the colour scale is set from sky
+        pixels alone.
+
+    Returns
+    -------
+    output_file : `~pathlib.Path`
+        Path to the written plot.
+    """
+    output_file = Path(output_file)
+    im = np.asarray(keogram, dtype=float)
+
+    vmin, vmax = _sb_keogram_limits(im, altitude, vmin, vmax)
+
+    times = _parse_timestamps(timestamps)
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.set_facecolor("0.15")
+    if times is None:
+        timestamp_edges = None
+    else:
+        timestamp_edges = _timestamp_edges(mdates.date2num(times))
+
+    if timestamp_edges is None:
+        mesh = ax.imshow(im, aspect="auto", origin="lower", cmap=cmap,
+                         vmin=vmin, vmax=vmax, interpolation="nearest")
+        _set_keogram_yaxis(ax, im.shape[0], altitude=altitude)
+        ax.set_xlim(-0.5, im.shape[1] - 0.5)
+    else:
+        yedges = np.arange(im.shape[0] + 1)
+        mesh = ax.pcolormesh(timestamp_edges, yedges, im, shading="flat",
+                             cmap=cmap, vmin=vmin, vmax=vmax, rasterized=True)
+        _set_keogram_yaxis(ax, im.shape[0], edges=True, altitude=altitude)
+        ax.xaxis_date()
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+        fig.autofmt_xdate()
+    ax.set_xlabel("UT")
+
+    cbar = fig.colorbar(mesh, ax=ax, pad=0.02)
+    cbar.set_label("V mag/arcsec$^2$")
+
+    fig.tight_layout()
+    fig.savefig(output_file, dpi=dpi)
+    plt.close(fig)
+    return output_file
+
+
+def plot_alcor_sb_keogram_fits(filename, output_file=None, **kwargs):
+    """
+    Create a sky-brightness keogram plot from a FITS file written by
+    :func:`save_alcor_sb_keogram_fits`. ``output_file`` defaults to the input
+    with its FITS suffix replaced by ``.png``; ``**kwargs`` are forwarded to
+    :func:`save_alcor_sb_keogram_plot`.
+    """
+    filename = Path(filename)
+    if output_file is None:
+        stem = str(filename)
+        for ext in (".fits.gz", ".fits"):
+            if stem.endswith(ext):
+                stem = stem[: -len(ext)]
+                break
+        output_file = stem + ".png"
+
+    keogram, timestamps = load_alcor_sb_keogram_fits(filename)
+    kwargs.setdefault("altitude", _load_row_altitude(filename))
+    return save_alcor_sb_keogram_plot(keogram, timestamps, output_file, **kwargs)
 
 
 def _parse_timestamps(timestamps):
@@ -3032,9 +3611,127 @@ def plot_alcor_fits(filename, outimage=None, outfig=None, radius=680,
     return fig
 
 
+def _alcor_sky_brightness_map(cube, wcs, time, exposure,
+                              saturation=None,
+                              field_radius=ALCOR_FIELD_RADIUS):
+    """
+    Full-frame V mag/arcsec^2 surface-brightness map from an alcor cube.
+
+    Returns ``(mu, alt)``: the green channel calibrated to V magnitudes per
+    square arcsecond -- corner-bias-subtracted, scaled to the
+    :data:`ALCOR_CALIB_EXPTIME` reference exposure via ``exposure`` (counts are
+    linear in exposure), divided by the WCS per-pixel solid angle
+    (:func:`_alcor_pixel_solid_angle`), and offset by the epoch G->V zeropoint
+    with no airmass term -- plus the per-pixel altitude grid in degrees. Pixels
+    the WCS cannot project (off the sky), pixels with raw G at or above
+    ``saturation`` when one is given (clipped/non-linear -- ``None``, the
+    default, keeps them: see :data:`ALCOR_SB_SATURATION` for why blanking them
+    misleads), and pixels farther than ``field_radius``
+    from the optical axis (outside the illuminated image circle -- see
+    :data:`ALCOR_FIELD_RADIUS`; pass None to keep them) are blanked to NaN in
+    ``mu``. Geometric masking (horizon mask / altitude floor) is left to the
+    caller, since callers differ in their default sky cutoff.
+    """
+    g_raw = np.asarray(cube[1], dtype=float)
+    bias = _corner_bias(cube)[1]
+    # Counts scaled to the calibration's reference exposure (counts/20 s).
+    g20 = (g_raw - bias) * (ALCOR_CALIB_EXPTIME / exposure)
+
+    ny, nx = g_raw.shape
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    az, alt = wcs.pixel_to_world_values(xx.astype(float), yy.astype(float))
+    omega = _alcor_pixel_solid_angle(az, alt)
+    zp_g = alcor_zeropoint(time)["g"]["zp"]
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        surf = g20 / omega
+        mu = np.where(surf > 0, -2.5 * np.log10(surf) + zp_g, np.nan)
+
+    blank = ~np.isfinite(mu) | ~np.isfinite(alt)
+    if saturation is not None:
+        blank |= g_raw >= saturation
+    if field_radius is not None:
+        # The optical axis is CRPIX (1-based), which is where build_alcor_wcs
+        # puts (xcen, ycen) -- so the WCS stays the single source of geometry.
+        ax, ay = (float(c) - 1.0 for c in wcs.wcs.crpix[:2])
+        blank |= (xx - ax) ** 2 + (yy - ay) ** 2 > float(field_radius) ** 2
+    mu = np.where(blank, np.nan, mu)
+    return mu, alt
+
+
+def _alcor_best_cone_targets(radius_deg=ALCOR_SB_APERTURE_RADIUS,
+                             min_altitude=ALCOR_SB_BEST_MIN_ALTITUDE):
+    """
+    Candidate cone centres tiling the sky above ``min_altitude``.
+
+    Rings are spaced one cone diameter apart in altitude, starting one radius
+    above the floor so the lowest ring just touches it, and within a ring the
+    azimuth step is widened by ``1/cos(alt)`` so the cones tile at roughly
+    constant spacing on the sphere instead of bunching near the zenith. The
+    zenith itself is included, which makes ``allsky_mv_best`` always at least as
+    dark as ``allsky_mv_zenith``.
+
+    Returns a dict of ``name -> (azimuth, altitude)`` in degrees, the same shape
+    of input :func:`_alcor_cone_indices` takes for the fixed targets.
+    """
+    step = 2.0 * radius_deg
+    targets = {}
+    alt = min_altitude + radius_deg
+    while alt < 90.0:
+        n = max(1, int(round(360.0 * np.cos(np.radians(alt)) / step)))
+        for i in range(n):
+            az = 360.0 * i / n
+            targets[f"best_{alt:.0f}_{az:03.0f}"] = (az, alt)
+        alt += step
+    targets["best_zenith"] = (0.0, 90.0)
+    return targets
+
+
+def _alcor_cone_indices(wcs, shape, targets=None,
+                        radius_deg=ALCOR_SB_APERTURE_RADIUS, exclude=None):
+    """
+    Flat pixel indices of the sampling cones around fixed ``(az, alt)`` targets.
+
+    ``targets`` maps a name to an ``(azimuth, altitude)`` pair in degrees
+    (default :data:`ALCOR_SB_TARGETS`); a pixel belongs to a cone when its
+    great-circle separation from that direction is at most ``radius_deg``.
+    ``exclude`` is an optional ``(ny, nx)`` boolean array of pixels to drop (the
+    horizon/obstruction mask), so terrain cannot drag a low-altitude cone faint.
+
+    The cones depend only on the WCS, so a caller processing a whole night
+    builds them once and reuses them for every frame. Returns a dict mapping
+    each name to a flat ``int64`` index array (possibly empty).
+    """
+    if targets is None:
+        targets = ALCOR_SB_TARGETS
+    ny, nx = shape
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    az, alt = wcs.pixel_to_world_values(xx.astype(float), yy.astype(float))
+
+    az_r = np.radians(az)
+    alt_r = np.radians(alt)
+    sin_alt = np.sin(alt_r)
+    cos_alt = np.cos(alt_r)
+    valid = np.isfinite(alt)
+    if exclude is not None:
+        valid &= ~np.asarray(exclude, dtype=bool)
+
+    cos_radius = np.cos(np.radians(radius_deg))
+    cones = {}
+    for name, (az0, alt0) in targets.items():
+        az0_r = np.radians(az0)
+        alt0_r = np.radians(alt0)
+        with np.errstate(invalid="ignore"):
+            cos_sep = (sin_alt * np.sin(alt0_r)
+                       + cos_alt * np.cos(alt0_r) * np.cos(az_r - az0_r))
+            inside = valid & (cos_sep >= cos_radius)
+        cones[name] = np.flatnonzero(inside)
+    return cones
+
+
 def plot_alcor_sky_brightness(filename, outimage=None, outfig=None,
                               radius=ALCOR_RADIUS, fov_altitude=-2.0,
-                              horizon_mask=False, saturation=ALCOR_SB_SATURATION,
+                              horizon_mask=False, saturation=None,
                               vmin=None, vmax=None, cmap="cividis_r", figsize=12):
     """
     Render an alcor frame as a V-band sky-surface-brightness map.
@@ -3056,7 +3753,8 @@ def plot_alcor_sky_brightness(filename, outimage=None, outfig=None,
     structure. The G band is essentially color-flat (G~=V), so no color term is
     used; the absolute scale inherits the zeropoint's ~0.03 mag epoch stability.
 
-    Masking: pixels with raw G at or above ``saturation`` are clipped/non-linear
+    Masking: with a ``saturation`` given, pixels with raw G at or above it are
+    clipped/non-linear
     and are blanked, as are non-sky pixels -- by default everything below
     ``fov_altitude`` degrees, or, when ``horizon_mask`` is True, the
     obstruction/terrain mask from :func:`load_alcor_horizon_mask` (which already
@@ -3081,7 +3779,7 @@ def plot_alcor_sky_brightness(filename, outimage=None, outfig=None,
         when ``horizon_mask`` is True.
     horizon_mask : bool (default False)
         Use the full horizon/obstruction mask instead of the altitude cutoff.
-    saturation : int (default ALCOR_SB_SATURATION)
+    saturation : int or None (default None)
         Raw-ADU level at/above which G pixels are masked as non-linear.
     vmin, vmax : float, optional
         Colorbar limits in mag/arcsec^2 (default: robust autoscale of the sky).
@@ -3099,29 +3797,19 @@ def plot_alcor_sky_brightness(filename, outimage=None, outfig=None,
     time = _alcor_frame_time(filename)
     exposure = _read_frame_exposure(filename)
 
-    g_raw = np.asarray(cube[1], dtype=float)
-    bias = _corner_bias(cube)[1]
-    # Counts scaled to the calibration's reference exposure (counts/20 s).
-    g20 = (g_raw - bias) * (ALCOR_CALIB_EXPTIME / exposure)
+    mu, alt = _alcor_sky_brightness_map(cube, wcs, time, exposure,
+                                        saturation=saturation)
+    ny, nx = mu.shape
 
-    ny, nx = g_raw.shape
-    yy, xx = np.mgrid[0:ny, 0:nx]
-    az, alt = wcs.pixel_to_world_values(xx.astype(float), yy.astype(float))
-    omega = _alcor_pixel_solid_angle(az, alt)
-    zp_g = alcor_zeropoint(time)["g"]["zp"]
-
-    with np.errstate(divide="ignore", invalid="ignore"):
-        surf = g20 / omega
-        mu = np.where(surf > 0, -2.5 * np.log10(surf) + zp_g, np.nan)
-
-    blank = ~np.isfinite(mu) | ~np.isfinite(alt) | (g_raw >= saturation)
+    # Geometric (non-sky) masking: the full horizon/obstruction mask, or an
+    # altitude floor when not using it (or when the mask is unavailable).
     if horizon_mask:
         hmask, _ = load_alcor_horizon_mask(time)
-        blank |= (np.asarray(hmask, dtype=bool) if hmask is not None
-                  else (alt < fov_altitude))
+        geo_blank = (np.asarray(hmask, dtype=bool) if hmask is not None
+                     else (alt < fov_altitude))
     else:
-        blank |= (alt < fov_altitude)
-    mu = np.where(blank, np.nan, mu)
+        geo_blank = (alt < fov_altitude)
+    mu = np.where(geo_blank, np.nan, mu)
 
     # Sigma-clipped median zenith brightness from the cap above altitude 85 deg.
     zen = mu[np.isfinite(mu) & (alt > 85.0)]
@@ -3181,6 +3869,706 @@ def plot_alcor_sky_brightness(filename, outimage=None, outfig=None,
         plt.savefig(outfig, transparent=True, bbox_inches="tight", pad_inches=0)
 
     return fig
+
+
+def _alcor_sb_fits_header(wcs, time, exposure, saturation, horizon_mask):
+    """
+    FITS header for a calibrated surface-brightness map: the raw-frame alt/az
+    WCS plus the provenance of the calibration chain that produced the values.
+    """
+    zp = alcor_zeropoint(time)
+    header = wcs.to_header(relax=True)
+    header["BUNIT"] = ("mag/arcsec2", "observed V surface brightness")
+    header["ZP_G"] = (zp["g"]["zp"], "G->V zeropoint applied (mag)")
+    header["ZP_EPOCH"] = (zp["epoch"], "ALCOR_ZEROPOINTS epoch used")
+    header["EXPOSURE"] = (exposure, "frame exposure (s)")
+    header["CALIBEXP"] = (ALCOR_CALIB_EXPTIME, "reference exposure for counts (s)")
+    header["SATLEVEL"] = (
+        "none" if saturation is None else saturation,
+        "raw G blanked at/above this ADU" if saturation is not None
+        else "saturated pixels kept, not blanked")
+    header["HORIZMSK"] = (bool(horizon_mask), "horizon/obstruction mask applied")
+    return header
+
+
+def alcor_sky_brightness_fits(filename, output_file=None, horizon_mask=False,
+                              saturation=None, overwrite=False,
+                              **kwargs):
+    """
+    Calibrate an alcor OMEA 8C frame to a V mag/arcsec^2 surface-brightness map
+    and write it as a 2-D FITS image with the raw-frame alt/az WCS attached.
+
+    The green channel is bias-subtracted, exposure-normalised to
+    :data:`ALCOR_CALIB_EXPTIME`, divided by the WCS per-pixel solid angle, and
+    converted with the epoch G->V zeropoint (no airmass term) -- the same
+    calibration as :func:`plot_alcor_sky_brightness`, but written as a
+    full-frame ``float32`` FITS data product in the camera's native orientation
+    so the attached WCS resolves directly (matching :func:`alcor_proc_fits`).
+    Bad pixels are repaired by default (``badpix="repair"``).
+
+    Off-frame pixels, and with a ``saturation`` given the pixels with raw G at or
+    above it, are blanked
+    to NaN. With ``horizon_mask=True`` the not-sky region from
+    :func:`load_alcor_horizon_mask` is additionally blanked; otherwise no
+    altitude floor is applied (every on-sky pixel keeps its calibrated value).
+
+    Parameters
+    ----------
+    filename : str or `~pathlib.Path`
+        Input alcor FITS frame (gz/bz2 allowed).
+    output_file : str or `~pathlib.Path` or None (default=None)
+        Output path. If None, derived from `filename` by replacing the first
+        `.fits` extension with `_sb.fits`.
+    horizon_mask : bool (default=False)
+        Additionally blank the full horizon/obstruction mask.
+    saturation : int or None (default None)
+        Raw-ADU level at/above which G pixels are blanked as non-linear.
+    overwrite : bool (default=False)
+        Passed through to `fits.PrimaryHDU.writeto`.
+    **kwargs
+        Forwarded to `load_alcor_fits` (``wcs``, ``masks_dir``, ...). ``badpix``
+        defaults to ``"repair"`` here but may be overridden.
+
+    Returns
+    -------
+    output_file : `~pathlib.Path`
+        Path to the written FITS file.
+    """
+    kwargs.setdefault("badpix", "repair")
+    cube, wcs, _ = load_alcor_fits(filename, **kwargs)
+    time = _alcor_frame_time(filename)
+    exposure = _read_frame_exposure(filename)
+
+    mu, _ = _alcor_sky_brightness_map(cube, wcs, time, exposure,
+                                      saturation=saturation)
+    if horizon_mask:
+        hmask, _ = load_alcor_horizon_mask(time)
+        if hmask is not None:
+            mu = np.where(np.asarray(hmask, dtype=bool), np.nan, mu)
+
+    if output_file is None:
+        stem = str(filename)
+        for ext in (".fits.bz2", ".fits.gz", ".fits"):
+            if stem.endswith(ext):
+                stem = stem[: -len(ext)]
+                break
+        output_file = stem + "_sb.fits"
+    output_file = Path(output_file)
+
+    header = _alcor_sb_fits_header(wcs, time, exposure, saturation, horizon_mask)
+    hdu = fits.PrimaryHDU(data=mu.astype(np.float32), header=header)
+    hdu.writeto(output_file, overwrite=overwrite)
+    return output_file
+
+
+def _alcor_frame_stem(filename):
+    """Path string of a frame with its (possibly compressed) FITS suffix removed."""
+    stem = str(filename)
+    for ext in (".fits.bz2", ".fits.gz", ".fits"):
+        if stem.endswith(ext):
+            return stem[: -len(ext)]
+    return stem
+
+
+def _cone_median(mu, indices):
+    """Median of a flattened surface-brightness map over one cone's pixels."""
+    if indices.size == 0:
+        return float("nan")
+    values = mu.reshape(-1)[indices]
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        return float("nan")
+    return float(np.median(values))
+
+
+# Per-worker geometry, installed once by _init_night_worker: the sampling-cone
+# pixel indices and the horizon mask both depend only on the night's WCS, so they
+# are built once in the parent instead of per frame.
+_NIGHT_CONES = None
+_NIGHT_HORIZON = None
+_NIGHT_BEST_CONES = None
+_NIGHT_BEST_TARGETS = None
+
+
+def _init_night_worker(cones, horizon, best_cones=None, best_targets=None):
+    global _NIGHT_CONES, _NIGHT_HORIZON, _NIGHT_BEST_CONES, _NIGHT_BEST_TARGETS
+    _NIGHT_CONES = cones
+    _NIGHT_HORIZON = horizon
+    _NIGHT_BEST_CONES = best_cones or {}
+    _NIGHT_BEST_TARGETS = best_targets or {}
+
+
+# Summary columns derived from the floating darkest-cone search, appended after
+# the fixed ALCOR_SB_TARGETS columns.
+ALCOR_SB_BEST_COLUMNS = ("allsky_mv_best", "best_az", "best_alt")
+
+
+def _darkest_cone(mu):
+    """
+    Darkest 5 deg cone above ALCOR_SB_BEST_MIN_ALTITUDE, as
+    ``(brightness, az, alt)``.
+
+    The zenith is contaminated whenever the Milky Way transits it, so the
+    darkest patch of sky is what actually measures how dark the site got. This
+    reports the same statistic as the fixed cones -- a median inside a 5 deg
+    aperture -- at whichever candidate position is faintest, rather than the
+    single darkest pixel, which would just track the noise floor (stars only
+    push pixels brighter, so the extreme dark tail is read noise).
+    """
+    best = best_az = best_alt = float("nan")
+    for name, idx in _NIGHT_BEST_CONES.items():
+        value = _cone_median(mu, idx)
+        if np.isfinite(value) and (not np.isfinite(best) or value > best):
+            best = value
+            best_az, best_alt = _NIGHT_BEST_TARGETS[name]
+    return best, best_az, best_alt
+
+
+def _process_night_frame(task):
+    """
+    Process one night frame: photometry, sky brightness, and stack slot.
+
+    The frame is decompressed exactly once. The raw cube goes to the median-stack
+    memmap slot (bad-pixel repair would erase the very pixels the stack exists to
+    track), and the repaired cube feeds star photometry, the surface-brightness
+    map, and the raw RGB keogram column. Returns
+    ``(index, values, column, rgb_column, exposure, stacked, error)``; on failure
+    the values and columns are NaN and ``error`` is the message, so one bad frame
+    does not abort the night.
+
+    Star photometry is skipped when ``phot_out`` already exists and is non-empty
+    (something measured this frame already -- eventually the real-time ingest),
+    unless ``reprocess`` is set. The frame is still read, because the
+    surface-brightness map and the keogram columns need its pixels and the
+    per-frame CSV does not carry them.
+    """
+    index, filename, opts = task
+    filename = Path(filename)
+    zcol = opts["zcol"]
+    ny = opts["shape"][1]
+    nan_values = {name: float("nan") for name in _NIGHT_CONES}
+    nan_values.update({name: float("nan") for name in ALCOR_SB_BEST_COLUMNS})
+    nan_column = np.full(ny, np.nan, dtype=np.float32)
+    nan_rgb = np.full((ny, 3), np.nan, dtype=np.float32) if opts["rgb_column"] else None
+
+    try:
+        cube_raw, wcs, mask = load_alcor_fits(filename, badpix=None,
+                                              masks_dir=opts["masks_dir"])
+
+        stacked = False
+        stack = opts["stack"]
+        if stack is not None and cube_raw.shape == tuple(opts["shape"]):
+            cube_mm = np.memmap(stack["path"], dtype=np.uint16, mode="r+",
+                                shape=tuple(stack["shape"]))
+            cube_mm[index] = np.clip(cube_raw, 0, 65535).astype(np.uint16)
+            cube_mm.flush()
+            del cube_mm
+            stacked = True
+
+        cube = _apply_badpix_repair(cube_raw, mask) if mask is not None else cube_raw
+
+        if opts["phot_out"] is not None and not _photometry_is_done(
+                opts["phot_out"], opts["reprocess"]):
+            alcor_star_photometry(filename, output_file=opts["phot_out"],
+                                  frame=(cube, wcs, mask), **opts["phot_kwargs"])
+
+        time = _alcor_frame_time(filename)
+        exposure = _read_frame_exposure(filename)
+        mu_full, _ = _alcor_sky_brightness_map(cube, wcs, time, exposure,
+                                               saturation=opts["sb_saturation"])
+        mu = (np.where(_NIGHT_HORIZON, np.nan, mu_full)
+              if _NIGHT_HORIZON is not None else mu_full)
+
+        if opts["sb_out"] is not None:
+            header = _alcor_sb_fits_header(wcs, time, exposure,
+                                           opts["sb_saturation"],
+                                           _NIGHT_HORIZON is not None)
+            fits.PrimaryHDU(data=mu.astype(np.float32), header=header).writeto(
+                opts["sb_out"], overwrite=opts["overwrite"])
+
+        values = {name: _cone_median(mu, idx) for name, idx in _NIGHT_CONES.items()}
+        best, best_az, best_alt = _darkest_cone(mu)
+        values["allsky_mv_best"] = best
+        values["best_az"] = best_az
+        values["best_alt"] = best_alt
+        # The keogram column comes from the UNMASKED map: the whole column is
+        # inside the illuminated field (its far end is ~711 px from the zenith
+        # against a horizon_radius of 747), so it runs a few degrees BELOW the
+        # horizon at both ends -- which is exactly where the light domes are, and
+        # the point of a calibrated keogram is to show where the light is coming
+        # from. The cone medians above are unaffected: _alcor_cone_indices built
+        # their index sets with exclude=horizon, so terrain cannot reach them.
+        column = mu_full[:, zcol].astype(np.float32)
+        # The RGB keogram column is free here: same cube, same zenith column.
+        rgb_column = (cube[:, :, zcol].T.astype(np.float32)
+                      if opts["rgb_column"] else None)
+        return index, values, column, rgb_column, exposure, stacked, None
+    except Exception as exc:                                   # noqa: BLE001
+        return index, nan_values, nan_column, nan_rgb, float("nan"), False, f"{exc}"
+
+
+def _photometry_is_done(phot_out, reprocess):
+    """True when ``phot_out`` already holds photometry we should not redo."""
+    if reprocess:
+        return False
+    try:
+        return Path(phot_out).stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _day_keogram_column(task):
+    """
+    Raw RGB zenith column of one frame, for the daylight half of a day keogram.
+
+    Loads once and takes the night's fixed ``zcol``, so the day keogram and the
+    calibrated sky-brightness keogram sample the identical pixel column.
+    """
+    index, filename, zcol, kwargs = task
+    try:
+        cube, _, _ = load_alcor_fits(filename, **kwargs)
+        return index, cube[:, :, zcol].T.astype(np.float32), None
+    except Exception as exc:                                   # noqa: BLE001
+        return index, None, f"{exc}"
+
+
+def _build_day_keogram(frames, night_files, night_times, night_rgb_columns,
+                       zcol, max_frames, masks_dir, workers, errors, log):
+    """
+    Full-day RGB keogram from a day directory, reusing the night's columns.
+
+    A day directory spans local noon to the following morning, so it holds the
+    night frames the main pass already loaded plus the daylight remainder. The
+    night columns come back free from :func:`_process_night_frame`; only the
+    remaining frames need a second, column-only pass. Both halves are merged in
+    time order, so the result is directly comparable to the sky-brightness
+    keogram, which samples the same ``zcol``.
+
+    Timestamps come from :func:`_alcor_frame_time` (filename first, DATE header
+    fallback) rather than the raw DATE header string that :func:`alcor_keogram`
+    stores, so both keograms of a run share one time source.
+
+    Returns ``(keogram, timestamps)`` with the keogram shaped
+    ``(ny, nframes, 3)``.
+    """
+    night_set = set(night_files)
+    extra = [f for f in frames if f not in night_set]
+    if max_frames is not None and len(extra) > max_frames:
+        stride = len(extra) // max_frames
+        extra = extra[::stride][:max_frames]
+    log(f"day keogram: {len(night_files)} night columns reused, "
+        f"{len(extra)} daylight frames to load")
+
+    extra_columns = [None] * len(extra)
+    tasks = [(index, filename, zcol, {"masks_dir": masks_dir})
+             for index, filename in enumerate(extra)]
+
+    def _store(result):
+        index, column, error = result
+        extra_columns[index] = column
+        if error is not None:
+            errors.append((extra[index].name, error))
+            log(f"{extra[index].name}: {error}")
+
+    if tasks:
+        if workers == 1:
+            for task in tasks:
+                _store(_day_keogram_column(task))
+        else:
+            with ProcessPoolExecutor(max_workers=workers) as executor:
+                futures = [executor.submit(_day_keogram_column, task)
+                           for task in tasks]
+                for future in as_completed(futures):
+                    _store(future.result())
+
+    entries = [(t, column) for t, column
+               in zip(night_times, night_rgb_columns) if column is not None]
+    ny = entries[0][1].shape[0] if entries else None
+    for filename, column in zip(extra, extra_columns):
+        if column is None:                       # failed load, keep the column
+            if ny is None:
+                continue
+            column = np.full((ny, 3), np.nan, dtype=np.float32)
+        entries.append((_alcor_frame_time(filename), column))
+
+    entries.sort(key=lambda entry: entry[0].jd)
+    keogram = np.stack([column for _, column in entries], axis=1)
+    timestamps = [t.isot for t, _ in entries]
+    return keogram, timestamps
+
+def alcor_process_night(night_dir, out_dir=None, pattern="*.fits.bz2",
+                        sun_alt_max=-12.0, targets=None,
+                        sb_aperture_radius=ALCOR_SB_APERTURE_RADIUS,
+                        best_min_altitude=ALCOR_SB_BEST_MIN_ALTITUDE,
+                        horizon_mask=True, sb_saturation=None,
+                        write_sb_fits=False, median_stack=False,
+                        day_keogram=False, reprocess=False,
+                        max_frames=None, scratch_dir=None, masks_dir=None,
+                        workers=None, overwrite=False, log=None, **phot_kwargs):
+    """
+    Process one archived night of alcor OMEA 8C frames end to end.
+
+    Every frame with the Sun below ``sun_alt_max`` (there is no Moon cut -- the
+    Moon's effect on sky brightness is the signal here) is decompressed once and
+    turned into three things: fixed-position star photometry
+    (:func:`alcor_star_photometry`), a calibrated V mag/arcsec^2 surface-brightness
+    map (:func:`_alcor_sky_brightness_map`), and, optionally, a slot in the
+    night's raw median stack.
+
+    From the surface-brightness maps the night summary is built: for each entry
+    in ``targets`` the median brightness inside a ``sb_aperture_radius``-degree
+    cone about a fixed ``(azimuth, altitude)``, so the same patch of sky is
+    reported for every frame of every night. The default
+    :data:`ALCOR_SB_TARGETS` are the zenith and the Tucson and Nogales light
+    domes. The zenith column of every map is also stacked into a calibrated
+    nighttime keogram -- the same raw column :func:`alcor_keogram` uses, so the
+    calibrated and RGB keograms stack row for row.
+
+    Parameters
+    ----------
+    night_dir : str or `~pathlib.Path`
+        Directory holding one night's frames.
+    out_dir : str or `~pathlib.Path` or None (default=None)
+        Where every product is written. Defaults to ``night_dir``; pass an
+        explicit directory when the archive is read-only or on slow media.
+    pattern : str (default="*.fits.bz2")
+        Glob pattern selecting frames within `night_dir`.
+    sun_alt_max : float (default=-12.0)
+        Night is the Sun below this altitude in degrees.
+    targets : dict or None (default=None)
+        Maps a summary column name to an ``(azimuth, altitude)`` pair in
+        degrees. None uses :data:`ALCOR_SB_TARGETS`.
+    sb_aperture_radius : float (default ALCOR_SB_APERTURE_RADIUS)
+        Angular radius of each sampling cone in degrees.
+    best_min_altitude : float (default ALCOR_SB_BEST_MIN_ALTITUDE)
+        Altitude floor for the ``allsky_mv_best`` darkest-cone search.
+    horizon_mask : bool (default=True)
+        Blank not-sky pixels (:func:`load_alcor_horizon_mask`) in the maps, the
+        cones, and the keogram, so terrain cannot drag a low-altitude cone faint.
+    sb_saturation : int (default ALCOR_SB_SATURATION)
+        Raw-ADU level at/above which G pixels are blanked as non-linear.
+    write_sb_fits : bool (default=False)
+        Also keep each frame's full surface-brightness map as ``<frame>_sb.fits``.
+        Off by default: the maps are several MB each and the summary and keogram
+        already carry what they are usually wanted for.
+    median_stack : bool (default=False)
+        Also build the per-channel median of the night's *raw* frames and write
+        ``<night>_median.fits``, stamped with the per-channel hot-pixel counts
+        from :func:`build_alcor_badpix_mask` so bad-pixel growth can be trended.
+        Off by default because it needs scratch space for the whole night
+        (~12 MB per frame).
+    day_keogram : bool (default=False)
+        Also build the full-day raw RGB keogram (``<night>_keogram.fits`` /
+        ``.png``). A day directory spans local noon to the following morning, so
+        this covers daylight too; the night frames' columns are free from the
+        main pass and only the daylight remainder needs a second, column-only
+        read. Off by default so a photometry run never touches daylight frames.
+    reprocess : bool (default=False)
+        Re-measure star photometry even where ``<frame>_phot.csv`` already
+        exists. By default an existing non-empty CSV is left alone and reused --
+        the frame is still read, because the surface-brightness map and the
+        keogram columns need its pixels. Pass this after changing photometry
+        options, since a CSV written in another mode is otherwise reused as-is.
+    max_frames : int or None (default=None)
+        Strided-subsample the night to at most this many frames (and, for the day
+        keogram, the daylight remainder to at most this many as well).
+    scratch_dir : str or None (default=None)
+        Directory for the median-stack memmap (default: the system temp dir).
+    masks_dir : str or None (default=None)
+        Override the bad-pixel masks directory.
+    workers : int or None (default=None)
+        Worker processes for the per-frame pass. 1 runs serially; None uses one
+        per core.
+    overwrite : bool (default=False)
+        Overwrite existing output files.
+    log : callable or None (default=None)
+        Called with progress messages. None is silent.
+    **phot_kwargs
+        Forwarded to :func:`alcor_star_photometry` (``aperture_radius``,
+        ``annulus_width``, ``min_altitude``, ``vmag_limit``, ``gaussian``,
+        ``both``, ...). Its ``sun_alt_max`` is pinned to this function's, so it
+        never rejects a frame the night selection accepted.
+
+    Returns
+    -------
+    dict
+        ``summary`` (the `~pandas.DataFrame` written to ``sky_brightness.csv``),
+        ``keogram`` (the ``(ny, nframes)`` float32 sky-brightness array),
+        ``timestamps``, ``day_keogram`` (the ``(ny, nframes, 3)`` RGB array, or
+        None), ``files`` (the night frames used, in column order), ``errors`` (a
+        list of ``(filename, message)`` for frames that failed), and the paths
+        written: ``summary_file``, ``keogram_file``, ``keogram_plot``,
+        ``day_keogram_file``, ``day_keogram_plot``, ``photometry_file``,
+        ``median_file``.
+
+    Raises
+    ------
+    FileNotFoundError
+        If `pattern` matches nothing in `night_dir`.
+    ValueError
+        If no frame in `night_dir` has the Sun below `sun_alt_max`.
+    """
+    def _log(message):
+        if log is not None:
+            log(message)
+
+    night_dir = Path(night_dir)
+    night_name = night_dir.resolve().name
+    out_dir = night_dir if out_dir is None else Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if targets is None:
+        targets = ALCOR_SB_TARGETS
+
+    frames = sorted(night_dir.glob(pattern))
+    if not frames:
+        raise FileNotFoundError(f"No files matching {pattern!r} found in {night_dir}")
+    # No Moon cut: moonlit sky brightness is exactly what this measures.
+    files_ = select_dark_frames(frames, sun_alt_max=sun_alt_max,
+                                moon_alt_max=90.0, log=None)
+    if not files_:
+        raise ValueError(f"No frames in {night_dir} have the Sun below "
+                         f"{sun_alt_max:g} deg")
+    if max_frames is not None and len(files_) > max_frames:
+        stride = len(files_) // max_frames
+        files_ = files_[::stride][:max_frames]
+    nframes = len(files_)
+    _log(f"{nframes} of {len(frames)} frames are night "
+         f"(Sun below {sun_alt_max:g} deg)")
+
+    # Ephemeris for the whole night in one vectorised pass.
+    frame_times = [_alcor_frame_time(f) for f in files_]
+    if any(t is None for t in frame_times):
+        missing = [f.name for f, t in zip(files_, frame_times) if t is None]
+        raise ValueError(f"could not determine a frame time for {missing}")
+    times = Time(frame_times)
+    # Keogram columns follow file order and summary rows follow time order, so
+    # put the frames in time order once and keep the two products aligned.
+    order = np.argsort(times.jd)
+    files_ = [files_[i] for i in order]
+    times = times[order]
+
+    altaz = AltAz(obstime=times, location=MMT_LOCATION)
+    sun_alt = get_sun(times).transform_to(altaz).alt.deg
+    moon = get_body("moon", times, MMT_LOCATION).transform_to(altaz)
+
+    # The geometry is fixed for the night, so resolve it once from the first frame.
+    header0 = fits.getheader(files_[0])
+    shape = (int(header0["NAXIS3"]), int(header0["NAXIS2"]), int(header0["NAXIS1"]))
+    cal = _alcor_frame_calibration(files_[0])
+    wcs = build_alcor_wcs(xcen=cal["xcen"], ycen=cal["ycen"],
+                          rotation=cal["rotation"],
+                          radial_coeffs=cal["radial_coeffs"],
+                          horizon_radius=cal["horizon_radius"],
+                          tangential_coeffs=cal["tangential_coeffs"],
+                          axis_tilt=cal["axis_tilt"])
+
+    horizon = None
+    if horizon_mask:
+        horizon, horizon_date = load_alcor_horizon_mask(times[0])
+        if horizon is not None and horizon.shape != shape[1:]:
+            _log(f"horizon mask shape {horizon.shape} does not match "
+                 f"{shape[1:]}; not applied")
+            horizon = None
+        elif horizon is None:
+            _log("no horizon mask found; not applied")
+        else:
+            _log(f"using horizon mask for {horizon_date}")
+
+    cones = _alcor_cone_indices(wcs, shape[1:], targets=targets,
+                                radius_deg=sb_aperture_radius, exclude=horizon)
+    for name, idx in cones.items():
+        _log(f"{name}: {idx.size} pixels within {sb_aperture_radius:g} deg "
+             f"of az={targets[name][0]:g}, alt={targets[name][1]:g}")
+
+    # Floating darkest-cone search: candidates tiling the sky above the floor,
+    # built once for the night like the fixed cones. Drop any the horizon mask or
+    # the frame edge leaves empty so the search never sees an all-NaN cone.
+    best_targets = _alcor_best_cone_targets(radius_deg=sb_aperture_radius,
+                                            min_altitude=best_min_altitude)
+    best_cones = _alcor_cone_indices(wcs, shape[1:], targets=best_targets,
+                                     radius_deg=sb_aperture_radius,
+                                     exclude=horizon)
+    best_cones = {name: idx for name, idx in best_cones.items() if idx.size}
+    best_targets = {name: best_targets[name] for name in best_cones}
+    _log(f"allsky_mv_best: darkest of {len(best_cones)} cones above "
+         f"alt {best_min_altitude:g} deg")
+    zx, _ = wcs.world_to_pixel_values(0.0, 90.0)
+    zcol = int(np.clip(round(float(zx)), 0, shape[2] - 1))
+
+    memmap_path = None
+    stack = None
+    try:
+        if median_stack:
+            tmp = tempfile.NamedTemporaryFile(
+                prefix="alcor_night_", suffix=".dat",
+                dir=scratch_dir or tempfile.gettempdir(), delete=False)
+            tmp.close()
+            memmap_path = Path(tmp.name)
+            stack_shape = (nframes,) + shape
+            cube_mm = np.memmap(memmap_path, dtype=np.uint16, mode="w+",
+                                shape=stack_shape)
+            del cube_mm
+            stack = {"path": str(memmap_path), "shape": stack_shape}
+            _log(f"median stack scratch: {memmap_path} "
+                 f"({np.prod(stack_shape, dtype=float) * 2 / 1e9:.1f} GB)")
+
+        phot_kwargs = dict(phot_kwargs)
+        phot_kwargs["sun_alt_max"] = sun_alt_max
+        phot_kwargs["masks_dir"] = masks_dir
+        tasks = []
+        for index, filename in enumerate(files_):
+            stem = Path(_alcor_frame_stem(filename)).name
+            tasks.append((index, filename, {
+                "zcol": zcol,
+                "shape": shape,
+                "masks_dir": masks_dir,
+                "phot_out": out_dir / f"{stem}_phot.csv",
+                "sb_out": (out_dir / f"{stem}_sb.fits") if write_sb_fits else None,
+                "sb_saturation": sb_saturation,
+                "rgb_column": day_keogram,
+                "reprocess": reprocess,
+                "overwrite": overwrite,
+                "phot_kwargs": phot_kwargs,
+                "stack": stack,
+            }))
+
+        values = [None] * nframes
+        columns = [None] * nframes
+        rgb_columns = [None] * nframes
+        exposures = np.full(nframes, np.nan)
+        stacked = np.zeros(nframes, dtype=bool)
+        errors = []
+
+        def _collect(result):
+            index, vals, column, rgb_column, exposure, ok, error = result
+            values[index] = vals
+            columns[index] = column
+            rgb_columns[index] = rgb_column
+            exposures[index] = exposure
+            stacked[index] = ok
+            if error is not None:
+                errors.append((files_[index].name, error))
+                _log(f"{files_[index].name}: {error}")
+
+        if workers == 1:
+            _init_night_worker(cones, horizon, best_cones, best_targets)
+            for done, task in enumerate(tasks, start=1):
+                _collect(_process_night_frame(task))
+                _log(f"[{done}/{nframes}] {files_[task[0]].name}")
+        else:
+            with ProcessPoolExecutor(max_workers=workers,
+                                     initializer=_init_night_worker,
+                                     initargs=(cones, horizon, best_cones,
+                                               best_targets)) as executor:
+                futures = [executor.submit(_process_night_frame, task)
+                           for task in tasks]
+                for done, future in enumerate(as_completed(futures), start=1):
+                    result = future.result()
+                    _collect(result)
+                    _log(f"[{done}/{nframes}] {files_[result[0]].name}")
+
+        summary = pd.DataFrame({
+            "filename": [f.name for f in files_],
+            "OBSTIME": pd.to_datetime(times.isot),
+            "exposure": exposures,
+            "sun_alt": sun_alt,
+            "moon_alt": moon.alt.deg,
+            "moon_az": moon.az.deg,
+        })
+        for name in list(targets) + list(ALCOR_SB_BEST_COLUMNS):
+            summary[name] = [vals[name] for vals in values]
+        summary = summary.sort_values("OBSTIME", ignore_index=True)
+        summary_file = out_dir / "sky_brightness.csv"
+        summary.to_csv(summary_file, index=False)
+        _log(f"wrote {summary_file}")
+
+        keogram = np.stack(columns, axis=1)
+        timestamps = list(times.isot)
+        # Both keograms are the same raw column, so one altitude array serves.
+        row_altitude = _keogram_row_altitude(wcs, shape[1], zcol)
+        keogram_file = out_dir / f"{night_name}_sb_keogram.fits"
+        save_alcor_sb_keogram_fits(keogram, timestamps, keogram_file,
+                                   overwrite=True, altitude=row_altitude)
+        keogram_plot = out_dir / f"{night_name}_sb_keogram.png"
+        save_alcor_sb_keogram_plot(keogram, timestamps, keogram_plot,
+                                   altitude=row_altitude)
+        _log(f"wrote {keogram_file} and {keogram_plot}")
+
+        day_keogram_array = None
+        day_keogram_file = None
+        day_keogram_plot = None
+        if day_keogram:
+            day_keogram_array, day_times = _build_day_keogram(
+                frames, files_, times, rgb_columns, zcol, max_frames,
+                masks_dir, workers, errors, _log)
+            day_keogram_file = out_dir / f"{night_name}_keogram.fits"
+            save_alcor_keogram_fits(day_keogram_array, day_times,
+                                    day_keogram_file, overwrite=True,
+                                    altitude=row_altitude)
+            day_keogram_plot = out_dir / f"{night_name}_keogram.png"
+            save_alcor_keogram_plot(day_keogram_array, day_times,
+                                    day_keogram_plot, altitude=row_altitude)
+            _log(f"wrote {day_keogram_file} and {day_keogram_plot}")
+
+        photometry_file = None
+        try:
+            phot = collect_alcor_photometry([t[2]["phot_out"] for t in tasks
+                                             if t[2]["phot_out"].exists()])
+        except ValueError as exc:
+            _log(f"no combined photometry written: {exc}")
+        else:
+            photometry_file = out_dir / f"{night_name}_phot.csv"
+            phot.to_csv(photometry_file, index=False)
+            _log(f"wrote {photometry_file}")
+
+        median_file = None
+        if median_stack:
+            ok = np.flatnonzero(stacked)
+            if ok.size == 0:
+                _log("no frames stacked; no median written")
+            else:
+                cube_mm = np.memmap(memmap_path, dtype=np.uint16, mode="r",
+                                    shape=stack["shape"])
+                selection = (slice(0, nframes) if ok.size == nframes
+                             else ok)
+                median = _median_stack_tiles(cube_mm, selection, shape)
+                del cube_mm
+                median_file = out_dir / f"{night_name}_median.fits"
+                mask = build_alcor_badpix_mask(
+                    median,
+                    valid=alcor_badpix_search_region(
+                        shape[1:], time=times[0], wcs=wcs))
+                mheader = wcs.to_header(relax=True)
+                mheader["BUNIT"] = ("adu", "raw counts, per-channel median")
+                mheader["NSTACK"] = (int(ok.size), "frames in the median")
+                mheader["SUNALT"] = (sun_alt_max, "night definition (deg)")
+                for c, channel in enumerate("RGB"):
+                    mheader[f"NBAD{channel}"] = (
+                        int(mask[c].sum()), f"{channel} hot pixels in this median")
+                fits.PrimaryHDU(data=median, header=mheader).writeto(
+                    median_file, overwrite=True)
+                _log(f"wrote {median_file} "
+                     f"(hot pixels R/G/B: {mask[0].sum()}/{mask[1].sum()}/"
+                     f"{mask[2].sum()})")
+    finally:
+        if memmap_path is not None:
+            memmap_path.unlink(missing_ok=True)
+
+    return {
+        "summary": summary,
+        "summary_file": summary_file,
+        "keogram": keogram,
+        "keogram_file": keogram_file,
+        "keogram_plot": keogram_plot,
+        "timestamps": timestamps,
+        "day_keogram": day_keogram_array,
+        "day_keogram_file": day_keogram_file,
+        "day_keogram_plot": day_keogram_plot,
+        "photometry_file": photometry_file,
+        "median_file": median_file,
+        "files": files_,
+        "errors": errors,
+    }
 
 
 def save_alcor_photometry_check_plot(filename, phot, output_file,
@@ -3310,12 +4698,24 @@ def alcor_keogram_cli():
     if fits_output is None:
         fits_output = f"{input_dir.name}_keogram.fits"
 
-    keogram, timestamps, _ = alcor_keogram(
+    keogram, timestamps, used = alcor_keogram(
         input_dir,
         pattern=args.pattern,
         workers=args.workers,
         progress=not args.no_progress,
     )
+    row_altitude = None
+    if used:
+        cal = _alcor_frame_calibration(used[0])
+        wcs = build_alcor_wcs(xcen=cal["xcen"], ycen=cal["ycen"],
+                              rotation=cal["rotation"],
+                              radial_coeffs=cal["radial_coeffs"],
+                              horizon_radius=cal["horizon_radius"],
+                              tangential_coeffs=cal["tangential_coeffs"],
+                              axis_tilt=cal["axis_tilt"])
+        zx, _ = wcs.world_to_pixel_values(0.0, 90.0)
+        row_altitude = _keogram_row_altitude(
+            wcs, keogram.shape[0], int(round(float(zx))))
     output_file = save_alcor_keogram_plot(
         keogram,
         timestamps,
@@ -3326,12 +4726,14 @@ def alcor_keogram_cli():
         bscale=args.bscale,
         figsize=tuple(args.figsize),
         dpi=args.dpi,
+        altitude=row_altitude,
     )
     fits_output = save_alcor_keogram_fits(
         keogram,
         timestamps,
         fits_output,
         overwrite=True,
+        altitude=row_altitude,
     )
 
     if args.timestamps_output is not None:
@@ -3449,8 +4851,8 @@ def plot_alcor_sky_brightness_cli():
                         help="Mask pixels below this altitude (deg). Ignored with --horizon-mask.")
     parser.add_argument("--horizon-mask", action="store_true",
                         help="Mask non-sky with the full horizon/obstruction mask instead of the altitude cutoff.")
-    parser.add_argument("--saturation", type=int, default=ALCOR_SB_SATURATION,
-                        help="Mask raw G pixels at or above this ADU level (clipped/non-linear).")
+    parser.add_argument("--saturation", type=int, default=None,
+                        help="Blank raw G pixels at or above this ADU level (clipped/non-linear). OFF by default: a blanked pixel renders as background, so the brightest sources would appear as dark holes.")
     parser.add_argument("--vmin", type=float, default=None, help="Colorbar lower limit (mag/arcsec^2).")
     parser.add_argument("--vmax", type=float, default=None, help="Colorbar upper limit (mag/arcsec^2).")
     parser.add_argument("--cmap", default="cividis_r", help="Matplotlib colormap.")
@@ -3480,6 +4882,174 @@ def plot_alcor_sky_brightness_cli():
         figsize=args.figsize,
     )
     print(outfig)
+
+
+def alcor_sky_brightness_cli():
+    """
+    CLI entry point for `alcor_sky_brightness_fits`. Writes a calibrated
+    V mag/arcsec^2 FITS data product with the raw-frame alt/az WCS attached,
+    named after the input file with `_sb.fits` unless `-o` is given.
+    """
+    parser = argparse.ArgumentParser(
+        description="Calibrate an alcor OMEA 8C frame to a V mag/arcsec^2 FITS image with the raw-frame alt/az WCS attached.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("filename", help="Input alcor FITS file.")
+    parser.add_argument("-o", "--output", default=None,
+                        help="Output FITS path (default: <input>_sb.fits).")
+    parser.add_argument("--horizon-mask", action="store_true",
+                        help="Also blank the full horizon/obstruction mask (default blanks only off-frame + saturated pixels).")
+    parser.add_argument("--saturation", type=int, default=None,
+                        help="Blank raw G pixels at or above this ADU level (clipped/non-linear). OFF by default: a blanked pixel renders as background, so the brightest sources would appear as dark holes.")
+    parser.add_argument("--overwrite", action="store_true", help="Overwrite output file if it exists.")
+    args = parser.parse_args()
+
+    out = alcor_sky_brightness_fits(
+        args.filename,
+        output_file=args.output,
+        horizon_mask=args.horizon_mask,
+        saturation=args.saturation,
+        overwrite=args.overwrite,
+    )
+    print(out)
+
+
+def plot_alcor_sb_keogram_fits_cli():
+    """
+    CLI entry point for :func:`plot_alcor_sb_keogram_fits`, so a saved
+    sky-brightness keogram can be re-rendered at different colour limits without
+    reprocessing the night.
+    """
+    parser = argparse.ArgumentParser(
+        description="Plot a calibrated alcor sky-brightness keogram FITS file.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("filename", help="Input sky-brightness keogram FITS file.")
+    parser.add_argument("-o", "--output", default=None,
+                        help="Output plot path (default: the input with a .png suffix).")
+    parser.add_argument("--vmin", type=float, default=None,
+                        help="Colorbar lower limit (mag/arcsec^2); default is the 1st percentile.")
+    parser.add_argument("--vmax", type=float, default=None,
+                        help="Colorbar upper limit (mag/arcsec^2); default is the 99th percentile.")
+    parser.add_argument("--cmap", default="cividis_r", help="Matplotlib colormap.")
+    parser.add_argument("--figsize", type=float, nargs=2, default=(12, 6),
+                        metavar=("WIDTH", "HEIGHT"))
+    parser.add_argument("--dpi", type=int, default=150, help="Output figure resolution.")
+    args = parser.parse_args()
+
+    out = plot_alcor_sb_keogram_fits(
+        args.filename,
+        output_file=args.output,
+        vmin=args.vmin,
+        vmax=args.vmax,
+        cmap=args.cmap,
+        figsize=tuple(args.figsize),
+        dpi=args.dpi,
+    )
+    print(out)
+
+
+def alcor_process_night_cli():
+    """
+    CLI entry point for :func:`alcor_process_night`: process one archived night
+    into per-frame photometry, the ``sky_brightness.csv`` summary, and a
+    calibrated nighttime keogram.
+    """
+    parser = argparse.ArgumentParser(
+        description="Process one archived night of alcor frames into star photometry, a sky-brightness summary, and a calibrated keogram.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("night_dir", help="Directory of one night's alcor frames.")
+    parser.add_argument("-o", "--out-dir", default=None,
+                        help="Directory for all products (default: alongside the frames).")
+    parser.add_argument("--pattern", default="*.fits.bz2", help="Glob for input frames.")
+    parser.add_argument("--sun-alt-max", type=float, default=-12.0,
+                        help="Night is the Sun below this altitude (deg). No Moon cut is applied.")
+    parser.add_argument("--sb-aperture-radius", type=float,
+                        default=ALCOR_SB_APERTURE_RADIUS,
+                        help="Angular radius of each sky-brightness sampling cone (deg).")
+    parser.add_argument("--best-min-altitude", type=float,
+                        default=ALCOR_SB_BEST_MIN_ALTITUDE,
+                        help="Altitude floor for the allsky_mv_best darkest-cone search (deg).")
+    parser.add_argument("--no-horizon-mask", action="store_true",
+                        help="Do not blank not-sky pixels in the maps, cones, and keogram.")
+    parser.add_argument("--sb-saturation", type=int, default=None,
+                        help="Blank raw G pixels at or above this ADU level (clipped/non-linear). OFF by default: a blanked pixel renders as background, so the brightest sources would appear as dark holes.")
+    parser.add_argument("--write-sb-fits", action="store_true",
+                        help="Also keep each frame's full surface-brightness map as <frame>_sb.fits.")
+    parser.add_argument("--median-stack", action="store_true",
+                        help="Also build the per-channel raw median stack (<night>_median.fits) for bad-pixel tracking.")
+    parser.add_argument("--day-keogram", action="store_true",
+                        help="Also build the full-day raw RGB keogram (<night>_keogram.fits/.png), daylight included.")
+    parser.add_argument("--reprocess", action="store_true",
+                        help="Re-measure star photometry even where <frame>_phot.csv already exists.")
+    parser.add_argument("--aperture-radius", type=float, default=4.0,
+                        help="Star aperture radius in pixels (also the Gaussian fit window).")
+    parser.add_argument("--annulus-width", type=float, default=1.0,
+                        help="Star background annulus width in pixels.")
+    parser.add_argument("--min-altitude", type=float, default=20.0,
+                        help="Minimum catalog-star altitude to measure (deg).")
+    parser.add_argument("--vmag-limit", type=float, default=5.5,
+                        help="Faintest catalog star Vmag to measure.")
+    parser.add_argument("--no-variables", dest="variables", action="store_false",
+                        help="Do not measure the bright-variable catalog "
+                             "(bright_variable_vsx.fits) alongside the "
+                             "calibration stars.")
+    parser.add_argument("--gaussian", action="store_true",
+                        help="Use constrained-Gaussian PSF photometry instead of apertures.")
+    parser.add_argument("--both", action="store_true",
+                        help="Measure aperture AND Gaussian photometry (overrides --gaussian).")
+    parser.add_argument("--max-frames", type=int, default=None,
+                        help="Strided-subsample the night to at most this many frames.")
+    parser.add_argument("--scratch-dir", default=None,
+                        help="Directory for the median-stack scratch memmap.")
+    parser.add_argument("--masks-dir", default=None,
+                        help="Override the bad-pixel masks directory.")
+    parser.add_argument("--workers", type=int, default=None,
+                        help="Worker processes (default: one per core; 1 runs serially).")
+    parser.add_argument("--overwrite", action="store_true",
+                        help="Overwrite existing per-frame output files.")
+    parser.add_argument("--quiet", action="store_true",
+                        help="Do not report progress to stderr.")
+    args = parser.parse_args()
+
+    def log(message):
+        print(message, file=sys.stderr)
+
+    result = alcor_process_night(
+        args.night_dir,
+        out_dir=args.out_dir,
+        pattern=args.pattern,
+        sun_alt_max=args.sun_alt_max,
+        sb_aperture_radius=args.sb_aperture_radius,
+        best_min_altitude=args.best_min_altitude,
+        horizon_mask=not args.no_horizon_mask,
+        sb_saturation=args.sb_saturation,
+        write_sb_fits=args.write_sb_fits,
+        median_stack=args.median_stack,
+        day_keogram=args.day_keogram,
+        reprocess=args.reprocess,
+        max_frames=args.max_frames,
+        scratch_dir=args.scratch_dir,
+        masks_dir=args.masks_dir,
+        workers=args.workers,
+        overwrite=args.overwrite,
+        log=None if args.quiet else log,
+        aperture_radius=args.aperture_radius,
+        annulus_width=args.annulus_width,
+        min_altitude=args.min_altitude,
+        vmag_limit=args.vmag_limit,
+        variables=args.variables,
+        gaussian=args.gaussian,
+        both=args.both,
+    )
+    for path in ("summary_file", "keogram_file", "keogram_plot",
+                 "day_keogram_file", "day_keogram_plot",
+                 "photometry_file", "median_file"):
+        if result[path] is not None:
+            print(result[path])
+    if result["errors"]:
+        print(f"# {len(result['errors'])} frames failed", file=sys.stderr)
 
 
 def alcor_star_photometry_cli():
@@ -3512,6 +5082,10 @@ def alcor_star_photometry_cli():
                         help="Reject images with Sun altitude greater than this (deg).")
     parser.add_argument("--saturation", type=float, default=ALCOR_SATURATION,
                         help="Raw-ADU level at/above which an aperture pixel flags the channel saturated.")
+    parser.add_argument("--no-variables", dest="variables", action="store_false",
+                        help="Do not measure the bright-variable catalog "
+                             "(bright_variable_vsx.fits) alongside the "
+                             "calibration stars.")
     parser.add_argument("--gaussian", action="store_true",
                         help="Use constrained-Gaussian PSF photometry instead of aperture sums.")
     parser.add_argument("--both", action="store_true",
@@ -3533,6 +5107,7 @@ def alcor_star_photometry_cli():
         annulus_width=args.annulus_width,
         min_altitude=args.min_altitude,
         vmag_limit=args.vmag_limit,
+        variables=args.variables,
         refraction=not args.no_refraction,
         masks_dir=args.masks_dir,
         check_plot=args.check_plot,
@@ -3643,16 +5218,20 @@ def fit_alcor_wcs_cli():
 
 def create_badpix_mask(day_dir, out_dir=None, min_frames=500, z_thresh=25.0,
                         ksize=5, sun_alt_max=-18.0, moon_alt_max=-6.0,
+                        rim_dilation=ALCOR_BADPIX_RIM_DILATION,
+                        pole_radius=ALCOR_BADPIX_POLE_RADIUS,
                         max_frames=None, scratch_dir=None, pattern="*.fits.bz2",
-                        log=None):
+                        horizon_dir=None, log=None):
     """
     Build and write a date-stamped per-channel bad-pixel mask for one night.
 
     Selects dark frames (Sun < ``sun_alt_max``, Moon < ``moon_alt_max``), and if
     at least ``min_frames`` are available builds the night-median stack, detects
-    hot pixels, and writes a gzipped ``alcor_badpix_YYYY-MM-DD.fits.gz`` to
-    ``out_dir`` (default: the resolved bad-pixel masks directory). Returns the
-    output `~pathlib.Path`, or ``None`` if there were too few dark frames.
+    hot pixels within the sky region given by
+    :func:`alcor_badpix_search_region`, and writes a gzipped
+    ``alcor_badpix_YYYY-MM-DD.fits.gz`` to ``out_dir`` (default: the resolved
+    bad-pixel masks directory). Returns the output `~pathlib.Path`, or ``None``
+    if there were too few dark frames.
     """
     day_dir = Path(day_dir)
     frames = sorted(day_dir.glob(pattern))
@@ -3667,8 +5246,20 @@ def create_badpix_mask(day_dir, out_dir=None, min_frames=500, z_thresh=25.0,
 
     median = build_alcor_median_stack(dark, max_frames=max_frames,
                                       scratch_dir=scratch_dir, log=log)
-    mask = build_alcor_badpix_mask(median, ksize=ksize, z_thresh=z_thresh)
     mask_date = _badpix_date_from_dir(day_dir, dark)
+
+    cal = alcor_calibration(Time(mask_date.isoformat()))
+    wcs = build_alcor_wcs(xcen=cal["xcen"], ycen=cal["ycen"],
+                          rotation=cal["rotation"],
+                          radial_coeffs=cal["radial_coeffs"],
+                          horizon_radius=cal["horizon_radius"],
+                          tangential_coeffs=cal["tangential_coeffs"],
+                          axis_tilt=cal["axis_tilt"])
+    valid = alcor_badpix_search_region(
+        median.shape[1:], time=mask_date, wcs=wcs, horizon_dir=horizon_dir,
+        rim_dilation=rim_dilation, pole_radius=pole_radius, log=log)
+    mask = build_alcor_badpix_mask(median, ksize=ksize, z_thresh=z_thresh,
+                                   valid=valid)
 
     out_dir = Path(str(out_dir)) if out_dir is not None else _resolve_badpix_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -3679,6 +5270,9 @@ def create_badpix_mask(day_dir, out_dir=None, min_frames=500, z_thresh=25.0,
     hdu.header["ZTHRESH"] = (z_thresh, "robust-sigma threshold")
     hdu.header["KSIZE"] = (ksize, "high-pass kernel (px)")
     hdu.header["CHRULE"] = ("1-2 of 3", "channels flagged for a bad pixel")
+    hdu.header["RIMDILAT"] = (rim_dilation, "horizon-mask dilation (px)")
+    hdu.header["POLERAD"] = (pole_radius, "celestial-pole exclusion (px)")
+    hdu.header["NSEARCH"] = (int(valid.sum()), "pixels searched for defects")
     for c, name in enumerate("RGB"):
         hdu.header[f"NBAD{name}"] = (int(mask[c].sum()), f"{name} bad pixels")
     hdu.writeto(out_path, overwrite=True)
@@ -3703,6 +5297,17 @@ def create_badpix_mask_cli():
     parser.add_argument("--z-thresh", type=float, default=25.0,
                         help="Robust-sigma threshold for a hot pixel.")
     parser.add_argument("--ksize", type=int, default=5, help="High-pass median kernel (px).")
+    parser.add_argument("--rim-dilation", type=int, default=ALCOR_BADPIX_RIM_DILATION,
+                        help="Dilate the horizon mask by this many px before "
+                             "excluding not-sky from the search; 0 to search "
+                             "the whole frame.")
+    parser.add_argument("--pole-radius", type=int, default=ALCOR_BADPIX_POLE_RADIUS,
+                        help="Radius (px) of the celestial-pole exclusion disc, "
+                             "where star trails survive the night median; 0 to "
+                             "disable.")
+    parser.add_argument("--horizon-dir", default=None,
+                        help="Horizon-mask directory (default: $ALCOR_HORIZON_DIR "
+                             "or packaged data/horizon).")
     parser.add_argument("--sun-alt-max", type=float, default=-18.0,
                         help="Use frames with Sun altitude below this (deg).")
     parser.add_argument("--moon-alt-max", type=float, default=-6.0,
@@ -3720,8 +5325,10 @@ def create_badpix_mask_cli():
     out = create_badpix_mask(
         args.day_dir, out_dir=args.out_dir, min_frames=args.min_frames,
         z_thresh=args.z_thresh, ksize=args.ksize, sun_alt_max=args.sun_alt_max,
-        moon_alt_max=args.moon_alt_max, max_frames=args.max_frames,
-        scratch_dir=args.scratch_dir, pattern=args.pattern, log=log)
+        moon_alt_max=args.moon_alt_max, rim_dilation=args.rim_dilation,
+        pole_radius=args.pole_radius, horizon_dir=args.horizon_dir,
+        max_frames=args.max_frames, scratch_dir=args.scratch_dir,
+        pattern=args.pattern, log=log)
     if out is None:
         print("# no mask written (insufficient dark frames)")
     else:

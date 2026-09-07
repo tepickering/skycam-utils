@@ -1,8 +1,25 @@
 name: pytest
 
+# `push` with no branch filter plus `pull_request` runs CI twice on every
+# commit of a branch that has a PR open -- once for the branch ref and once
+# for the PR merge ref, same SHA. Restricting push to the default branch
+# leaves exactly one run per commit: pull_request while a PR is open, push
+# once it merges. A feature branch with no PR yet gets no run, which is the
+# intended trade -- it is covered the moment the PR is opened.
 on:
   push:
+    branches: [main]
   pull_request:
+
+# Supersede a PR's in-flight run when it is pushed again; never cancel or
+# queue a run on main. The key does both: on a pull_request it is the PR
+# number, so every commit to the same PR shares a group and the older run is
+# cancelled, while on a push it falls back to the SHA, which is unique per
+# commit -- so main pushes neither cancel each other nor serialize behind one
+# another, and every commit on main keeps its own pass/fail record.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
 
 jobs:
   test:

@@ -10,8 +10,12 @@ and an opt-in prune of the redundant vendor JPEGs.  It contains no science.
 
 import datetime
 import re
+import signal
 import time
 from pathlib import Path
+
+from .ledger import ArchiveLedger, options_fingerprint
+from .night import alcor_process_night
 
 #: Night directories are named YYYY-MM-DD (or YYYY_MM_DD in older archives).
 #: Matching on the name is what keeps the sibling ``keograms/`` and ``movies/``
@@ -299,3 +303,285 @@ def prune_night_jpegs(night_dir, products, n_frames, n_errors, dry_run=False,
         for path in jpegs:
             path.unlink()
     return len(jpegs), n_bytes, None
+#: Consecutive night failures that abort a run. An unmounted archive fails every
+#: remaining night instantly, and stopping beats writing hundreds of bogus
+#: ledger entries.
+ALCOR_ARCHIVE_MAX_CONSECUTIVE_FAILURES = 10
+
+#: Seconds between checks of the PAUSE sentinel while a run is paused.
+ALCOR_ARCHIVE_PAUSE_POLL = 30.0
+
+
+def _wait_while_paused(pause_file, poll, log, stop, sleep=time.sleep):
+    """
+    Block while `pause_file` exists.
+
+    Pausing is a file rather than a signal precisely so it works on a detached
+    run whose PID nobody has: the operator creates the file, and the driver
+    stops at the next night boundary until it goes away.
+
+    Parameters
+    ----------
+    pause_file : `~pathlib.Path`
+        The sentinel. Its contents are ignored; only existence matters.
+    poll : float
+        Seconds between checks.
+    log : callable
+        Progress reporter.
+    stop : dict
+        Shared flag; ``stop["requested"]`` breaks the wait.
+    sleep : callable (default `time.sleep`)
+        Injectable for tests.
+
+    Returns
+    -------
+    bool
+        True if the wait ended because a stop was requested.
+    """
+    if not pause_file.exists():
+        return False
+    log(f"paused — waiting on {pause_file}")
+    while pause_file.exists() and not stop["requested"]:
+        sleep(poll)
+    if stop["requested"]:
+        return True
+    log("resumed")
+    return False
+
+
+def alcor_process_archive(archive_dir, out_dir, start=None, end=None,
+                          nights=None, reverse=False, pattern="*.fits.bz2",
+                          min_age=ALCOR_ARCHIVE_MIN_AGE, prune_jpegs=False,
+                          prune_dry_run=False, retry_failed=False,
+                          force_options=False,
+                          max_consecutive_failures=ALCOR_ARCHIVE_MAX_CONSECUTIVE_FAILURES,
+                          pause_poll=ALCOR_ARCHIVE_PAUSE_POLL,
+                          log_interval=ALCOR_ARCHIVE_LOG_INTERVAL, verbose=False,
+                          log=None, pause_sleep=time.sleep, install_signals=False,
+                          **night_kwargs):
+    """
+    Run :func:`alcor_process_night` over every night of an archive, resumably.
+
+    An archive is hundreds of night directories and days of wall clock, so this
+    adds what that scale needs and nothing else: a ledger so a killed run picks
+    up where it stopped, a ``PAUSE`` file so a detached run can be held without
+    its PID, throttled progress with an ETA, a quiet period that leaves alone the
+    nights still arriving from the camera host, and an opt-in prune of the
+    redundant vendor JPEGs.
+
+    All state lives in ``<out_dir>/.archive_state/``: ``ledger.json``, the
+    ``PAUSE`` sentinel the operator creates, and ``archive.log``. Each night's
+    products go to ``<out_dir>/<night>/``; the archive itself is only read from,
+    except by `prune_jpegs`.
+
+    Parameters
+    ----------
+    archive_dir : str or `~pathlib.Path`
+        Archive root holding one directory per night.
+    out_dir : str or `~pathlib.Path`
+        Products tree. Created if absent.
+    start, end : str or `~datetime.date` or None (default=None)
+        Inclusive date bounds on the nights to run.
+    nights : list of str or None (default=None)
+        Explicit night names instead of scanning `archive_dir`.
+    reverse : bool (default=False)
+        Newest first.
+    pattern : str (default="*.fits.bz2")
+        Glob selecting frames, passed to `alcor_process_night`.
+    min_age : float (default ALCOR_ARCHIVE_MIN_AGE)
+        Hours a night must have been unchanged before it is processed. 0
+        disables the rule.
+    prune_jpegs : bool (default=False)
+        Delete each night's vendor JPEGs once its products are written.
+    prune_dry_run : bool (default=False)
+        Report what pruning would free without deleting. Implies the pruning
+        pass and overrides `prune_jpegs`.
+    retry_failed : bool (default=False)
+        Re-attempt nights previously recorded ``failed``.
+    force_options : bool (default=False)
+        Continue despite a changed photometry-options fingerprint.
+    max_consecutive_failures : int (default ALCOR_ARCHIVE_MAX_CONSECUTIVE_FAILURES)
+        Abort after this many nights fail in a row.
+    pause_poll : float (default ALCOR_ARCHIVE_PAUSE_POLL)
+        Seconds between checks of the ``PAUSE`` file while paused.
+    log_interval : float (default ALCOR_ARCHIVE_LOG_INTERVAL)
+        Seconds between per-frame progress lines.
+    verbose : bool (default=False)
+        Pass every per-frame line through instead of throttling.
+    log : callable or None (default=None)
+        Called with each progress message, in addition to ``archive.log``.
+    pause_sleep : callable (default `time.sleep`)
+        Injectable sleep for the pause loop.
+    install_signals : bool (default=False)
+        Install SIGINT/SIGTERM handlers so the first interrupt finishes the
+        current night and the second aborts. Only valid in the main thread; the
+        CLI sets it, tests do not.
+    **night_kwargs
+        Forwarded to :func:`alcor_process_night` (``day_keogram``,
+        ``median_stack``, ``both``, ``workers``, ``scratch_dir``, ...).
+
+    Returns
+    -------
+    dict
+        ``ledger`` (the `ArchiveLedger`), ``processed``, ``failed``,
+        ``skipped_recent``, ``skipped_failed`` (night-name lists),
+        ``pruned_files``, ``pruned_bytes``, and ``stopped`` (True if the run
+        ended early via a signal or the failure limit).
+
+    Raises
+    ------
+    ValueError
+        If the photometry options differ from those recorded in the ledger and
+        `force_options` is not set.
+    """
+    archive_dir = Path(archive_dir)
+    out_dir = Path(out_dir)
+    state_dir = out_dir / ".archive_state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    pause_file = state_dir / "PAUSE"
+    log_file = state_dir / "archive.log"
+
+    def _log(message):
+        line = str(message)
+        with log_file.open("a") as handle:
+            handle.write(f"{line}\n")
+        if log is not None:
+            log(line)
+
+    _log(f"state directory: {state_dir}")
+
+    ledger = ArchiveLedger(state_dir)
+    ledger.check_fingerprint(options_fingerprint(night_kwargs),
+                             force=force_options)
+    ledger.save()
+    for night in ledger.reset_stale_running():
+        _log(f"{night}: was left running by an earlier run; will reprocess")
+
+    candidates = discover_nights(archive_dir, start=start, end=end,
+                                 nights=nights, reverse=reverse)
+    total = len(candidates)
+    _log(f"{total} night directories selected under {archive_dir}")
+
+    stop = {"requested": False}
+    previous_handlers = {}
+
+    def _handle_signal(signum, frame):
+        if stop["requested"]:
+            raise KeyboardInterrupt("second interrupt: aborting now")
+        stop["requested"] = True
+        _log("interrupt received — finishing the current night, then stopping "
+             "(interrupt again to abort immediately)")
+
+    if install_signals:
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous_handlers[signum] = signal.signal(signum, _handle_signal)
+
+    processed, failed, skipped_recent, skipped_failed = [], [], [], []
+    pruned_files = pruned_bytes = 0
+    consecutive = 0
+    run_started = time.monotonic()
+
+    def _maybe_prune(night, night_dir, products, n_frames, n_errors, prefix):
+        nonlocal pruned_files, pruned_bytes
+        if not (prune_jpegs or prune_dry_run) or ledger.was_pruned(night):
+            return
+        n_files, n_bytes, reason = prune_night_jpegs(
+            night_dir, products, n_frames, n_errors, dry_run=prune_dry_run)
+        if reason is not None:
+            _log(f"{prefix}not pruned: {reason}")
+            return
+        pruned_files += n_files
+        pruned_bytes += n_bytes
+        verb = "would free" if prune_dry_run else "pruned"
+        _log(f"{prefix}{verb} {n_files} jpegs ({n_bytes / 1e9:.1f} GB)")
+        if not prune_dry_run:
+            ledger.mark_pruned(night, n_files, n_bytes)
+
+    try:
+        for index, night_dir in enumerate(candidates, start=1):
+            night = night_dir.name
+            prefix = f"[{index:>4}/{total}] {night}  "
+            if stop["requested"]:
+                break
+            if _wait_while_paused(pause_file, pause_poll, _log, stop,
+                                  sleep=pause_sleep):
+                break
+
+            state = ledger.state(night)
+            if state == "done":
+                entry = ledger.entry(night) or {}
+                _maybe_prune(night, night_dir,
+                             {key: value for key, value
+                              in (entry.get("products") or {}).items()},
+                             entry.get("n_frames", 0), entry.get("n_errors", 0),
+                             prefix)
+                continue
+            if state == "failed" and not retry_failed:
+                skipped_failed.append(night)
+                continue
+            if is_too_recent(night_dir, min_age, pattern):
+                skipped_recent.append(night)
+                _log(f"{prefix}skipped: changed within {min_age:g} h, may still "
+                     "be arriving from the camera host")
+                continue
+            if consecutive >= max_consecutive_failures:
+                _log(f"aborting: {consecutive} nights failed in a row")
+                stop["requested"] = True
+                break
+
+            ledger.mark_running(night)
+            night_out = out_dir / night
+            night_log = ThrottledLog(_log, prefix=prefix, interval=log_interval,
+                                     verbose=verbose)
+            started = time.monotonic()
+            _log(f"{prefix}start")
+            try:
+                result = alcor_process_night(night_dir, out_dir=night_out,
+                                             pattern=pattern, log=night_log,
+                                             **night_kwargs)
+            except Exception as exc:  # one bad night must not cost the rest
+                elapsed = time.monotonic() - started
+                ledger.mark_failed(night, exc, elapsed=elapsed)
+                failed.append(night)
+                consecutive += 1
+                _log(f"{prefix}FAILED after {_duration(elapsed)}: {exc}")
+                continue
+
+            elapsed = time.monotonic() - started
+            n_frames = len(result.get("files") or [])
+            n_errors = len(result.get("errors") or [])
+            products = {key: result.get(key) for key
+                        in ("summary_file", "photometry_file", "keogram_file",
+                            "keogram_plot", "day_keogram_file",
+                            "day_keogram_plot", "median_file")}
+            ledger.mark_done(night, elapsed, n_frames, n_errors, products)
+            processed.append(night)
+            consecutive = 0
+            _log(f"{prefix}done · {_duration(elapsed)} · {n_frames} frames · "
+                 f"{n_errors} frame errors")
+            _maybe_prune(night, night_dir, products, n_frames, n_errors, prefix)
+
+            done_count, mean = ledger.timing()
+            left = total - index
+            eta = _duration(left * mean) if mean else "?"
+            _log(f"           overall  {done_count} done / {left} left · "
+                 f"elapsed {_duration(time.monotonic() - run_started)} · "
+                 f"ETA {eta}")
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+
+    _log(f"run finished: {len(processed)} processed, {len(failed)} failed, "
+         f"{len(skipped_recent)} skipped as too recent, "
+         f"{len(skipped_failed)} skipped as previously failed")
+    if skipped_recent:
+        _log(f"still arriving, left pending: {', '.join(skipped_recent)}")
+    if pruned_files:
+        verb = "would free" if prune_dry_run else "freed"
+        _log(f"jpeg prune {verb} {pruned_files} files "
+             f"({pruned_bytes / 1e9:.1f} GB)")
+
+    return {"ledger": ledger, "processed": processed, "failed": failed,
+            "skipped_recent": skipped_recent, "skipped_failed": skipped_failed,
+            "pruned_files": pruned_files, "pruned_bytes": pruned_bytes,
+            "stopped": stop["requested"]}

@@ -412,3 +412,279 @@ def test_prune_allows_a_few_frame_errors(tmp_path):
 
     assert reason is None
     assert n_files == 6
+from skycam_utils.alcor import _wait_while_paused, alcor_process_archive
+
+
+def _stub_night(record, fail_on=(), out_root=None):
+    """A stand-in for `alcor_process_night` that writes plausible products."""
+
+    def _run(night_dir, out_dir=None, log=None, **kwargs):
+        night = Path(night_dir).name
+        record.append(night)
+        if night in fail_on:
+            raise ValueError(f"synthetic failure for {night}")
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        summary = out_dir / "sky_brightness.csv"
+        photometry = out_dir / f"{night}_phot.csv"
+        summary.write_text("filename,OBSTIME\n")
+        photometry.write_text("name,OBSTIME\n")
+        if log is not None:
+            log("[1/2] a.fits.bz2")
+            log(f"wrote {summary}")
+        return {"summary_file": summary, "photometry_file": photometry,
+                "keogram_file": None, "files": ["a", "b"], "errors": []}
+
+    return _run
+
+
+def _aged_archive(root, names=("2025-01-01", "2025-01-02", "2025-01-03")):
+    """An archive whose nights are all old enough to process."""
+    archive = _make_archive(root, names=names)
+    old = time.time() - 72 * 3600
+    for name in names:
+        night = archive / name
+        (night / f"{name.replace('-', '_')}__20_00_00.fits.bz2").write_bytes(b"x")
+        for path in sorted(night.iterdir()) + [night]:
+            os.utime(path, (old, old))
+    return archive
+
+
+def test_archive_run_processes_every_night_and_records_it(tmp_path, patch_alcor):
+    archive = _aged_archive(tmp_path / "archive")
+    seen = []
+    patch_alcor("alcor_process_night", _stub_night(seen))
+
+    result = alcor_process_archive(archive, out_dir=tmp_path / "out")
+
+    assert seen == ["2025-01-01", "2025-01-02", "2025-01-03"]
+    assert result["ledger"].counts()["done"] == 3
+    assert (tmp_path / "out" / "2025-01-01" / "sky_brightness.csv").exists()
+    assert (tmp_path / "out" / ".archive_state" / "ledger.json").exists()
+    assert (tmp_path / "out" / ".archive_state" / "archive.log").exists()
+
+
+def test_a_second_run_skips_completed_nights(tmp_path, patch_alcor):
+    archive = _aged_archive(tmp_path / "archive")
+    first = []
+    patch_alcor("alcor_process_night", _stub_night(first))
+    alcor_process_archive(archive, out_dir=tmp_path / "out")
+
+    second = []
+    patch_alcor("alcor_process_night", _stub_night(second))
+    alcor_process_archive(archive, out_dir=tmp_path / "out")
+
+    assert second == []
+
+
+def test_a_failing_night_is_recorded_and_the_run_continues(tmp_path, patch_alcor):
+    """One bad night must not cost the other 612."""
+    archive = _aged_archive(tmp_path / "archive")
+    seen = []
+    patch_alcor("alcor_process_night", _stub_night(seen, fail_on=("2025-01-02",)))
+
+    result = alcor_process_archive(archive, out_dir=tmp_path / "out")
+
+    assert seen == ["2025-01-01", "2025-01-02", "2025-01-03"]
+    assert result["failed"] == ["2025-01-02"]
+    assert result["ledger"].state("2025-01-02") == "failed"
+    assert result["ledger"].counts()["done"] == 2
+
+
+def test_failed_nights_are_skipped_until_retry_failed(tmp_path, patch_alcor):
+    archive = _aged_archive(tmp_path / "archive")
+    patch_alcor("alcor_process_night", _stub_night([], fail_on=("2025-01-02",)))
+    alcor_process_archive(archive, out_dir=tmp_path / "out")
+
+    seen = []
+    patch_alcor("alcor_process_night", _stub_night(seen))
+    alcor_process_archive(archive, out_dir=tmp_path / "out")
+    assert seen == []
+
+    retried = []
+    patch_alcor("alcor_process_night", _stub_night(retried))
+    alcor_process_archive(archive, out_dir=tmp_path / "out", retry_failed=True)
+    assert retried == ["2025-01-02"]
+
+
+def test_a_night_still_arriving_is_skipped_and_left_pending(tmp_path, patch_alcor):
+    archive = _aged_archive(tmp_path / "archive")
+    fresh = archive / "2025-01-02" / "2025_01_02__21_00_00.fits.bz2"
+    fresh.write_bytes(b"x")  # touches the file and the directory mtime
+    seen = []
+    patch_alcor("alcor_process_night", _stub_night(seen))
+
+    result = alcor_process_archive(archive, out_dir=tmp_path / "out")
+
+    assert seen == ["2025-01-01", "2025-01-03"]
+    assert result["skipped_recent"] == ["2025-01-02"]
+    assert result["ledger"].state("2025-01-02") == "pending"
+
+
+def test_min_age_zero_processes_a_night_still_arriving(tmp_path, patch_alcor):
+    archive = _aged_archive(tmp_path / "archive")
+    (archive / "2025-01-02" / "2025_01_02__21_00_00.fits.bz2").write_bytes(b"x")
+    seen = []
+    patch_alcor("alcor_process_night", _stub_night(seen))
+
+    alcor_process_archive(archive, out_dir=tmp_path / "out", min_age=0)
+
+    assert seen == ["2025-01-01", "2025-01-02", "2025-01-03"]
+
+
+def test_a_crashed_night_is_reset_to_pending_and_reprocessed(tmp_path, patch_alcor):
+    archive = _aged_archive(tmp_path / "archive")
+    state_dir = tmp_path / "out" / ".archive_state"
+    state_dir.mkdir(parents=True)
+    ledger = ArchiveLedger(state_dir)
+    ledger.mark_running("2025-01-02")
+
+    seen = []
+    patch_alcor("alcor_process_night", _stub_night(seen))
+    alcor_process_archive(archive, out_dir=tmp_path / "out")
+
+    assert "2025-01-02" in seen
+
+
+def test_changed_photometry_options_abort_the_run(tmp_path, patch_alcor):
+    archive = _aged_archive(tmp_path / "archive")
+    patch_alcor("alcor_process_night", _stub_night([]))
+    alcor_process_archive(archive, out_dir=tmp_path / "out", both=True)
+
+    with pytest.raises(ValueError, match="both"):
+        alcor_process_archive(archive, out_dir=tmp_path / "out", both=False)
+
+    alcor_process_archive(archive, out_dir=tmp_path / "out", both=False,
+                          force_options=True)
+
+
+def test_the_run_aborts_after_too_many_consecutive_failures(tmp_path, patch_alcor):
+    """An unmounted archive fails every night instantly; stop rather than burn through."""
+    names = tuple(f"2025-02-{day:02d}" for day in range(1, 11))
+    archive = _aged_archive(tmp_path / "archive", names=names)
+    seen = []
+    patch_alcor("alcor_process_night", _stub_night(seen, fail_on=names))
+
+    result = alcor_process_archive(archive, out_dir=tmp_path / "out",
+                                   max_consecutive_failures=3)
+
+    assert len(seen) == 3
+    assert result["stopped"] is True
+
+
+def test_pause_file_halts_before_the_next_night(tmp_path, patch_alcor):
+    """The night in flight completes; the pause lands at the boundary."""
+    archive = _aged_archive(tmp_path / "archive")
+    pause = tmp_path / "out" / ".archive_state" / "PAUSE"
+    seen = []
+    inner = _stub_night(seen)
+
+    def _run(night_dir, **kwargs):
+        result = inner(night_dir, **kwargs)
+        if Path(night_dir).name == "2025-01-01":
+            pause.parent.mkdir(parents=True, exist_ok=True)
+            pause.write_text("")
+        return result
+
+    patch_alcor("alcor_process_night", _run)
+
+    removals = []
+
+    def _sleep(_seconds):
+        removals.append(1)
+        pause.unlink()  # simulate the operator removing it
+
+    result = alcor_process_archive(archive, out_dir=tmp_path / "out",
+                                   pause_sleep=_sleep)
+
+    assert seen == ["2025-01-01", "2025-01-02", "2025-01-03"]
+    assert removals == [1]
+    assert result["ledger"].state("2025-01-01") == "done"
+
+
+def test_a_pause_file_present_at_startup_holds_the_first_night(tmp_path, patch_alcor):
+    archive = _aged_archive(tmp_path / "archive")
+    pause = tmp_path / "out" / ".archive_state" / "PAUSE"
+    pause.parent.mkdir(parents=True)
+    pause.write_text("")
+    seen = []
+    patch_alcor("alcor_process_night", _stub_night(seen))
+
+    def _sleep(_seconds):
+        pause.unlink()
+
+    alcor_process_archive(archive, out_dir=tmp_path / "out", pause_sleep=_sleep)
+
+    assert seen == ["2025-01-01", "2025-01-02", "2025-01-03"]
+
+
+def test_wait_while_paused_returns_immediately_without_the_file(tmp_path):
+    stop = {"requested": False}
+    assert _wait_while_paused(tmp_path / "PAUSE", 30.0, lambda m: None,
+                              stop) is False
+
+
+def test_wait_while_paused_gives_up_when_stop_is_requested(tmp_path):
+    pause = tmp_path / "PAUSE"
+    pause.write_text("")
+    stop = {"requested": False}
+
+    def _sleep(_seconds):
+        stop["requested"] = True
+
+    assert _wait_while_paused(pause, 30.0, lambda m: None, stop,
+                              sleep=_sleep) is True
+    assert pause.exists()
+
+
+def test_prune_jpegs_deletes_only_for_a_successful_night(tmp_path, patch_alcor):
+    archive = _aged_archive(tmp_path / "archive")
+    for name in ("2025-01-01", "2025-01-02", "2025-01-03"):
+        for i in range(2):
+            (archive / name / f"{name}_{i}.jpg").write_bytes(b"j" * 10)
+    patch_alcor("alcor_process_night", _stub_night([], fail_on=("2025-01-02",)))
+
+    result = alcor_process_archive(archive, out_dir=tmp_path / "out",
+                                   min_age=0, prune_jpegs=True)
+
+    assert list((archive / "2025-01-01").glob("*.jpg")) == []
+    assert len(list((archive / "2025-01-02").glob("*.jpg"))) == 2
+    assert result["pruned_files"] == 4
+
+
+def test_prune_dry_run_deletes_nothing(tmp_path, patch_alcor):
+    archive = _aged_archive(tmp_path / "archive")
+    for i in range(2):
+        (archive / "2025-01-01" / f"a_{i}.jpg").write_bytes(b"j" * 10)
+    patch_alcor("alcor_process_night", _stub_night([]))
+
+    result = alcor_process_archive(archive, out_dir=tmp_path / "out",
+                                   min_age=0, prune_dry_run=True)
+
+    assert len(list((archive / "2025-01-01").glob("*.jpg"))) == 2
+    assert result["pruned_files"] == 2
+
+
+def test_prune_never_touches_a_night_skipped_as_too_recent(tmp_path, patch_alcor):
+    archive = _aged_archive(tmp_path / "archive")
+    fresh = archive / "2025-01-02"
+    (fresh / "keep_me.jpg").write_bytes(b"j" * 10)
+    patch_alcor("alcor_process_night", _stub_night([]))
+
+    alcor_process_archive(archive, out_dir=tmp_path / "out", prune_jpegs=True)
+
+    assert (fresh / "keep_me.jpg").exists()
+
+
+def test_pruning_can_be_enabled_on_a_later_pass(tmp_path, patch_alcor):
+    """A night already done but never pruned is still prunable."""
+    archive = _aged_archive(tmp_path / "archive")
+    (archive / "2025-01-01" / "a.jpg").write_bytes(b"j" * 10)
+    patch_alcor("alcor_process_night", _stub_night([]))
+    alcor_process_archive(archive, out_dir=tmp_path / "out", min_age=0)
+    assert (archive / "2025-01-01" / "a.jpg").exists()
+
+    alcor_process_archive(archive, out_dir=tmp_path / "out", min_age=0,
+                          prune_jpegs=True)
+
+    assert not (archive / "2025-01-01" / "a.jpg").exists()

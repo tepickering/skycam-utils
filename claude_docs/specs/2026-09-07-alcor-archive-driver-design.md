@@ -21,6 +21,7 @@ It is CPU-bound once the worker pool is full, not I/O-bound.
 ## Goals
 
 * Process every night in an archive into the full product set, unattended, over days.
+* Leave alone any night that is still arriving from the camera host.
 * Resume exactly where it left off after a crash, a reboot, or a deliberate stop.
 * Report progress and a credible ETA without drowning the log in per-frame lines.
 * Pause and resume a backgrounded run without finding its PID.
@@ -44,6 +45,7 @@ It is CPU-bound once the worker pool is full, not I/O-bound.
 | Ledger | JSON, atomically replaced | 613 rows; inspectable and hand-editable beats SQLite here |
 | Control | Ledger + a `PAUSE` sentinel at `<out-dir>/.archive_state/PAUSE` | Pausing a detached 13-day run must not require a PID |
 | JPEG pruning | Opt-in `--prune-jpegs` flag on the driver | Frees space as the run proceeds so the drive never fills |
+| In-flight nights | Skip any night modified within `--min-age` hours (default 24) | The archive syncs from the camera host; a half-arrived night would be recorded `done` and never revisited |
 
 ## Architecture
 
@@ -65,6 +67,38 @@ Directories in the archive root whose names match `YYYY-MM-DD` or `YYYY_MM_DD`, 
 naturally excludes the sibling `keograms/` and `movies/` trees. `--start` / `--end`
 bound the range, `--nights` takes an explicit list, `--reverse` runs newest-first.
 Default order is oldest-first.
+
+### Skipping nights that are still arriving
+
+**The archive is not static.** It is synced from the camera host's computer, so at any
+moment one or more night directories may be mid-download, and the most recent night is
+additionally still being observed. This was seen directly while preparing this design:
+`2026-09-06` listed as an empty directory, and 45 minutes later held 12,449 files.
+
+Processing such a night is worse than useless. The products would cover only the frames
+that had landed at the time, the ledger would record the night `done`, and it would be
+skipped by every subsequent run — silently and permanently incomplete, with nothing in
+the output to indicate it. With `--prune-jpegs` it is actively destructive: JPEGs would
+be deleted for a night whose FITS frames have not all arrived.
+
+So the driver applies a **quiet-period rule**: a night whose contents changed within
+`--min-age` hours (default 24) is skipped, logged, and left `pending` for a later run.
+
+The test is on **modification time, not on the timestamps in the filenames**, because the
+two failure modes differ:
+
+* the current night is still being *observed*, so its newest filename timestamp is recent;
+* an older night being *back-filled* from the camera host has old filename timestamps but
+  new mtimes.
+
+Only mtime catches both. The check is deliberately cheap — two `stat` calls, not a walk
+of 12,000 files: the night directory's own mtime (which updates on every file creation
+or rename, including rsync's temp-file rename) and the mtime of the last frame in sorted
+order, whichever is later.
+
+`--min-age 0` disables the rule for a night known to be complete. Nights skipped this way
+are counted and named in the run summary and in `--status`, so an incomplete archive is
+visible rather than silent; they are never recorded `failed`, since nothing failed.
 
 ### Output tree
 
@@ -213,8 +247,12 @@ logic is state management, so no real frames are needed.
 9. `--max-consecutive-failures` aborts the run after the configured streak.
 10. `--prune-jpegs` deletes JPEGs for a `done` night, and does not for a `failed` one
     or one whose error fraction is too high; `--prune-dry-run` deletes nothing.
-11. `--status` reads a ledger and reports without an archive directory present.
-12. The log throttle collapses per-frame lines but passes other messages through.
+11. A night whose directory mtime is inside `--min-age` is skipped, left `pending`, and
+    named in the summary; `--min-age 0` processes it. A night with old filename
+    timestamps but a fresh mtime is skipped too — the rule is mtime, not filename.
+12. `--prune-jpegs` never prunes a night skipped for being too recent.
+13. `--status` reads a ledger and reports without an archive directory present.
+14. The log throttle collapses per-frame lines but passes other messages through.
 
 ## Expected run
 

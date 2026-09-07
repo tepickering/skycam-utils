@@ -105,3 +105,122 @@ def test_timing_averages_only_completed_nights(tmp_path):
     ledger.mark_failed("2025-01-03", "boom")
 
     assert ledger.timing() == (2, 1500.0)
+import time
+
+from skycam_utils.alcor import (
+    ALCOR_ARCHIVE_MIN_AGE,
+    discover_nights,
+    is_too_recent,
+    night_last_modified,
+)
+
+
+def _make_archive(root, names=("2025-01-01", "2025-01-02", "2025-01-03")):
+    """An archive tree of empty night directories plus the sibling product trees."""
+    root = Path(root)
+    for name in names:
+        (root / name).mkdir(parents=True)
+    (root / "keograms").mkdir(exist_ok=True)
+    (root / "movies").mkdir(exist_ok=True)
+    (root / "notes.txt").write_text("not a night")
+    return root
+
+
+def test_discover_nights_skips_the_sibling_product_trees(tmp_path):
+    """keograms/ and movies/ live beside the nights and must never be processed."""
+    archive = _make_archive(tmp_path)
+
+    found = [p.name for p in discover_nights(archive)]
+
+    assert found == ["2025-01-01", "2025-01-02", "2025-01-03"]
+
+
+def test_discover_nights_accepts_underscored_names(tmp_path):
+    archive = _make_archive(tmp_path, names=("2025-01-01", "2025_01_02"))
+
+    assert [p.name for p in discover_nights(archive)] == ["2025-01-01", "2025_01_02"]
+
+
+def test_discover_nights_orders_by_date_and_honours_reverse(tmp_path):
+    archive = _make_archive(tmp_path)
+
+    assert [p.name for p in discover_nights(archive, reverse=True)] == [
+        "2025-01-03", "2025-01-02", "2025-01-01"
+    ]
+
+
+def test_discover_nights_bounds_the_range(tmp_path):
+    archive = _make_archive(tmp_path)
+
+    found = [p.name for p in discover_nights(archive, start="2025-01-02",
+                                             end="2025-01-02")]
+
+    assert found == ["2025-01-02"]
+
+
+def test_discover_nights_takes_an_explicit_list(tmp_path):
+    archive = _make_archive(tmp_path)
+
+    found = [p.name for p in discover_nights(archive, nights=["2025-01-03",
+                                                              "2025-01-01"])]
+
+    assert found == ["2025-01-01", "2025-01-03"]
+
+
+def test_discover_nights_raises_for_a_missing_explicit_night(tmp_path):
+    archive = _make_archive(tmp_path)
+
+    with pytest.raises(FileNotFoundError, match="2025-12-25"):
+        discover_nights(archive, nights=["2025-12-25"])
+
+
+def test_a_night_still_being_written_is_too_recent(tmp_path):
+    """The archive syncs from the camera host; a half-arrived night must be left alone."""
+    night = tmp_path / "2025-01-01"
+    night.mkdir()
+    (night / "2025_01_01__20_00_00.fits.bz2").write_bytes(b"x")
+
+    assert is_too_recent(night, min_age_hours=24.0)
+
+
+def test_a_quiet_night_is_not_too_recent(tmp_path):
+    night = tmp_path / "2025-01-01"
+    night.mkdir()
+    (night / "2025_01_01__20_00_00.fits.bz2").write_bytes(b"x")
+
+    old = time.time() - 48 * 3600
+    os.utime(night / "2025_01_01__20_00_00.fits.bz2", (old, old))
+    os.utime(night, (old, old))
+
+    assert not is_too_recent(night, min_age_hours=24.0)
+
+
+def test_min_age_zero_disables_the_quiet_period(tmp_path):
+    night = tmp_path / "2025-01-01"
+    night.mkdir()
+    (night / "2025_01_01__20_00_00.fits.bz2").write_bytes(b"x")
+
+    assert not is_too_recent(night, min_age_hours=0)
+
+
+def test_old_filenames_do_not_excuse_a_fresh_mtime(tmp_path):
+    """A back-filled old night has old filename stamps but new mtimes -- the
+    rule is mtime, which is the only test that catches both failure modes."""
+    night = tmp_path / "2024-03-01"
+    night.mkdir()
+    (night / "2024_03_01__20_00_00.fits.bz2").write_bytes(b"x")
+
+    assert is_too_recent(night, min_age_hours=ALCOR_ARCHIVE_MIN_AGE)
+
+
+def test_night_last_modified_uses_the_directory_when_it_is_newer(tmp_path):
+    """rsync renames its temp file into place, which moves the directory mtime."""
+    night = tmp_path / "2025-01-01"
+    night.mkdir()
+    frame = night / "2025_01_01__20_00_00.fits.bz2"
+    frame.write_bytes(b"x")
+
+    old = time.time() - 48 * 3600
+    os.utime(frame, (old, old))
+
+    assert night_last_modified(night) > old + 3600

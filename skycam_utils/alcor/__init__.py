@@ -196,6 +196,15 @@ from .night import (  # noqa: F401
     _build_day_keogram,
     alcor_process_night,
 )
+from .archive import (  # noqa: F401
+    ALCOR_ARCHIVE_MIN_AGE,
+    NIGHT_NAME_RE,
+    _as_date,
+    _night_date,
+    discover_nights,
+    is_too_recent,
+    night_last_modified,
+)
 from .cli import (  # noqa: F401
     alcor_proc_fits_cli,
     alcor_keogram_cli,
@@ -214,6 +223,7 @@ from .cli import (  # noqa: F401
 
 __all__ = [
     "ALCOR_AIRMASS_TERM",
+    "ALCOR_ARCHIVE_MIN_AGE",
     "ALCOR_AXIS_TILT",
     "ALCOR_BADPIX_POLE_RADIUS",
     "ALCOR_BADPIX_RIM_DILATION",
@@ -247,6 +257,9 @@ __all__ = [
     "ArchiveLedger",
     "FINGERPRINT_KEYS",
     "LEDGER_VERSION",
+    "NIGHT_NAME_RE",
+    "_as_date",
+    "_night_date",
     "alcor_badpix_search_region",
     "alcor_calibrate_photometry",
     "alcor_calibration",
@@ -279,14 +292,17 @@ __all__ = [
     "create_horizon_mask",
     "create_horizon_mask_cli",
     "detect_alcor_stars",
+    "discover_nights",
     "fit_alcor_wcs",
     "fit_alcor_wcs_cli",
+    "is_too_recent",
     "load_alcor_badpix_mask",
     "load_alcor_fits",
     "load_alcor_horizon_mask",
     "load_alcor_keogram_fits",
     "load_alcor_sb_keogram_fits",
     "lookup_sloan_photometry",
+    "night_last_modified",
     "options_fingerprint",
     "plot_alcor_fits",
     "plot_alcor_fits_cli",

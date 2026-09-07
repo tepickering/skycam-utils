@@ -91,8 +91,6 @@ def test_lookup_sloan_photometry_returns_catalog_dict():
 
 
 def test_lookup_sloan_photometry_errors_for_missing_and_ambiguous(monkeypatch):
-    from skycam_utils import alcor
-
     with pytest.raises(KeyError, match="not found"):
         lookup_sloan_photometry("definitely not a star")
 
@@ -101,7 +99,7 @@ def test_lookup_sloan_photometry_errors_for_missing_and_ambiguous(monkeypatch):
         "HD": [1, 2],
         "Vmag": [1.0, 2.0],
     })
-    monkeypatch.setattr(alcor.Table, "read", lambda *args, **kwargs: duplicate)
+    monkeypatch.setattr(Table, "read", lambda *args, **kwargs: duplicate)
     with pytest.raises(ValueError, match="ambiguous"):
         lookup_sloan_photometry("dupe")
 
@@ -235,7 +233,7 @@ def test_alcor_star_photometry_writes_named_csv(tmp_path):
     assert np.all(np.isfinite(phot["ycen"]))
 
 
-def test_alcor_star_photometry_retains_nonpositive_channel_flux(tmp_path, monkeypatch):
+def test_alcor_star_photometry_retains_nonpositive_channel_flux(tmp_path, monkeypatch, patch_alcor):
     from astropy.time import Time
     from skycam_utils import alcor
 
@@ -260,12 +258,12 @@ def test_alcor_star_photometry_retains_nonpositive_channel_flux(tmp_path, monkey
         "Alt": [80.0, 81.0],
         "Az": [10.0, 20.0],
     })
-    monkeypatch.setattr(alcor, "_alcor_frame_time",
-                        lambda filename: Time("2024-09-05T07:00:00"))
-    monkeypatch.setattr(alcor, "load_alcor_fits",
-                        lambda *args, **kwargs: (cube, FakeWCS(), None))
-    monkeypatch.setattr(alcor, "alcor_photometry_reference_altaz",
-                        lambda *args, **kwargs: cat)
+    patch_alcor("_alcor_frame_time",
+                lambda filename: Time("2024-09-05T07:00:00"))
+    patch_alcor("load_alcor_fits",
+                lambda *args, **kwargs: (cube, FakeWCS(), None))
+    patch_alcor("alcor_photometry_reference_altaz",
+                lambda *args, **kwargs: cat)
 
     phot, output_file = alcor_star_photometry(
         tmp_path / "synthetic.fits",
@@ -302,7 +300,7 @@ def test_aperture_saturated_detects_ceiling_pixel():
     assert _aperture_saturated(image, 2.0, 2.0, 3.0, 32767.0) is False
 
 
-def test_alcor_star_photometry_flags_saturation(tmp_path, monkeypatch):
+def test_alcor_star_photometry_flags_saturation(tmp_path, monkeypatch, patch_alcor):
     from astropy.time import Time
     from skycam_utils import alcor
 
@@ -328,12 +326,12 @@ def test_alcor_star_photometry_flags_saturation(tmp_path, monkeypatch):
         "Alt": [80.0, 81.0],
         "Az": [10.0, 20.0],
     })
-    monkeypatch.setattr(alcor, "_alcor_frame_time",
-                        lambda filename: Time("2024-09-05T07:00:00"))
-    monkeypatch.setattr(alcor, "load_alcor_fits",
-                        lambda *args, **kwargs: (cube, FakeWCS(), None))
-    monkeypatch.setattr(alcor, "alcor_photometry_reference_altaz",
-                        lambda *args, **kwargs: cat)
+    patch_alcor("_alcor_frame_time",
+                lambda filename: Time("2024-09-05T07:00:00"))
+    patch_alcor("load_alcor_fits",
+                lambda *args, **kwargs: (cube, FakeWCS(), None))
+    patch_alcor("alcor_photometry_reference_altaz",
+                lambda *args, **kwargs: cat)
 
     phot, _ = alcor_star_photometry(
         tmp_path / "synthetic.fits",
@@ -360,9 +358,8 @@ def _gaussian_star_cube(ny=80, nx=80, cx=40.3, cy=39.7, sigma=1.3,
     return cube
 
 
-def _patch_single_star(monkeypatch, cube, px, py):
+def _patch_single_star(patch_alcor, cube, px, py):
     from astropy.time import Time
-    from skycam_utils import alcor
 
     class FakeWCS:
         def world_to_pixel_values(self, az, alt):
@@ -372,19 +369,19 @@ def _patch_single_star(monkeypatch, cube, px, py):
             return self.world_to_pixel_values(az, alt)
 
     cat = Table({"NAME": ["star"], "HD": [1], "Alt": [80.0], "Az": [10.0]})
-    monkeypatch.setattr(alcor, "_alcor_frame_time",
-                        lambda filename: Time("2024-09-05T07:00:00"))
-    monkeypatch.setattr(alcor, "load_alcor_fits",
-                        lambda *a, **k: (cube, FakeWCS(), None))
-    monkeypatch.setattr(alcor, "alcor_photometry_reference_altaz",
-                        lambda *a, **k: cat)
+    patch_alcor("_alcor_frame_time",
+                lambda filename: Time("2024-09-05T07:00:00"))
+    patch_alcor("load_alcor_fits",
+                lambda *a, **k: (cube, FakeWCS(), None))
+    patch_alcor("alcor_photometry_reference_altaz",
+                lambda *a, **k: cat)
 
 
-def test_alcor_star_photometry_gaussian_recovers_clean_star(tmp_path, monkeypatch):
+def test_alcor_star_photometry_gaussian_recovers_clean_star(tmp_path, monkeypatch, patch_alcor):
     cx, cy, sigma = 40.3, 39.7, 1.3
     amps = (4000.0, 6000.0, 3000.0)
     cube = _gaussian_star_cube(cx=cx, cy=cy, sigma=sigma, amps=amps)
-    _patch_single_star(monkeypatch, cube, px=40.0, py=40.0)
+    _patch_single_star(patch_alcor, cube, px=40.0, py=40.0)
 
     phot, _ = alcor_star_photometry(
         tmp_path / "synthetic.fits", output_file=tmp_path / "out.csv",
@@ -403,7 +400,7 @@ def test_alcor_star_photometry_gaussian_recovers_clean_star(tmp_path, monkeypatc
 
 
 def test_alcor_star_photometry_gaussian_beats_aperture_under_nonlinearity(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, patch_alcor):
     cx, cy, sigma = 40.0, 40.0, 1.3
     amp = 40000.0
     ceiling = 16000.0
@@ -412,13 +409,13 @@ def test_alcor_star_photometry_gaussian_beats_aperture_under_nonlinearity(
     cube = np.minimum(cube, ceiling)        # mimic per-pixel non-linearity
     true_flux = amp * 2.0 * np.pi * sigma ** 2
 
-    _patch_single_star(monkeypatch, cube, px=cx, py=cy)
+    _patch_single_star(patch_alcor, cube, px=cx, py=cy)
     phot_g, _ = alcor_star_photometry(
         tmp_path / "g.fits", output_file=tmp_path / "g.csv",
         gaussian=True, aperture_radius=5.0, annulus_width=2.0,
         mask_threshold=15000.0)
 
-    _patch_single_star(monkeypatch, cube, px=cx, py=cy)
+    _patch_single_star(patch_alcor, cube, px=cx, py=cy)
     phot_a, _ = alcor_star_photometry(
         tmp_path / "a.fits", output_file=tmp_path / "a.csv",
         gaussian=False, aperture_radius=5.0, annulus_width=2.0)
@@ -432,9 +429,9 @@ def test_alcor_star_photometry_gaussian_beats_aperture_under_nonlinearity(
     np.testing.assert_allclose(rg, true_flux, rtol=0.1)
 
 
-def test_alcor_star_photometry_aperture_mode_fwhm_is_nan(tmp_path, monkeypatch):
+def test_alcor_star_photometry_aperture_mode_fwhm_is_nan(tmp_path, monkeypatch, patch_alcor):
     cube = _gaussian_star_cube()
-    _patch_single_star(monkeypatch, cube, px=40.0, py=40.0)
+    _patch_single_star(patch_alcor, cube, px=40.0, py=40.0)
 
     phot, _ = alcor_star_photometry(
         tmp_path / "a.fits", output_file=tmp_path / "a.csv",
@@ -445,9 +442,9 @@ def test_alcor_star_photometry_aperture_mode_fwhm_is_nan(tmp_path, monkeypatch):
 
 
 def test_alcor_star_photometry_gaussian_retains_signal_free_star(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, patch_alcor):
     cube = np.full((3, 60, 60), 100.0)      # flat field, no star
-    _patch_single_star(monkeypatch, cube, px=30.0, py=30.0)
+    _patch_single_star(patch_alcor, cube, px=30.0, py=30.0)
 
     phot, output_file = alcor_star_photometry(
         tmp_path / "flat.fits", output_file=tmp_path / "flat.csv",
@@ -461,7 +458,7 @@ def test_alcor_star_photometry_gaussian_retains_signal_free_star(
         assert np.isnan(phot.iloc[0][f"mag_{channel}"])
 
 
-def test_alcor_star_photometry_cli_passes_gaussian_flags(monkeypatch):
+def test_alcor_star_photometry_cli_passes_gaussian_flags(monkeypatch, patch_alcor):
     from skycam_utils import alcor
 
     captured = {}
@@ -470,7 +467,7 @@ def test_alcor_star_photometry_cli_passes_gaussian_flags(monkeypatch):
         captured.update(kwargs)
         return None, None
 
-    monkeypatch.setattr(alcor, "alcor_star_photometry", fake_photometry)
+    patch_alcor("alcor_star_photometry", fake_photometry)
     monkeypatch.setattr(sys, "argv",
                         ["alcor_star_photometry", "frame.fits",
                          "--gaussian", "--mask-threshold", "12000"])
@@ -481,11 +478,11 @@ def test_alcor_star_photometry_cli_passes_gaussian_flags(monkeypatch):
     assert captured["mask_threshold"] == 12000.0
 
 
-def test_alcor_star_photometry_both_writes_combined_schema(tmp_path, monkeypatch):
+def test_alcor_star_photometry_both_writes_combined_schema(tmp_path, monkeypatch, patch_alcor):
     cx, cy, sigma = 40.3, 39.7, 1.3
     amps = (4000.0, 6000.0, 3000.0)
     cube = _gaussian_star_cube(cx=cx, cy=cy, sigma=sigma, amps=amps)
-    _patch_single_star(monkeypatch, cube, px=40.0, py=40.0)
+    _patch_single_star(patch_alcor, cube, px=40.0, py=40.0)
 
     phot, output_file = alcor_star_photometry(
         tmp_path / "s.fits", output_file=tmp_path / "out.csv",
@@ -509,18 +506,18 @@ def test_alcor_star_photometry_both_writes_combined_schema(tmp_path, monkeypatch
     assert output_file.exists()
 
 
-def test_alcor_star_photometry_both_matches_single_modes(tmp_path, monkeypatch):
+def test_alcor_star_photometry_both_matches_single_modes(tmp_path, monkeypatch, patch_alcor):
     cube = _gaussian_star_cube(cx=40.0, cy=40.0, sigma=1.3,
                                amps=(4000.0, 6000.0, 3000.0))
-    _patch_single_star(monkeypatch, cube, px=40.0, py=40.0)
+    _patch_single_star(patch_alcor, cube, px=40.0, py=40.0)
     phot_both, _ = alcor_star_photometry(
         tmp_path / "b.fits", output_file=tmp_path / "b.csv",
         both=True, aperture_radius=5.0, annulus_width=2.0)
-    _patch_single_star(monkeypatch, cube, px=40.0, py=40.0)
+    _patch_single_star(patch_alcor, cube, px=40.0, py=40.0)
     phot_ap, _ = alcor_star_photometry(
         tmp_path / "a.fits", output_file=tmp_path / "a.csv",
         gaussian=False, aperture_radius=5.0, annulus_width=2.0)
-    _patch_single_star(monkeypatch, cube, px=40.0, py=40.0)
+    _patch_single_star(patch_alcor, cube, px=40.0, py=40.0)
     phot_g, _ = alcor_star_photometry(
         tmp_path / "g.fits", output_file=tmp_path / "g.csv",
         gaussian=True, aperture_radius=5.0, annulus_width=2.0)
@@ -543,13 +540,13 @@ def test_alcor_star_photometry_both_matches_single_modes(tmp_path, monkeypatch):
 
 
 def test_alcor_star_photometry_both_keeps_aperture_when_gaussian_fails(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, patch_alcor):
     from skycam_utils import alcor
     cube = _gaussian_star_cube(cx=40.0, cy=40.0, sigma=1.3,
                                amps=(4000.0, 6000.0, 3000.0))
-    _patch_single_star(monkeypatch, cube, px=40.0, py=40.0)
-    monkeypatch.setattr(alcor, "_gaussian_psf_photometry",
-                        lambda *a, **k: None)
+    _patch_single_star(patch_alcor, cube, px=40.0, py=40.0)
+    patch_alcor("_gaussian_psf_photometry",
+                lambda *a, **k: None)
 
     phot, _ = alcor_star_photometry(
         tmp_path / "b.fits", output_file=tmp_path / "b.csv",
@@ -562,7 +559,7 @@ def test_alcor_star_photometry_both_keeps_aperture_when_gaussian_fails(
     assert np.isnan(phot.loc["star", "xcen_gauss"])
 
 
-def test_alcor_star_photometry_cli_passes_both_flag(monkeypatch):
+def test_alcor_star_photometry_cli_passes_both_flag(monkeypatch, patch_alcor):
     from skycam_utils import alcor
 
     captured = {}
@@ -571,7 +568,7 @@ def test_alcor_star_photometry_cli_passes_both_flag(monkeypatch):
         captured.update(kwargs)
         return None, None
 
-    monkeypatch.setattr(alcor, "alcor_star_photometry", fake_photometry)
+    patch_alcor("alcor_star_photometry", fake_photometry)
     monkeypatch.setattr(sys, "argv",
                         ["alcor_star_photometry", "frame.fits", "--both"])
 
@@ -598,13 +595,13 @@ def test_alcor_zeropoint_resolves_nearest_epoch():
     assert alcor_zeropoint(Time("2024-09-10T00:00:00"))["g"]["zp"] != -999.0
 
 
-def test_alcor_calibrate_photometry_adds_calibrated_and_offset(monkeypatch):
+def test_alcor_calibrate_photometry_adds_calibrated_and_offset(monkeypatch, patch_alcor):
     from astropy.time import Time
     from skycam_utils import alcor
     from skycam_utils.alcor import ALCOR_AIRMASS_TERM, _airmass
 
     cmap = {"teststar": {"BV": 0.6, "V": 3.0, "R": 2.6, "B": 3.6}}
-    monkeypatch.setattr(alcor, "_catalog_calibration_map", lambda: cmap)
+    patch_alcor("_catalog_calibration_map", lambda: cmap)
     df = pd.DataFrame(
         {"altitude": [60.0], "mag_r": [-9.0], "mag_g": [-9.2], "mag_b": [-8.5]},
         index=pd.Index(["teststar"], name="name"))
@@ -622,12 +619,12 @@ def test_alcor_calibrate_photometry_adds_calibrated_and_offset(monkeypatch):
             expected_cal - cmap["teststar"][catband])
 
 
-def test_alcor_calibrate_photometry_handles_both_suffixes(monkeypatch):
+def test_alcor_calibrate_photometry_handles_both_suffixes(monkeypatch, patch_alcor):
     from astropy.time import Time
     from skycam_utils import alcor
 
-    monkeypatch.setattr(alcor, "_catalog_calibration_map",
-                        lambda: {"s": {"BV": 0.0, "V": 2.0, "R": 2.0, "B": 2.0}})
+    patch_alcor("_catalog_calibration_map",
+                lambda: {"s": {"BV": 0.0, "V": 2.0, "R": 2.0, "B": 2.0}})
     df = pd.DataFrame(
         {"altitude": [80.0],
          "mag_r_ap": [-9.0], "mag_g_ap": [-9.0], "mag_b_ap": [-9.0],
@@ -642,13 +639,13 @@ def test_alcor_calibrate_photometry_handles_both_suffixes(monkeypatch):
             assert np.isfinite(out[f"cal_{band}{suffix}"].iloc[0])
 
 
-def test_alcor_calibrate_photometry_nans_bright_and_unknown(monkeypatch):
+def test_alcor_calibrate_photometry_nans_bright_and_unknown(monkeypatch, patch_alcor):
     from astropy.time import Time
     from skycam_utils import alcor
     from skycam_utils.alcor import ALCOR_BRIGHT_CUT
 
-    monkeypatch.setattr(alcor, "_catalog_calibration_map",
-                        lambda: {"known": {"BV": 0.5, "V": 3.0, "R": 2.7, "B": 3.5}})
+    patch_alcor("_catalog_calibration_map",
+                lambda: {"known": {"BV": 0.5, "V": 3.0, "R": 2.7, "B": 3.5}})
     df = pd.DataFrame(
         {"altitude": [70.0, 70.0, 70.0],
          "mag_g": [ALCOR_BRIGHT_CUT - 1.0, -9.0, -9.0],
@@ -670,15 +667,15 @@ def test_alcor_calibrate_photometry_nans_bright_and_unknown(monkeypatch):
     assert np.isnan(out["ext_g"].iloc[2])
 
 
-def test_alcor_star_photometry_includes_calibrated_columns(tmp_path, monkeypatch):
+def test_alcor_star_photometry_includes_calibrated_columns(tmp_path, monkeypatch, patch_alcor):
     from skycam_utils import alcor
     from skycam_utils.alcor import ALCOR_AIRMASS_TERM, _airmass
 
     cube = _gaussian_star_cube(cx=40.3, cy=39.7, sigma=1.3,
                                amps=(800.0, 1200.0, 600.0))
-    _patch_single_star(monkeypatch, cube, px=40.0, py=40.0)
+    _patch_single_star(patch_alcor, cube, px=40.0, py=40.0)
     cmap = {"star": {"BV": 0.5, "V": 3.0, "R": 2.7, "B": 3.5}}
-    monkeypatch.setattr(alcor, "_catalog_calibration_map", lambda: cmap)
+    patch_alcor("_catalog_calibration_map", lambda: cmap)
 
     phot, output_file = alcor_star_photometry(
         tmp_path / "s.fits", output_file=tmp_path / "s.csv",
@@ -701,7 +698,7 @@ def test_alcor_star_photometry_includes_calibrated_columns(tmp_path, monkeypatch
     assert {"cal_g", "ext_g", "cal_r", "ext_b"} <= set(disk.columns)
 
 
-def test_alcor_star_photometry_cli_defaults_to_aperture(monkeypatch):
+def test_alcor_star_photometry_cli_defaults_to_aperture(monkeypatch, patch_alcor):
     from skycam_utils import alcor
 
     captured = {}
@@ -710,7 +707,7 @@ def test_alcor_star_photometry_cli_defaults_to_aperture(monkeypatch):
         captured.update(kwargs)
         return None, None
 
-    monkeypatch.setattr(alcor, "alcor_star_photometry", fake_photometry)
+    patch_alcor("alcor_star_photometry", fake_photometry)
     monkeypatch.setattr(sys, "argv",
                         ["alcor_star_photometry", "frame.fits"])
 
@@ -721,7 +718,7 @@ def test_alcor_star_photometry_cli_defaults_to_aperture(monkeypatch):
     assert captured["mask_threshold"] == alcor.ALCOR_NONLINEAR_THRESHOLD
 
 
-def test_alcor_star_photometry_default_vmag_limit_is_5p5(monkeypatch, tmp_path):
+def test_alcor_star_photometry_default_vmag_limit_is_5p5(monkeypatch, tmp_path, patch_alcor):
     from astropy.time import Time
     from skycam_utils import alcor
 
@@ -733,23 +730,23 @@ def test_alcor_star_photometry_default_vmag_limit_is_5p5(monkeypatch, tmp_path):
             return self.world_to_pixel_values(az, alt)
 
     seen = {}
-    monkeypatch.setattr(alcor, "_alcor_frame_time",
-                        lambda filename: Time("2024-09-05T07:00:00"))
-    monkeypatch.setattr(alcor, "load_alcor_fits",
-                        lambda *args, **kwargs: (
+    patch_alcor("_alcor_frame_time",
+                lambda filename: Time("2024-09-05T07:00:00"))
+    patch_alcor("load_alcor_fits",
+                lambda *args, **kwargs: (
                             np.zeros((3, 20, 20), dtype=float), FakeWCS(), None))
 
     def fake_catalog(time, vmag_limit, min_alt, refraction, **kwargs):
         seen["vmag_limit"] = vmag_limit
         return Table({"NAME": ["default"], "HD": [1], "Alt": [80.0], "Az": [10.0]})
 
-    monkeypatch.setattr(alcor, "alcor_photometry_reference_altaz", fake_catalog)
+    patch_alcor("alcor_photometry_reference_altaz", fake_catalog)
 
     def fake_photometry(image, xcen, ycen, aperture_radius, annulus_width):
         seen["aperture_radius"] = aperture_radius
         return 1.0, 0.0
 
-    monkeypatch.setattr(alcor, "_aperture_annulus_photometry", fake_photometry)
+    patch_alcor("_aperture_annulus_photometry", fake_photometry)
 
     alcor_star_photometry(tmp_path / "synthetic.fits",
                           output_file=tmp_path / "synthetic.csv")
@@ -758,21 +755,21 @@ def test_alcor_star_photometry_default_vmag_limit_is_5p5(monkeypatch, tmp_path):
     assert seen["aperture_radius"] == 4.0
 
 
-def test_alcor_star_photometry_rejects_sunlit_images(monkeypatch, tmp_path, capsys):
+def test_alcor_star_photometry_rejects_sunlit_images(monkeypatch, tmp_path, capsys, patch_alcor):
     from astropy.time import Time
     from skycam_utils import alcor
 
     output = tmp_path / "sunlit.csv"
     loaded = {"called": False}
-    monkeypatch.setattr(alcor, "_alcor_frame_time",
-                        lambda filename: Time("2024-09-05T20:00:00"))
-    monkeypatch.setattr(alcor, "_sun_altitude", lambda time: -5.0)
+    patch_alcor("_alcor_frame_time",
+                lambda filename: Time("2024-09-05T20:00:00"))
+    patch_alcor("_sun_altitude", lambda time: -5.0)
 
     def fake_load(*args, **kwargs):
         loaded["called"] = True
         raise AssertionError("sunlit image should not be loaded")
 
-    monkeypatch.setattr(alcor, "load_alcor_fits", fake_load)
+    patch_alcor("load_alcor_fits", fake_load)
 
     phot, output_file = alcor_star_photometry(
         tmp_path / "sunlit.fits",
@@ -944,7 +941,7 @@ def test_alcor_keogram_can_report_progress(tmp_path):
     assert progress_output.endswith("\n")
 
 
-def test_alcor_keogram_dispatches_center_columns_to_workers(tmp_path, monkeypatch):
+def test_alcor_keogram_dispatches_center_columns_to_workers(tmp_path, monkeypatch, patch_alcor):
     for index in range(3):
         shutil.copyfile(TEST_FITS, tmp_path / f"alcor_{index:03d}.fits.bz2")
 
@@ -976,8 +973,8 @@ def test_alcor_keogram_dispatches_center_columns_to_workers(tmp_path, monkeypatc
             submitted_tasks.append(task)
             return FakeFuture(func(task))
 
-    monkeypatch.setattr("skycam_utils.alcor.ProcessPoolExecutor", FakeExecutor)
-    monkeypatch.setattr("skycam_utils.alcor.as_completed", lambda futures: futures)
+    patch_alcor("ProcessPoolExecutor", FakeExecutor)
+    patch_alcor("as_completed", lambda futures: futures)
 
     parallel_keogram, parallel_timestamps, parallel_files = alcor_keogram(
         tmp_path,

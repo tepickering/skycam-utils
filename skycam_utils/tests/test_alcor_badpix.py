@@ -144,13 +144,13 @@ def test_load_alcor_fits_default_three_tuple(tmp_path):
     np.testing.assert_array_equal(out_cube, cube.astype(np.float32))  # untouched
 
 
-def test_create_badpix_mask_min_frames_gate(tmp_path, monkeypatch):
+def test_create_badpix_mask_min_frames_gate(tmp_path, monkeypatch, patch_alcor):
     from skycam_utils import alcor
     day = tmp_path / "2026-05-18"
     day.mkdir()
     # make select_dark_frames return a tiny set regardless of contents
-    monkeypatch.setattr(alcor, "select_dark_frames",
-                        lambda files, **kw: list(files)[:3])
+    patch_alcor("select_dark_frames",
+                lambda files, **kw: list(files)[:3])
     for i in range(3):
         (day / f"2026_05_18__0{i}_00_00.fits.bz2").write_bytes(b"x")
 
@@ -181,7 +181,7 @@ def test_load_alcor_fits_resolves_epoch_mask(tmp_path):
     assert out_mask is not None and bool(out_mask[0, 30, 30])
 
 
-def test_create_badpix_mask_writes_and_resolves(tmp_path, monkeypatch):
+def test_create_badpix_mask_writes_and_resolves(tmp_path, monkeypatch, patch_alcor):
     from skycam_utils import alcor
     day = tmp_path / "2026-07-01"
     day.mkdir()
@@ -194,7 +194,7 @@ def test_create_badpix_mask_writes_and_resolves(tmp_path, monkeypatch):
         fits.PrimaryHDU(data=cube).writeto(p)
         frames.append(p)
     # bypass ephemeris: treat all frames as dark
-    monkeypatch.setattr(alcor, "select_dark_frames", lambda files, **kw: list(files))
+    patch_alcor("select_dark_frames", lambda files, **kw: list(files))
 
     out = alcor.create_badpix_mask(day, out_dir=str(tmp_path), min_frames=1,
                                    scratch_dir=str(tmp_path))

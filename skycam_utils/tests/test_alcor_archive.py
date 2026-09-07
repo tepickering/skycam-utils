@@ -719,3 +719,43 @@ def test_status_reports_the_reason_a_night_failed(tmp_path, patch_alcor):
 def test_status_raises_without_a_ledger(tmp_path):
     with pytest.raises(FileNotFoundError, match="ledger.json"):
         alcor_archive_status(tmp_path / "nowhere")
+import sys
+
+from skycam_utils.alcor import alcor_process_archive_cli
+
+
+def test_cli_runs_an_archive(tmp_path, patch_alcor, monkeypatch):
+    archive = _aged_archive(tmp_path / "archive")
+    seen = []
+    patch_alcor("alcor_process_night", _stub_night(seen))
+    monkeypatch.setattr(sys, "argv", [
+        "alcor_process_archive", str(archive), "-o", str(tmp_path / "out"),
+        "--min-age", "0", "--workers", "1",
+    ])
+
+    alcor_process_archive_cli()
+
+    assert seen == ["2025-01-01", "2025-01-02", "2025-01-03"]
+
+
+def test_cli_status_mode_needs_no_archive_argument(tmp_path, patch_alcor,
+                                                   monkeypatch, capsys):
+    archive = _aged_archive(tmp_path / "archive")
+    patch_alcor("alcor_process_night", _stub_night([]))
+    alcor_process_archive(archive, out_dir=tmp_path / "out", min_age=0)
+
+    monkeypatch.setattr(sys, "argv", [
+        "alcor_process_archive", "--status", "-o", str(tmp_path / "out"),
+    ])
+    alcor_process_archive_cli()
+
+    assert "done 3" in capsys.readouterr().out
+
+
+def test_cli_requires_an_archive_dir_outside_status_mode(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "argv", [
+        "alcor_process_archive", "-o", str(tmp_path / "out"),
+    ])
+
+    with pytest.raises(SystemExit):
+        alcor_process_archive_cli()

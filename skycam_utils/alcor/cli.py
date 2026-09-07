@@ -30,6 +30,10 @@ from .keogram import (
     save_alcor_keogram_plot
 )
 from .night import alcor_process_night
+from .archive import (
+    ALCOR_ARCHIVE_MAX_CONSECUTIVE_FAILURES, ALCOR_ARCHIVE_MIN_AGE,
+    alcor_archive_status, alcor_process_archive
+)
 
 
 def alcor_proc_fits_cli():
@@ -464,6 +468,127 @@ def alcor_process_night_cli():
     if result["errors"]:
         print(f"# {len(result['errors'])} frames failed", file=sys.stderr)
 
+
+
+def alcor_process_archive_cli():
+    """
+    CLI entry point for :func:`alcor_process_archive`: run every night of an
+    archive through the night driver, resumably.
+    """
+    parser = argparse.ArgumentParser(
+        description="Process every night of a skycam archive into star "
+                    "photometry, sky-brightness summaries, and keograms. "
+                    "Resumable: rerun the same command to continue.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("archive_dir", nargs="?", default=None,
+                        help="Archive root holding one directory per night. "
+                             "Optional only with --status.")
+    parser.add_argument("-o", "--out-dir", required=True,
+                        help="Products tree. All state lives in "
+                             "<out-dir>/.archive_state/ (ledger.json, PAUSE, "
+                             "archive.log); each night writes to <out-dir>/<night>/.")
+    parser.add_argument("--status", action="store_true",
+                        help="Report the run's progress from the ledger and exit. "
+                             "Does not need the archive mounted.")
+    parser.add_argument("--start", default=None,
+                        help="Earliest night to process (YYYY-MM-DD, inclusive).")
+    parser.add_argument("--end", default=None,
+                        help="Latest night to process (YYYY-MM-DD, inclusive).")
+    parser.add_argument("--nights", nargs="+", default=None,
+                        help="Explicit night directory names instead of scanning.")
+    parser.add_argument("--reverse", action="store_true",
+                        help="Process newest nights first.")
+    parser.add_argument("--pattern", default="*.fits.bz2", help="Glob for input frames.")
+    parser.add_argument("--min-age", type=float, default=ALCOR_ARCHIVE_MIN_AGE,
+                        help="Hours a night must be unchanged before it is "
+                             "processed. The archive syncs from the camera host, "
+                             "so a night modified more recently may still be "
+                             "arriving. 0 disables the rule.")
+    parser.add_argument("--prune-jpegs", action="store_true",
+                        help="DELETE each night's vendor JPEGs once its products "
+                             "are written and verified. Irreversible; frees "
+                             "~7.3 GB per night.")
+    parser.add_argument("--prune-dry-run", action="store_true",
+                        help="Report what --prune-jpegs would free, deleting "
+                             "nothing. Overrides --prune-jpegs.")
+    parser.add_argument("--retry-failed", action="store_true",
+                        help="Re-attempt nights previously recorded as failed.")
+    parser.add_argument("--force-options", action="store_true",
+                        help="Continue even though the photometry options differ "
+                             "from the ones this ledger was started with. The "
+                             "combined photometry will mix schemas.")
+    parser.add_argument("--max-consecutive-failures", type=int,
+                        default=ALCOR_ARCHIVE_MAX_CONSECUTIVE_FAILURES,
+                        help="Abort after this many nights fail in a row (an "
+                             "unmounted archive fails every one instantly).")
+    parser.add_argument("--verbose", action="store_true",
+                        help="Log every per-frame line instead of a throttled "
+                             "progress line each minute.")
+    # Forwarded to alcor_process_night.
+    parser.add_argument("--sun-alt-max", type=float, default=-12.0,
+                        help="Night is the Sun below this altitude (deg).")
+    parser.add_argument("--day-keogram", action="store_true",
+                        help="Also build each night's full-day raw RGB keogram.")
+    parser.add_argument("--median-stack", action="store_true",
+                        help="Also build each night's raw median stack.")
+    parser.add_argument("--write-sb-fits", action="store_true",
+                        help="Keep each frame's full surface-brightness map.")
+    parser.add_argument("--no-horizon-mask", action="store_true",
+                        help="Do not blank not-sky pixels.")
+    parser.add_argument("--reprocess", action="store_true",
+                        help="Re-measure star photometry even where "
+                             "<frame>_phot.csv already exists.")
+    parser.add_argument("--aperture-radius", type=float, default=4.0,
+                        help="Star aperture radius in pixels.")
+    parser.add_argument("--annulus-width", type=float, default=1.0,
+                        help="Star background annulus width in pixels.")
+    parser.add_argument("--min-altitude", type=float, default=20.0,
+                        help="Minimum catalog-star altitude to measure (deg).")
+    parser.add_argument("--vmag-limit", type=float, default=5.5,
+                        help="Faintest catalog star Vmag to measure.")
+    parser.add_argument("--no-variables", dest="variables", action="store_false",
+                        help="Do not measure the bright-variable catalog.")
+    parser.add_argument("--gaussian", action="store_true",
+                        help="Use constrained-Gaussian PSF photometry.")
+    parser.add_argument("--both", action="store_true",
+                        help="Measure aperture AND Gaussian photometry.")
+    parser.add_argument("--scratch-dir", default=None,
+                        help="Directory for the median-stack scratch memmap. "
+                             "Point this at local storage, not the archive.")
+    parser.add_argument("--masks-dir", default=None,
+                        help="Override the bad-pixel masks directory.")
+    parser.add_argument("--workers", type=int, default=None,
+                        help="Worker processes per night (default: one per core).")
+    parser.add_argument("--max-frames", type=int, default=None,
+                        help="Strided-subsample each night to at most this many "
+                             "frames. For smoke tests, not production runs.")
+    args = parser.parse_args()
+
+    if args.status:
+        alcor_archive_status(args.out_dir)
+        return
+    if args.archive_dir is None:
+        parser.error("archive_dir is required unless --status is given")
+
+    alcor_process_archive(
+        args.archive_dir, out_dir=args.out_dir, start=args.start, end=args.end,
+        nights=args.nights, reverse=args.reverse, pattern=args.pattern,
+        min_age=args.min_age, prune_jpegs=args.prune_jpegs,
+        prune_dry_run=args.prune_dry_run, retry_failed=args.retry_failed,
+        force_options=args.force_options,
+        max_consecutive_failures=args.max_consecutive_failures,
+        verbose=args.verbose, log=lambda message: print(message, file=sys.stderr),
+        install_signals=True,
+        sun_alt_max=args.sun_alt_max, day_keogram=args.day_keogram,
+        median_stack=args.median_stack, write_sb_fits=args.write_sb_fits,
+        horizon_mask=not args.no_horizon_mask, reprocess=args.reprocess,
+        aperture_radius=args.aperture_radius, annulus_width=args.annulus_width,
+        min_altitude=args.min_altitude, vmag_limit=args.vmag_limit,
+        variables=args.variables, gaussian=args.gaussian, both=args.both,
+        scratch_dir=args.scratch_dir, masks_dir=args.masks_dir,
+        workers=args.workers, max_frames=args.max_frames,
+    )
 
 
 def alcor_star_photometry_cli():

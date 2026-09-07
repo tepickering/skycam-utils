@@ -224,8 +224,10 @@ their ledger entry shows they were never pruned — so pruning can be turned on 
 through a run, or in a later pass over an already-processed archive. Every prune is logged
 with file count and bytes and recorded in the ledger. Nights with no rendered
 `movies/<night>/` are logged as warnings when pruned, since for those the JPEGs are the
-only existing rendering. (As of this design, movies for the 25 such nights that had
-JPEGs have been backfilled; `2026-09-06` was an empty directory.)
+only existing rendering. (As of 2026-09-07 this is moot: all 26 nights that lacked a
+`movies/<night>/` have been backfilled with `allsky.mp4` and `unwrap.mp4` at the same
+ffmpeg settings `scripts/make_movies.sh` uses, and a sweep of the archive finds no
+night without one.)
 
 ## Testing
 

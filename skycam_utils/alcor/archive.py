@@ -156,3 +156,93 @@ def is_too_recent(night_dir, min_age_hours, pattern="*.fits.bz2", now=None):
     now = time.time() if now is None else now
     age_hours = (now - night_last_modified(night_dir, pattern)) / 3600.0
     return age_hours < min_age_hours
+#: Seconds between the progress lines a night's frame log is collapsed into.
+ALCOR_ARCHIVE_LOG_INTERVAL = 60.0
+
+#: `alcor_process_night` reports each frame as ``[done/total] filename``.
+_FRAME_LINE_RE = re.compile(r"^\[(\d+)/(\d+)\]\s")
+
+
+def _duration(seconds):
+    """
+    Format a duration compactly: ``45s``, ``15m30s``, ``5h32m``, ``13.2d``.
+
+    Returns ``"?"`` for a non-finite value, which is what an unknown rate gives.
+    """
+    if seconds is None or seconds != seconds or seconds in (float("inf"),
+                                                            float("-inf")):
+        return "?"
+    seconds = max(0.0, float(seconds))
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m{int(seconds % 60):02d}s"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}h{int((seconds % 3600) // 60):02d}m"
+    return f"{seconds / 86400:.1f}d"
+
+
+class ThrottledLog:
+    """
+    Collapse a night's per-frame log lines into periodic progress updates.
+
+    `alcor_process_night` logs one line per frame. Over a whole archive that is
+    of order a million lines, so frame lines are swallowed and re-emitted at
+    most once per `interval` seconds as a rate-and-ETA summary. Every other
+    message -- the ones that say what was written, or what went wrong -- passes
+    through untouched, which is the point: the throttle must not hide anything
+    that only happens once.
+
+    Parameters
+    ----------
+    emit : callable
+        Called with each line that survives the throttle.
+    prefix : str (default="")
+        Prepended to every emitted line, e.g. ``"[ 12/613] 2025-01-12  "``.
+    interval : float (default ALCOR_ARCHIVE_LOG_INTERVAL)
+        Minimum seconds between progress lines.
+    verbose : bool (default=False)
+        Pass frame lines through instead of throttling them.
+    clock : callable (default `time.monotonic`)
+        Returns elapsed seconds; injectable for tests.
+
+    Attributes
+    ----------
+    done, total : int
+        The most recent frame counts seen.
+    """
+
+    def __init__(self, emit, prefix="", interval=ALCOR_ARCHIVE_LOG_INTERVAL,
+                 verbose=False, clock=time.monotonic):
+        self.emit = emit
+        self.prefix = prefix
+        self.interval = interval
+        self.verbose = verbose
+        self.clock = clock
+        self.started = clock()
+        self.last = self.started
+        self.done = 0
+        self.total = 0
+
+    def __call__(self, message):
+        match = _FRAME_LINE_RE.match(str(message))
+        if match is None:
+            self.emit(f"{self.prefix}{message}")
+            return
+        self.done, self.total = int(match.group(1)), int(match.group(2))
+        if self.verbose:
+            self.emit(f"{self.prefix}{message}")
+            return
+        now = self.clock()
+        if now - self.last < self.interval:
+            return
+        self.last = now
+        self.emit(f"{self.prefix}{self.progress()}")
+
+    def progress(self):
+        """A ``frames 61/2000 · 1.9 f/s · 13m left`` summary of this night."""
+        elapsed = self.clock() - self.started
+        rate = self.done / elapsed if elapsed > 0 else 0.0
+        left = (self.total - self.done) / rate if rate > 0 else float("nan")
+        return (f"frames {self.done}/{self.total} · {rate:.2f} f/s · "
+                f"{_duration(left)} left")

@@ -197,8 +197,12 @@ from .night import (  # noqa: F401
     alcor_process_night,
 )
 from .archive import (  # noqa: F401
+    ALCOR_ARCHIVE_LOG_INTERVAL,
     ALCOR_ARCHIVE_MIN_AGE,
     NIGHT_NAME_RE,
+    ThrottledLog,
+    _FRAME_LINE_RE,
+    _duration,
     _as_date,
     _night_date,
     discover_nights,
@@ -223,6 +227,7 @@ from .cli import (  # noqa: F401
 
 __all__ = [
     "ALCOR_AIRMASS_TERM",
+    "ALCOR_ARCHIVE_LOG_INTERVAL",
     "ALCOR_ARCHIVE_MIN_AGE",
     "ALCOR_AXIS_TILT",
     "ALCOR_BADPIX_POLE_RADIUS",
@@ -258,7 +263,9 @@ __all__ = [
     "FINGERPRINT_KEYS",
     "LEDGER_VERSION",
     "NIGHT_NAME_RE",
+    "ThrottledLog",
     "_as_date",
+    "_duration",
     "_night_date",
     "alcor_badpix_search_region",
     "alcor_calibrate_photometry",

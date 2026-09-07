@@ -224,3 +224,91 @@ def test_night_last_modified_uses_the_directory_when_it_is_newer(tmp_path):
     os.utime(frame, (old, old))
 
     assert night_last_modified(night) > old + 3600
+from skycam_utils.alcor import ThrottledLog, _duration
+
+
+class _FakeClock:
+    """A monotonic clock the test drives by hand."""
+
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+    def advance(self, seconds):
+        self.t += seconds
+
+
+def test_throttled_log_passes_non_frame_messages_through():
+    lines = []
+    log = ThrottledLog(lines.append, clock=_FakeClock())
+
+    log("wrote /out/2025-01-01/sky_brightness.csv")
+
+    assert lines == ["wrote /out/2025-01-01/sky_brightness.csv"]
+
+
+def test_throttled_log_swallows_frame_lines_inside_the_interval():
+    clock = _FakeClock()
+    lines = []
+    log = ThrottledLog(lines.append, interval=60.0, clock=clock)
+
+    for i in range(1, 51):
+        clock.advance(1.0)
+        log(f"[{i}/2000] 2025_01_01__20_00_00.fits.bz2")
+
+    assert lines == []
+    assert log.done == 50
+    assert log.total == 2000
+
+
+def test_throttled_log_emits_once_the_interval_has_passed():
+    clock = _FakeClock()
+    lines = []
+    log = ThrottledLog(lines.append, interval=60.0, clock=clock)
+
+    clock.advance(30.0)
+    log("[30/2000] a.fits.bz2")
+    clock.advance(31.0)
+    log("[61/2000] b.fits.bz2")
+
+    assert len(lines) == 1
+    assert "frames 61/2000" in lines[0]
+    assert "f/s" in lines[0]
+
+
+def test_throttled_log_applies_its_prefix():
+    clock = _FakeClock()
+    lines = []
+    log = ThrottledLog(lines.append, prefix="[ 12/613] 2025-01-12  ", clock=clock)
+
+    log("no horizon mask found; not applied")
+
+    assert lines == ["[ 12/613] 2025-01-12  no horizon mask found; not applied"]
+
+
+def test_verbose_throttled_log_passes_every_frame_line():
+    clock = _FakeClock()
+    lines = []
+    log = ThrottledLog(lines.append, interval=60.0, verbose=True, clock=clock)
+
+    log("[1/2000] a.fits.bz2")
+    log("[2/2000] b.fits.bz2")
+
+    assert lines == ["[1/2000] a.fits.bz2", "[2/2000] b.fits.bz2"]
+
+
+@pytest.mark.parametrize("seconds,expected", [
+    (45.0, "45s"),
+    (930.0, "15m30s"),
+    (19934.0, "5h32m"),
+    (1140000.0, "13.2d"),
+])
+def test_duration_formats_readably(seconds, expected):
+    assert _duration(seconds) == expected
+
+
+def test_duration_handles_an_unknown_rate():
+    assert _duration(float("nan")) == "?"
+    assert _duration(float("inf")) == "?"

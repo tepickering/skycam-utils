@@ -128,6 +128,42 @@ ALCOR_SB_TARGET_DESCRIPTIONS = {
 
 ALCOR_SB_TARGET_UNIT = "V mag/arcsec^2"
 
+
+# --- cloud-extinction maps (alcor/extinction.py) -------------------------
+# The sensor's raw (ny, nx). Extinction maps are built from photometry CSVs
+# with no frame in hand, so the shape cannot be read from a header.
+ALCOR_EXT_FRAME_SHAPE = (1411, 1422)
+
+# 10 frames (~5 min) is where frame-to-frame scatter still beats down as
+# uncorrelated noise: measured sigma(N) tracks sigma(1)/sqrt(N) to within 5% out
+# to N=12 and has clearly departed by N=30, so averaging longer buys little and
+# costs update cadence.
+ALCOR_EXT_NFRAMES = 10
+ALCOR_EXT_CADENCE = 27.5          # s between frames, for labelling only
+
+# Instrumental-magnitude window free of BOTH end biases: brighter than -11
+# enters the CMOS non-linear regime, fainter than -9.5 picks up the faint-end
+# bias. See ALCOR_BRIGHT_CUT for the harder limit applied to cal_*/ext_*.
+ALCOR_EXT_MAG_WINDOW = (-11.0, -9.5)
+
+ALCOR_EXT_MIN_ALTITUDE = 20.0     # matches alcor_star_photometry's default
+ALCOR_EXT_GRID_STEP = 1.0         # deg; well under the smoothing kernel
+ALCOR_EXT_KERNEL_SIGMA = 8.0      # deg, great-circle smoothing scale
+ALCOR_EXT_KERNEL_CUT = 3.0        # truncate the kernel at 3 sigma
+ALCOR_EXT_MIN_WEIGHT = 1.5        # blank a cell below this summed weight
+ALCOR_EXT_MIN_BLOCK_FRAMES = 3    # frames a star needs for a block mean
+ALCOR_EXT_LOST_MIN_FRAMES = 5     # frames undetected before it counts as lost
+
+# Great-circle radius in DEGREES for alcor_extinction_at. The map is already
+# smoothed on ALCOR_EXT_KERNEL_SIGMA, so this adds little smoothing -- its job
+# is robustness against a blank pixel, a resampling edge, or a pointing that
+# lands just outside the valid region.
+ALCOR_EXT_LOOKUP_RADIUS = 1.0
+
+# Fixed colour-scale top, so maps from different times and nights compare
+# directly and a clear sky always renders the same.
+ALCOR_EXT_VMAX = 1.5
+
 # The fixed cones above sample named directions; allsky_mv_best instead reports the
 # DARKEST such cone anywhere above this altitude. The zenith is not a reliable
 # darkness measure -- the Milky Way transits through it -- so the darkest patch is

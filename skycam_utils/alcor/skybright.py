@@ -3,7 +3,9 @@
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 from matplotlib.patches import Circle
 from astropy.io import fits
 from astropy.stats import sigma_clipped_stats
@@ -385,3 +387,132 @@ def _cone_median(mu, indices):
     if values.size == 0:
         return float("nan")
     return float(np.median(values))
+
+
+# Plot styling for the summary tracks: column -> (label, colour, linewidth).
+# The darkest-cone track is drawn heaviest because it is the one that actually
+# answers "how dark did it get"; the two light domes are the thinnest.
+ALCOR_SB_SUMMARY_STYLE = {
+    "allsky_mv_best": ("darkest cone (floating)", "#222222", 1.6),
+    "allsky_mv_zenith": ("zenith", "#1f77b4", 1.4),
+    "allsky_mv_tucson": ("Tucson dome", "#d62728", 1.2),
+    "allsky_mv_nogales": ("Nogales dome", "#ff7f0e", 1.2),
+}
+
+
+def _sb_summary_label(column, label):
+    """
+    Append a fixed cone's (az, alt) to its label so the legend says where the
+    track was measured. The floating darkest cone has no fixed position, so it
+    is left alone.
+    """
+    target = ALCOR_SB_TARGETS.get(column)
+    if target is None or column == "allsky_mv_zenith":
+        return label
+    az, alt = target
+    return f"{label} (az {az:g}, alt {alt:g})"
+
+
+def plot_alcor_sb_summary(filename, output_file=None, title=None,
+                          figsize=(13, 8), dpi=140):
+    """
+    Plot one night's sky-brightness summary from the ``sky_brightness.csv``
+    written by :func:`alcor_process_night`.
+
+    The upper panel draws every ``allsky_mv_*`` track against UT with the
+    magnitude axis **inverted**, so a brighter sky runs downward the way it does
+    on the sky-brightness maps and keograms. Astronomical twilight (Sun above
+    -18 deg) is shaded, which is where the near-vertical ramps at both ends come
+    from -- the night selection is Sun < -12, so a run always includes some
+    twilight. The lower panel carries the Moon's altitude and, on a right-hand
+    axis, the altitude at which the floating darkest cone was found.
+
+    The title reports the night's dark-sky medians, computed over frames with
+    the Sun below -18 deg **and** the Moon below the horizon, so a moonlit
+    stretch cannot drag them; a night with no such frames simply omits them.
+
+    ``output_file`` defaults to the input path with a ``.png`` suffix (so the
+    standard ``sky_brightness.csv`` becomes ``sky_brightness.png`` beside it),
+    and its extension picks the matplotlib backend. Returns that path.
+    """
+    filename = Path(filename)
+    if output_file is None:
+        output_file = filename.with_suffix(".png")
+    output_file = Path(output_file)
+
+    df = pd.read_csv(filename, parse_dates=["OBSTIME"]).sort_values("OBSTIME")
+    if df.empty:
+        raise ValueError(f"{filename} contains no rows to plot")
+    times = df["OBSTIME"]
+
+    fig, (ax, axm) = plt.subplots(
+        2, 1, figsize=figsize, sharex=True,
+        gridspec_kw={"height_ratios": [3.2, 1], "hspace": 0.06},
+    )
+
+    twilight = df["sun_alt"] > -18
+    for axis in (ax, axm):
+        axis.fill_between(times, 0, 1, where=twilight,
+                          transform=axis.get_xaxis_transform(),
+                          color="0.85", zorder=0, lw=0)
+
+    for column, (label, color, lw) in ALCOR_SB_SUMMARY_STYLE.items():
+        if column in df:
+            ax.plot(times, df[column], color=color, lw=lw,
+                    label=_sb_summary_label(column, label))
+
+    # ALCOR_SB_TARGET_UNIT is the CSV's plain-text unit; the axis wants mathtext.
+    ax.set_ylabel("sky surface brightness  [V mag arcsec$^{-2}$]")
+    ax.invert_yaxis()
+    ax.grid(alpha=0.25)
+
+    # Anchor the legend in DATA coordinates via the xaxis transform, just left
+    # of the morning twilight band. An axes-fraction anchor is wrong by the 5%
+    # x-margins and lands on top of the shading.
+    lo, hi = ax.get_xlim()
+    pad = 0.015 * (hi - lo)
+    right = hi - pad
+    morning = times[twilight & (times > times.iloc[len(times) // 2])]
+    if len(morning):
+        right = min(right, mdates.date2num(morning.iloc[0]) - pad)
+    ax.legend(loc="upper right", bbox_to_anchor=(right, 0.97),
+              bbox_transform=ax.get_xaxis_transform(),
+              framealpha=0.9, fontsize=9)
+
+    if title is None:
+        title = filename.parent.name
+    heading = f"{title}   n={len(df)} frames"
+    dark = df[(df["sun_alt"] < -18) & (df["moon_alt"] < 0)]
+    if len(dark):
+        # Only the two sky tracks: the light domes are not a darkness measure,
+        # and listing all four overflows the title.
+        medians = ", ".join(
+            f"{name} {dark[column].median():.2f}"
+            for column, name in (("allsky_mv_zenith", "zenith"),
+                                 ("allsky_mv_best", "darkest cone"))
+            if column in dark and np.isfinite(dark[column].median())
+        )
+        if medians:
+            heading += f"   dark-sky median: {medians} mag arcsec$^{{-2}}$"
+    ax.set_title(heading)
+
+    axm.plot(times, df["moon_alt"], color="#6a51a3", lw=1.3)
+    axm.axhline(0, color="k", lw=0.6, ls=":")
+    axm.set_ylabel("moon alt [deg]", fontsize=9)
+    axm.grid(alpha=0.25)
+
+    if "best_alt" in df:
+        axb = axm.twinx()
+        axb.scatter(times, df["best_alt"], s=3, color="#2ca02c", alpha=0.5)
+        axb.set_ylabel("darkest-cone alt [deg]", fontsize=9, color="#2ca02c")
+        axb.tick_params(axis="y", labelcolor="#2ca02c", labelsize=8)
+        axb.set_ylim(0, 95)
+
+    axm.xaxis.set_major_locator(mdates.HourLocator(interval=1))
+    axm.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+    axm.set_xlabel("UT")
+
+    fig.savefig(output_file, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+
+    return output_file

@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from astropy.io import fits
-from astropy.time import Time
+from astropy.time import Time, TimeDelta
 
 os.environ.setdefault("MPLBACKEND", "Agg")
 _MPLCONFIGDIR = Path(tempfile.gettempdir()) / "skycam-utils-matplotlib"
@@ -19,8 +19,10 @@ from skycam_utils.alcor import (
     ALCOR_CALIB_EXPTIME,
     _alcor_pixel_solid_angle,
     _read_frame_exposure,
+    _sb_summary_label,
     alcor_sky_brightness_fits,
     load_alcor_fits,
+    plot_alcor_sb_summary,
     plot_alcor_sky_brightness,
 )
 
@@ -286,3 +288,106 @@ def test_sb_fits_header_records_that_nothing_was_masked():
     on = _alcor_sb_fits_header(wcs, Time("2026-06-09T08:00:00"), 20.0, 25000, False)
     assert off["SATLEVEL"] == "none"
     assert on["SATLEVEL"] == 25000
+
+
+def _write_sb_summary_csv(path, n=60, moonlit=20, twilight=6):
+    """
+    A synthetic sky_brightness.csv: a night that starts moonlit, darkens, and
+    ends in morning twilight, so the dark-sky selection has something to reject
+    at both ends.
+    """
+    start = Time("2025-01-02T01:30:00")
+    times = start + TimeDelta(np.arange(n) * 1800.0, format="sec")  # 30-min cadence
+    sun_alt = np.full(n, -30.0)
+    sun_alt[:twilight] = -15.0
+    sun_alt[-twilight:] = -15.0
+    moon_alt = np.full(n, -40.0)
+    moon_alt[:moonlit] = 20.0
+
+    zenith = np.full(n, 21.5)
+    zenith[:moonlit] = 19.0          # moonlight: much brighter, must be excluded
+    zenith[:twilight] = 18.0
+    zenith[-twilight:] = 18.0
+
+    rows = ["filename,OBSTIME,exposure,sun_alt,moon_alt,moon_az,"
+            "allsky_mv_zenith,allsky_mv_tucson,allsky_mv_nogales,"
+            "allsky_mv_best,best_az,best_alt"]
+    for i, t in enumerate(times):
+        rows.append(
+            f"frame_{i:03d}.fits.bz2,{t.datetime.isoformat(sep=' ')},20.0,"
+            f"{sun_alt[i]},{moon_alt[i]},120.0,"
+            f"{zenith[i]},{zenith[i] - 1.0},{zenith[i] - 0.8},"
+            f"{zenith[i] + 0.2},48.0,65.0"
+        )
+    path.write_text("\n".join(rows) + "\n")
+    return path
+
+
+def test_plot_alcor_sb_summary_writes_figure(tmp_path):
+    night = tmp_path / "2025-01-01"
+    night.mkdir()
+    csv = _write_sb_summary_csv(night / "sky_brightness.csv")
+
+    out = plot_alcor_sb_summary(csv)
+
+    # Default output is the CSV path with a .png suffix, beside the CSV.
+    assert out == night / "sky_brightness.png"
+    assert out.exists() and out.stat().st_size > 0
+
+
+def test_plot_alcor_sb_summary_honors_explicit_output(tmp_path):
+    csv = _write_sb_summary_csv(tmp_path / "sky_brightness.csv")
+    out = plot_alcor_sb_summary(csv, output_file=tmp_path / "elsewhere.pdf")
+    assert out.exists() and out.suffix == ".pdf"
+
+
+def test_plot_alcor_sb_summary_medians_exclude_moon_and_twilight(tmp_path):
+    """
+    The title's dark-sky medians must come from Sun < -18 AND Moon < 0 only --
+    the synthetic night's moonlit and twilight frames sit 2.5-3.5 mag brighter,
+    so including them would move the reported median well off 21.5.
+    """
+    night = tmp_path / "2025-01-01"
+    night.mkdir()
+    csv = _write_sb_summary_csv(night / "sky_brightness.csv")
+
+    fig_title = []
+    import matplotlib.pyplot as plt
+    real_subplots = plt.subplots
+
+    def _capture(*args, **kwargs):
+        fig, axes = real_subplots(*args, **kwargs)
+        fig_title.append(axes[0])
+        return fig, axes
+
+    plt.subplots = _capture
+    try:
+        plot_alcor_sb_summary(csv)
+    finally:
+        plt.subplots = real_subplots
+
+    title = fig_title[0].get_title()
+    assert "zenith 21.50" in title
+    assert "darkest cone 21.70" in title
+    assert "n=60 frames" in title
+    assert "2025-01-01" in title       # falls back to the parent directory name
+
+
+def test_plot_alcor_sb_summary_rejects_an_empty_csv(tmp_path):
+    csv = tmp_path / "sky_brightness.csv"
+    csv.write_text(
+        "filename,OBSTIME,exposure,sun_alt,moon_alt,moon_az,"
+        "allsky_mv_zenith,allsky_mv_tucson,allsky_mv_nogales,"
+        "allsky_mv_best,best_az,best_alt\n"
+    )
+    with pytest.raises(ValueError, match="no rows"):
+        plot_alcor_sb_summary(csv)
+
+
+def test_sb_summary_labels_carry_the_fixed_cone_position():
+    # The two low light domes say where they point; zenith and the floating
+    # darkest cone do not (one is obvious, the other has no fixed position).
+    assert _sb_summary_label("allsky_mv_tucson", "Tucson dome") == \
+        "Tucson dome (az 0, alt 15)"
+    assert _sb_summary_label("allsky_mv_zenith", "zenith") == "zenith"
+    assert _sb_summary_label("allsky_mv_best", "darkest cone") == "darkest cone"

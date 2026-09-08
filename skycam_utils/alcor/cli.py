@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from astropy.io import fits
+from astropy.time import Time
 
 from .config import (
     ALCOR_BADPIX_POLE_RADIUS, ALCOR_BADPIX_RIM_DILATION,
@@ -26,6 +28,11 @@ from .display import plot_alcor_fits
 from .skybright import (
     alcor_sky_brightness_fits, plot_alcor_sb_summary,
     plot_alcor_sky_brightness
+)
+from .extinction import (
+    ALCOR_EXT_KERNEL_SIGMA, ALCOR_EXT_LOOKUP_RADIUS, ALCOR_EXT_NFRAMES,
+    ALCOR_EXT_VMAX, alcor_extinction_at, alcor_extinction_fits,
+    alcor_extinction_movie, plot_alcor_extinction, plot_alcor_extinction_fits
 )
 from .keogram import (
     _keogram_row_altitude, alcor_keogram, plot_alcor_keogram_fits,
@@ -399,6 +406,145 @@ def plot_alcor_sb_summary_cli():
         dpi=args.dpi,
     )
     print(out)
+
+
+
+def alcor_extinction_map_cli():
+    """
+    CLI entry point for :func:`alcor_extinction_fits`: build one cloud-extinction
+    map from per-frame photometry CSVs.
+
+    This is the every-five-minutes cron entry point, so it reports the age of the
+    newest frame it used and exits non-zero when that exceeds ``--max-age``. A
+    silently stale map is the dangerous failure here: it looks exactly like a
+    current one, and an observer -- or the redis publisher -- would believe it.
+    """
+    parser = argparse.ArgumentParser(
+        description="Build an alcor cloud-extinction map from star photometry.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("inputs", nargs="+",
+                        help="Per-frame *_phot.csv files, or a directory of them.")
+    parser.add_argument("-o", "--output", default=None,
+                        help="Output FITS path (default: alcor_extinction_<TMID>.fits).")
+    parser.add_argument("--plot", default=None,
+                        help="Also render the observer PNG to this path.")
+    parser.add_argument("--latest", type=int, default=None,
+                        help="Use only the N newest frames (the real-time path).")
+    parser.add_argument("--nframes", type=int, default=ALCOR_EXT_NFRAMES,
+                        help="Frames per map, recorded in the header.")
+    parser.add_argument("--band", default="g", choices=["r", "g", "b"])
+    parser.add_argument("--method", default="ap", choices=["ap", "gauss"])
+    parser.add_argument("--kernel-sigma", type=float, default=ALCOR_EXT_KERNEL_SIGMA,
+                        help="Great-circle smoothing kernel sigma (deg).")
+    parser.add_argument("--min-altitude", type=float, default=None,
+                        help="Lowest altitude mapped (deg).")
+    parser.add_argument("--vmax", type=float, default=ALCOR_EXT_VMAX,
+                        help="Top of the plot colour scale (mag).")
+    parser.add_argument("--max-age", type=float, default=None,
+                        help="Fail if the newest frame is older than this many seconds.")
+    parser.add_argument("--at", type=float, nargs=2, default=None,
+                        metavar=("AZ", "ALT"),
+                        help="Also print the extinction at this position.")
+    parser.add_argument("--radius", type=float, default=ALCOR_EXT_LOOKUP_RADIUS,
+                        help="Great-circle radius for --at, in degrees.")
+    parser.add_argument("--overwrite", action="store_true")
+    args = parser.parse_args()
+
+    inputs = args.inputs[0] if len(args.inputs) == 1 else args.inputs
+    kwargs = {}
+    if args.min_altitude is not None:
+        kwargs["min_altitude"] = args.min_altitude
+
+    out, ext_map, measured, lost = alcor_extinction_fits(
+        inputs, output_file=args.output, band=args.band, method=args.method,
+        latest=args.latest, nframes=args.nframes,
+        kernel_sigma=args.kernel_sigma, overwrite=args.overwrite,
+        return_products=True, **kwargs)
+    print(out)
+
+    if args.plot:
+        title = f"alcor cloud extinction  \u00b7  {fits.getval(out, 'TMID')} UT"
+        plot_alcor_extinction(measured, lost, output_file=args.plot,
+                              title=title, vmax=args.vmax,
+                              kernel_sigma=args.kernel_sigma, **kwargs)
+        print(args.plot)
+
+    if args.at is not None:
+        value = alcor_extinction_at(out, args.at[0], args.at[1],
+                                    radius=args.radius)
+        print(f"extinction at az={args.at[0]:g} alt={args.at[1]:g}: {value:.3f}")
+
+    end = fits.getval(out, "TEND")
+    age = (Time.now() - Time(end)).sec
+    print(f"newest frame is {age:.0f} s old", file=sys.stderr)
+    if args.max_age is not None and age > args.max_age:
+        print(f"ERROR: newest frame is {age:.0f} s old, "
+              f"exceeding --max-age {args.max_age:g}", file=sys.stderr)
+        sys.exit(1)
+
+
+def plot_alcor_extinction_fits_cli():
+    """
+    CLI entry point for :func:`plot_alcor_extinction_fits`, so a saved map can be
+    re-rendered at different colour limits without recomputing it.
+    """
+    parser = argparse.ArgumentParser(
+        description="Plot a saved alcor cloud-extinction map.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("filename", help="Extinction map FITS file.")
+    parser.add_argument("-o", "--output", default=None,
+                        help="Output plot path (default: the input with a .png suffix).")
+    parser.add_argument("--vmax", type=float, default=ALCOR_EXT_VMAX,
+                        help="Top of the colour scale (mag).")
+    parser.add_argument("--cmap", default="inferno_r", help="Matplotlib colormap.")
+    parser.add_argument("--dpi", type=int, default=140)
+    args = parser.parse_args()
+
+    print(plot_alcor_extinction_fits(args.filename, output_file=args.output,
+                                     vmax=args.vmax, cmap=args.cmap,
+                                     dpi=args.dpi))
+
+
+def alcor_extinction_movie_cli():
+    """
+    CLI entry point for :func:`alcor_extinction_movie`: animate a night of
+    extinction maps.
+    """
+    parser = argparse.ArgumentParser(
+        description="Animate a night of alcor cloud-extinction maps.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("inputs", nargs="+",
+                        help="Per-frame *_phot.csv files, or a night directory.")
+    parser.add_argument("-o", "--output", default=None,
+                        help="Output .mp4 (default: <night>_extinction.mp4).")
+    parser.add_argument("--nframes", type=int, default=ALCOR_EXT_NFRAMES,
+                        help="Frames averaged into each map.")
+    parser.add_argument("--stride", type=int, default=None,
+                        help="Frames between maps (default: --nframes, no overlap). "
+                             "A smaller stride looks smoother but correlates "
+                             "successive animation frames.")
+    parser.add_argument("--fps", type=int, default=12)
+    parser.add_argument("--band", default="g", choices=["r", "g", "b"])
+    parser.add_argument("--method", default="ap", choices=["ap", "gauss"])
+    parser.add_argument("--vmax", type=float, default=ALCOR_EXT_VMAX)
+    parser.add_argument("--cmap", default="inferno_r")
+    parser.add_argument("--frames-dir", default=None,
+                        help="Keep the rendered PNGs here (default: a temp dir).")
+    parser.add_argument("--keep-frames", action="store_true",
+                        help="Do not delete --frames-dir afterwards.")
+    parser.add_argument("--title", default=None)
+    parser.add_argument("--quiet", action="store_true")
+    args = parser.parse_args()
+
+    inputs = args.inputs[0] if len(args.inputs) == 1 else args.inputs
+    print(alcor_extinction_movie(
+        inputs, output_file=args.output, frames_dir=args.frames_dir,
+        nframes=args.nframes, stride=args.stride, fps=args.fps,
+        band=args.band, method=args.method, vmax=args.vmax, cmap=args.cmap,
+        title=args.title, keep_frames=args.keep_frames, quiet=args.quiet))
 
 
 def alcor_process_night_cli():

@@ -38,6 +38,71 @@ number on why `allsky_mv_best` exists -- **the zenith runs 21.68 at galactic lat
 most of the zenith's spread, while the two domes are the *tighter* statistic and so
 the better probe if light-pollution growth is ever trended.
 
+Median all-sky surface-brightness map (`claude_docs/scripts/`, not packaged): one
+night's sky-brightness map is a picture of that night; stacking the clear
+moonless frames of many nights is a picture of the SITE -- the light domes, the
+airglow gradient and the residual optical scatter, with weather and Moon
+averaged out. **The Milky Way is masked, not averaged.** A fixed (az, alt)
+samples a different galactic latitude every hour of every night, so the plane
+sweeps the whole dome over a year and would otherwise leave a smeared ridge that
+reads as site structure; every superpixel of every frame therefore carries its
+own galactic latitude and is dropped when `|b| < 10`. Five decisions in
+`sky_median_map.py` are load-bearing rather than tidy. (1) **Two-stage median**:
+frames within a night share their airglow, aerosol and dome soiling, so a flat
+median over all frames would let a few long clear nights dominate -- each night
+is reduced to its own median map first, then the nights are combined, one vote
+per night. (2) **4x4 superpixels binned by MEDIAN** (~0.5 deg at the zenith): a
+star only pushes pixels brighter, so the block median rejects it where a mean
+would smear it in, the same reason `allsky_mv_best` takes a cone median and not
+a darkest pixel. (3) **Hot pixels are MASKED in the per-night precompute, not
+repaired per frame** -- repair is ~1.9 s of the ~2.4 s each frame costs, and
+masking is both cheaper and more honest, since a repaired pixel is an
+interpolated guess that still votes in the block median while a masked one does
+not. It matters because the hot-pixel pattern is FIXED: left in, it biases the
+same superpixels on every night and so survives the across-night median
+(measured, one night: ~1700 of 1.2M superpixels shifted by up to 0.07 mag).
+(4) **Per-pixel geometry is computed once per night, not per frame**, exactly as
+`_alcor_cone_indices` is in `alcor/night.py`; hour angle and declination are
+fixed for a fixed (az, alt) at a fixed site, so each frame's galactic latitudes
+follow from the local sidereal time alone -- one vectorised rotation over ~125k
+superpixels instead of a coordinate transform, with the closed-form galactic
+latitude pinned against astropy at startup. (5) **The per-night throughput
+offset is removed before the nights are combined** (`--grades`, from
+`night_throughput.py` or `night_clarity.py`): the dome-soiling drift lands in
+surface brightness exactly as in stellar photometry, `mu_true = mu_measured -
+ext_med`, so without it the stack inherits a tilt rather than noise. This
+matters MOST for a short run, which is precisely when a draft map gets made.
+Output is the raw frame with the raw-frame ARC WCS, like every other alcor
+product, so it overlays pixel-for-pixel; the superpixel map is expanded by
+nearest neighbour rather than the WCS rescaled, because binning a SIP WCS
+correctly means rescaling every coefficient and a blocky exact solution beats a
+smooth and subtly wrong one. `--dry-run` reports coverage after the galactic cut
+without reading a frame, since the mask depends only on when each frame was
+taken and where each superpixel points -- so "will this night set fill in?" is
+answered in seconds rather than after hours of decompression. **Coverage is far
+less of a constraint than it looks**: four nights spread over five months
+(2026-01-11/03-11/05-18/06-09, 3,298 dark moonless frames) leave every
+superpixel with at least 1,369 frames after the `|b| > 10` cut, median 2,777,
+and nothing anywhere below 50 -- sidereal drift walks the plane clean across the
+dome. That four-night draft, throughput-corrected, reads **21.75 mag/arcsec^2
+median above alt 45 deg** (10-90% 21.68-21.83, and area-weighting by pixel solid
+angle changes it by 0.001, so the upper hemisphere really is that uniform once
+the plane is cut); it sits just above the 141-night darkest-cone median of 21.72
+and well above the zenith's 21.54, which is the expected ordering. The
+correction itself was worth +0.062 mag at the median here, because those four
+nights happen to sample one soiling ramp end to end (`ext_med` -0.102, -0.100,
+-0.025, +0.009). Two caveats on any such map: the faint tail past ~22
+mag/arcsec^2 is the low-signal ring near `ALCOR_FIELD_RADIUS`, not real sky, and
+the residual altitude trend that `EXTFLAT='none'` reserves a slot for is
+untouched -- the domes and the gradient between them are sound, the outermost
+annulus is not. The scripts: `clear_frame_list.py` (the frame list, from the
+products tree or `--from-raw` off a bare night directory; it SAMPLES the
+exposure rather than assuming it, since the camera auto-exposes through twilight
+but pins at the 20 s ceiling once dark, and a wrong exposure is a straight
+magnitude error), `night_throughput.py` (per-night `ext_med`, accepting both the
+`_ap` and plain photometry schemas), `sky_median_map.py`, and
+`plot_sky_median_map.py` (`--map-only` for the figure alone).
+
 Horizon mask (sky vs not-sky): `load_alcor_horizon_mask(time)` returns `(mask, date)`, a 2-D bool raw-frame mask where `True` = **not-sky** — obstructions above the horizon (terrain, buildings, the lightning rod) plus everything at/below altitude 0 — so valid sky is `~mask`. It is achromatic (one plane shared by R/G/B, unlike the per-channel bad-pixel mask) and an **exclusion** mask: it is not repaired, only used to select valid sky for sky-background / cloud-extinction maps. It is date-resolved (nearest date, `$ALCOR_HORIZON_DIR` override) from `skycam_utils/data/horizon/alcor_horizon_YYYY-MM-DD.fits.gz`, exactly like the calibration / bad-pixel assets, and stable across epochs for the same reason (one epoch covers 2024–2026; add a new epoch only if the camera moves). It is rebuilt by the packaged `alcor_median_stack` + `create_horizon_mask` CLIs (the reference script `claude_docs/scripts/horizon_floodfill.py` now only re-renders the diagnostic figures). The method: a Sobel-edge flood-fill of a cloudy-night median (the smooth, slowly-varying overcast sky leaves only the sharp obstruction edges), treating strong `sobel(log10)` edges as walls, flood-filling the sky from the WCS zenith, and marking everything the fill can't reach as not-sky — so the thin, enclosed lightning-rod spike is captured (the earlier radial altitude-profile extraction in `alcor_horizon_extract.py` structurally missed it, and an az/alt boolean grid was rejected as too coarse). The SW→W building sector (az 225–270), where the Sobel edges break up, is instead filled from the **undetected-star patch** (fixed-position per-frame photometry accumulated over 5 nights by `claude_docs/scripts/sobel_vs_undetected.py`; high undetected fraction = obstructed). A morphological opening (radius 3) severs thin necks so spurious open-sky pockets detach, then a connected-component cleanup drops any not-sky blob that neither reaches the rim nor is rod-sized. Tested in `test_alcor_horizon.py`.
 
 Bright-variable catalog (`bright_variable_vsx.fits`, 637 stars): `bright_star_sloan_named.fits` excludes variable stars **by construction**, which is right — they would corrupt the zeropoints — but it meant the camera had never measured any of them, and Polaris was not merely unmeasured but was being flagged as a cluster of hot pixels because nothing knew it was a real source. This catalog is the other half. It is built by `claude_docs/scripts/build_variable_catalog.py` from AAVSO VSX (Vizier `B/vsx/vsx`) with B−V cross-matched from the Bright Star Catalogue (`V/50/catalog`) — VSX carries no colours, and cross-matching the *calibration* catalog recovers almost nothing for exactly the reason this catalog exists. Selection: VSX flag `V==0` (confirmed, not suspected), V-band `max`, a real `min` rather than an amplitude, `max <= 6.0`, `amplitude >= 0.05` mag, and **not eruptive/cataclysmic**. Two of those cuts have non-obvious rationale. **The amplitude floor is set by systematics, not photon noise**: per-frame scatter is 0.08 mag at V 2.5–4 and 0.21 at V 5–5.5, but at 1000–1500 frames a night the nightly *mean* is good to ~0.005 mag, so the binding limit is the ~0.03 mag epoch-to-epoch zeropoint stability — a 0.2 mag cut would have thrown away Polaris (`alf UMi`, DCEPS, 1.96–2.03, so 0.07 mag, P=3.97 d) along with most low-amplitude Cepheids and Be stars. **The eruptive cut removes stars whose tabulated `max` is a one-off historical outburst** and which now sit permanently at minimum: 58 entries, including Tycho's supernova (`B Cas`, 1572, now V=22), Kepler's (`V0843 Oph`, 1604), `S And` (1885), SN 1987A, and `CK Vul` (Nova Vul 1670, V=23) — note VSX writes these as `SN I`, `SN Ia`, `SN II-P`, `V838MON`, so the type regex must accept whitespace as a terminator or four supernovae survive. Everything else above 5 mag of amplitude is a Mira or SR with a real period (stars that *do* return to maximum), plus `eta Car`, kept because it is genuinely variable at V~4.5 today even though its `Vmax` of −1.0 is the 1843 Great Eruption. `Vmag` is set to `Vmax` (maximum light), since that is what decides whether a star is ever measurable; a large-amplitude Mira spends most of its cycle far below the limit and those non-detections are data.

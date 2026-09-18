@@ -32,6 +32,14 @@ Method, and why each step is the way it is:
   ``_alcor_cone_indices`` in ``alcor/night.py`` and is what makes 22k frames
   tractable. It is also why the per-night WCS is resolved from the night's date:
   frames either side of the 2025-07-11 epoch boundary get the right geometry.
+* **The per-night throughput offset is removed before the nights are
+  combined** (``--grades``). The dome soils and is washed, so system
+  throughput wanders by up to ~0.11 mag over a year, and it lands in surface
+  brightness exactly as in stellar photometry: ``mu_true = mu_measured -
+  ext_med``. Without it the stack inherits a tilt rather than noise -- over
+  four nights spanning one soiling ramp, ~0.06 mag of it. Over a year's
+  nights the drift largely averages out, so this matters most for a short
+  run, which is precisely when a draft map gets made.
 * Output is the **raw frame with the raw-frame ARC WCS**, like every other alcor
   product, so it overlays pixel-for-pixel on the extinction and sky-brightness
   maps. The superpixel map is expanded back by nearest neighbour rather than the
@@ -41,7 +49,7 @@ Method, and why each step is the way it is:
 
 Usage:
   sky_median_map.py <frames.csv.gz> <archive-dir> -o OUT.fits [--stride 5]
-                    [--bin 4] [--bmin 10] [--workers N] [--nights N]
+                    [--bin 4] [--bmin 10] [--grades G.csv] [--workers N]
 
 ``<archive-dir>`` holds the raw ``<night>/<frame>.fits.bz2`` tree. Nothing from
 the products tree is needed: the frame list carries the times and exposures.
@@ -182,10 +190,11 @@ def _night_geometry(night, nbin, horizon_mask, ref_time, shape, badpix=True):
                 ha=ha, dec=dec)
 
 
-def _init(nbin, horizon_mask, archive, bmin, shape, badpix, dry_run):
+def _init(nbin, horizon_mask, archive, bmin, shape, badpix, dry_run, grades):
     global _CFG
     _CFG = dict(nbin=nbin, horizon_mask=horizon_mask, archive=archive,
-                bmin=bmin, shape=shape, badpix=badpix, dry_run=dry_run)
+                bmin=bmin, shape=shape, badpix=badpix, dry_run=dry_run,
+                grades=grades)
 
 
 def reduce_night(args):
@@ -261,6 +270,13 @@ def reduce_night(args):
         med = np.nanmedian(stack, axis=0)
     cov = np.sum(np.isfinite(stack), axis=0)
 
+    # Remove this night's throughput offset before it joins the stack, so the
+    # across-night median combines nights on one photometric scale rather than
+    # inheriting the soiling ramp as a tilt. See night_throughput.py.
+    ext = cfg["grades"].get(night)
+    if ext is not None:
+        med = med - np.float32(ext)
+
     full = np.full(nsuper, np.nan, dtype=np.float32)
     full[idx] = med
     fullcov = np.zeros(nsuper, dtype=np.int32)
@@ -281,6 +297,11 @@ def main():
     p.add_argument("--bmin", type=float, default=10.0,
                    help="mask |galactic latitude| below this, in deg (default 10)")
     p.add_argument("--no-horizon-mask", action="store_true")
+    p.add_argument("--grades", default=None, metavar="CSV",
+                   help="per-night throughput offsets (night,ext_med) from "
+                        "night_throughput.py or night_clarity.py; each night's "
+                        "map has its ext_med subtracted before the nights are "
+                        "combined. Strongly recommended for short runs.")
     p.add_argument("--dry-run", action="store_true",
                    help="report coverage after the galactic-plane cut without "
                         "reading any frames, to check a night set will fill in")
@@ -294,11 +315,26 @@ def main():
     err = _check_galactic_b()
     print(f"galactic_b vs astropy: max {err:.4f} deg", file=sys.stderr)
 
+    grades = {}
+    if args.grades:
+        gt = pd.read_csv(args.grades)
+        grades = {str(r.night): float(r.ext_med) for r in gt.itertuples()
+                  if np.isfinite(r.ext_med)}
+        print(f"throughput offsets for {len(grades)} nights from {args.grades}",
+              file=sys.stderr)
+
     frames = pd.read_csv(args.frames)
     groups = [(n, r.iloc[::args.stride].reset_index(drop=True))
               for n, r in frames.groupby("night", sort=True)]
     if args.nights:
         groups = groups[:args.nights]
+    if args.grades:
+        missing = [n for n, _ in groups if n not in grades]
+        if missing:
+            print(f"WARNING: no throughput offset for {len(missing)} nights, "
+                  f"left uncorrected: {', '.join(missing[:5])}"
+                  f"{' ...' if len(missing) > 5 else ''}", file=sys.stderr)
+
     total = sum(len(r) for _, r in groups)
     print(f"{len(groups)} nights, {total:,} frames at stride {args.stride}",
           file=sys.stderr)
@@ -319,7 +355,7 @@ def main():
                              initargs=(args.nbin, not args.no_horizon_mask,
                                        args.archive, args.bmin, shape,
                                        not args.no_badpix_mask,
-                                       args.dry_run)) as ex:
+                                       args.dry_run, grades)) as ex:
         futs = [ex.submit(reduce_night, g) for g in groups]
         for f in as_completed(futs):
             night, med, cov, nread = f.result()
@@ -364,6 +400,9 @@ def main():
     hdr["HORIZMSK"] = (not args.no_horizon_mask, "horizon mask applied")
     hdr["BADPIX"] = (not args.no_badpix_mask, "hot pixels masked out")
     hdr["DRYRUN"] = (bool(args.dry_run), "coverage only; brightness plane is not real")
+    hdr["THRUCORR"] = (bool(args.grades), "per-night throughput offset removed")
+    if args.grades:
+        hdr["THRUFILE"] = (os.path.basename(args.grades), "source of the offsets")
     hdr["COMMENT"] = "Median over nights of each night's median frame map."
     hdr["COMMENT"] = "Milky Way masked per frame, not averaged: see BMIN."
 

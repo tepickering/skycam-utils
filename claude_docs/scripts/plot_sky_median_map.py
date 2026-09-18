@@ -11,7 +11,11 @@ Rendering follows ``plot_alcor_sky_brightness``: the zenith crop, north up,
 ``origin="lower"``, a ``cividis_r`` colorbar so bright sky reads bright, and
 the same shared alt/az grid helpers.
 
-Usage: plot_sky_median_map.py <map.fits> [-o OUT.png] [--radius 700]
+``--map-only`` drops the coverage panel, for when the map is going into a
+document rather than being checked. The output extension drives the backend, so
+``-o something.pdf`` gives vector output.
+
+Usage: plot_sky_median_map.py <map.fits> [-o OUT.png] [--map-only]
 """
 
 import argparse
@@ -66,6 +70,8 @@ def main():
     p.add_argument("--radius", type=int, default=700, help="crop half-size, px")
     p.add_argument("--vmin", type=float, default=None)
     p.add_argument("--vmax", type=float, default=None)
+    p.add_argument("--map-only", action="store_true",
+                   help="just the brightness map, without the coverage panel")
     p.add_argument("--cmap", default="cividis_r")
     p.add_argument("--dpi", type=int, default=140)
     args = p.parse_args()
@@ -89,7 +95,11 @@ def main():
     vmin = args.vmin if args.vmin is not None else np.percentile(sub[finite], 1)
     vmax = args.vmax if args.vmax is not None else np.percentile(sub[finite], 99)
 
-    fig, axes = plt.subplots(1, 2, figsize=(15.5, 7.6))
+    if args.map_only:
+        fig, ax0 = plt.subplots(figsize=(8.4, 7.8))
+        axes = [ax0]
+    else:
+        fig, axes = plt.subplots(1, 2, figsize=(15.5, 7.6))
     extent = (x0 - 0.5, x1 - 0.5, y0 - 0.5, y1 - 0.5)
 
     im = axes[0].imshow(sub, origin="lower", extent=extent, cmap=args.cmap,
@@ -100,9 +110,11 @@ def main():
     cb.set_label("V mag / arcsec$^2$")
     cb.ax.invert_yaxis()
 
-    im2 = axes[1].imshow(cov, origin="lower", extent=extent, cmap="magma")
-    axes[1].set_title("frames contributing (after the galactic-plane cut)")
-    fig.colorbar(im2, ax=axes[1], fraction=0.046, pad=0.02).set_label("frames")
+    if not args.map_only:
+        im2 = axes[1].imshow(cov, origin="lower", extent=extent, cmap="magma")
+        axes[1].set_title("frames contributing (after the galactic-plane cut)")
+        fig.colorbar(im2, ax=axes[1], fraction=0.046,
+                     pad=0.02).set_label("frames")
 
     for ax in axes:
         rmax = _alt_az_grid(ax, wcs, float(xz), float(yz))
@@ -116,10 +128,11 @@ def main():
             sp.set_visible(False)
 
     span = f"{min(nights)} to {max(nights)}" if nights else "?"
+    thru = "throughput-corrected" if hdr.get("THRUCORR") else "uncorrected"
     fig.suptitle(f"Alcor all-sky median surface brightness   "
                  f"{span}   stride {hdr.get('STRIDE', '?')}, "
-                 f"{hdr.get('SPBIN', '?')}x{hdr.get('SPBIN', '?')} superpixels",
-                 fontsize=12)
+                 f"{hdr.get('SPBIN', '?')}x{hdr.get('SPBIN', '?')} superpixels, "
+                 f"{thru}", fontsize=12)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     fig.savefig(out, dpi=args.dpi)
     print(f"wrote {out}")

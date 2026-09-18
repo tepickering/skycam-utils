@@ -182,10 +182,10 @@ def _night_geometry(night, nbin, horizon_mask, ref_time, shape, badpix=True):
                 ha=ha, dec=dec)
 
 
-def _init(nbin, horizon_mask, archive, bmin, shape, badpix):
+def _init(nbin, horizon_mask, archive, bmin, shape, badpix, dry_run):
     global _CFG
     _CFG = dict(nbin=nbin, horizon_mask=horizon_mask, archive=archive,
-                bmin=bmin, shape=shape, badpix=badpix)
+                bmin=bmin, shape=shape, badpix=badpix, dry_run=dry_run)
 
 
 def reduce_night(args):
@@ -206,6 +206,22 @@ def reduce_night(args):
     times = Time(pd.to_datetime(rows["OBSTIME"]).to_numpy(), scale="utc",
                  location=MMT_LOCATION)
     lst = np.atleast_1d(times.sidereal_time("apparent").deg)
+
+    # A dry run answers "will this fill in?" from the timestamps alone, before
+    # committing hours to reading frames: the galactic mask depends only on
+    # when each frame was taken and where each superpixel points.
+    if cfg["dry_run"]:
+        cov = np.zeros(len(idx), dtype=np.int32)
+        for i in range(len(rows)):
+            b = galactic_b((lst[i] - g["ha"]) % 360.0, g["dec"])
+            cov += (np.abs(b) >= cfg["bmin"])
+        nsuper = g["sgrid"][0] * g["sgrid"][1]
+        med = np.where(cov > 0, 0.0, np.nan).astype(np.float32)
+        full = np.full(nsuper, np.nan, dtype=np.float32)
+        full[idx] = med
+        fullcov = np.zeros(nsuper, dtype=np.int32)
+        fullcov[idx] = cov
+        return night, full.reshape(g["sgrid"]), fullcov.reshape(g["sgrid"]), len(rows)
 
     stack = np.full((len(rows), len(idx)), np.nan, dtype=np.float32)
     nread = 0
@@ -265,6 +281,9 @@ def main():
     p.add_argument("--bmin", type=float, default=10.0,
                    help="mask |galactic latitude| below this, in deg (default 10)")
     p.add_argument("--no-horizon-mask", action="store_true")
+    p.add_argument("--dry-run", action="store_true",
+                   help="report coverage after the galactic-plane cut without "
+                        "reading any frames, to check a night set will fill in")
     p.add_argument("--no-badpix-mask", action="store_true",
                    help="keep hot pixels instead of masking them out")
     p.add_argument("--nights", type=int, default=None, help="first N nights only (testing)")
@@ -299,7 +318,8 @@ def main():
     with ProcessPoolExecutor(max_workers=args.workers, initializer=_init,
                              initargs=(args.nbin, not args.no_horizon_mask,
                                        args.archive, args.bmin, shape,
-                                       not args.no_badpix_mask)) as ex:
+                                       not args.no_badpix_mask,
+                                       args.dry_run)) as ex:
         futs = [ex.submit(reduce_night, g) for g in groups]
         for f in as_completed(futs):
             night, med, cov, nread = f.result()
@@ -343,6 +363,7 @@ def main():
     hdr["BMIN"] = (args.bmin, "|galactic latitude| masked below this, deg")
     hdr["HORIZMSK"] = (not args.no_horizon_mask, "horizon mask applied")
     hdr["BADPIX"] = (not args.no_badpix_mask, "hot pixels masked out")
+    hdr["DRYRUN"] = (bool(args.dry_run), "coverage only; brightness plane is not real")
     hdr["COMMENT"] = "Median over nights of each night's median frame map."
     hdr["COMMENT"] = "Milky Way masked per frame, not averaged: see BMIN."
 
@@ -359,10 +380,22 @@ def main():
     print(f"  {len(nights_used)} nights, {finite.sum():,} of {sky.size:,} "
           f"superpixels filled ({100*finite.mean():.1f}%)", file=sys.stderr)
     if finite.any():
+        nf = nframes[finite]
         print(f"  per-superpixel night coverage: min {nnights[finite].min()}, "
               f"median {int(np.median(nnights[finite]))}", file=sys.stderr)
-        print(f"  brightness range: {np.nanmin(sky):.2f} to {np.nanmax(sky):.2f} "
-              f"mag/arcsec2", file=sys.stderr)
+        print(f"  frames per superpixel after the |b| > {args.bmin:.0f} cut: "
+              f"min {nf.min()}, 1% {int(np.percentile(nf, 1))}, "
+              f"median {int(np.median(nf))} of {total:,}", file=sys.stderr)
+        for thr in (10, 25, 50):
+            print(f"    superpixels with < {thr} frames: "
+                  f"{(nf < thr).sum():,} ({100 * (nf < thr).mean():.2f}%)",
+                  file=sys.stderr)
+        if args.dry_run:
+            print("  DRY RUN: coverage only, the brightness plane is not real",
+                  file=sys.stderr)
+        else:
+            print(f"  brightness range: {np.nanmin(sky):.2f} to "
+                  f"{np.nanmax(sky):.2f} mag/arcsec2", file=sys.stderr)
 
 
 if __name__ == "__main__":

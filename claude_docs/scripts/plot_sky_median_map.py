@@ -11,8 +11,11 @@ Rendering follows ``plot_alcor_sky_brightness``: the zenith crop, north up,
 ``origin="lower"``, a ``cividis_r`` colorbar so bright sky reads bright, and
 the same shared alt/az grid helpers.
 
-``--map-only`` drops the coverage panel, for when the map is going into a
-document rather than being checked. The output extension drives the backend, so
+``--map-only`` drops the coverage panel AND the provenance suptitle, for when
+the map is going into a document rather than being checked: the run parameters
+belong on the diagnostic version, and at single-panel width the line is too
+long to fit anyway. The panel keeps its own title, so the figure still says
+what it is. The output extension drives the backend, so
 ``-o something.pdf`` gives vector output.
 
 Usage: plot_sky_median_map.py <map.fits> [-o OUT.png] [--map-only]
@@ -127,13 +130,16 @@ def main():
         for sp in ax.spines.values():
             sp.set_visible(False)
 
-    span = f"{min(nights)} to {max(nights)}" if nights else "?"
-    thru = "throughput-corrected" if hdr.get("THRUCORR") else "uncorrected"
-    fig.suptitle(f"Alcor all-sky median surface brightness   "
-                 f"{span}   stride {hdr.get('STRIDE', '?')}, "
-                 f"{hdr.get('SPBIN', '?')}x{hdr.get('SPBIN', '?')} superpixels, "
-                 f"{thru}", fontsize=12)
-    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    if args.map_only:
+        fig.tight_layout()
+    else:
+        span = f"{min(nights)} to {max(nights)}" if nights else "?"
+        thru = "throughput-corrected" if hdr.get("THRUCORR") else "uncorrected"
+        fig.suptitle(f"Alcor all-sky median surface brightness   "
+                     f"{span}   stride {hdr.get('STRIDE', '?')}, "
+                     f"{hdr.get('SPBIN', '?')}x{hdr.get('SPBIN', '?')} "
+                     f"superpixels, {thru}", fontsize=12)
+        fig.tight_layout(rect=(0, 0, 1, 0.96))
     fig.savefig(out, dpi=args.dpi)
     print(f"wrote {out}")
 

@@ -118,11 +118,13 @@ ALCOR_BADPIX_CONSENSUS = 0.5
 # vote; that leaves 13-19 voting nights a month, and the masks then grow
 # smoothly (~27 defects a month net, sensor aging) with no lunar signature.
 ALCOR_BADPIX_SIGMA_MAX = 9.0   # ADU, robust sigma of the G high-pass residual
-# The cube is demosaiced, so one hot photosite lights a 3x3 footprint at ~1/2
-# and ~1/4 amplitude in the neighbours, and z>25 catches only its core: ~15% of
-# the unflagged neighbours of known defects sit at z>5. Detections are grown
-# into same-channel 3x3 neighbours above this z (one step of hysteresis), which
-# adds ~40% to the mask, still ~0.1% of the frame.
+# A defect is single-channel: one pixel in G (edge neighbours ~1/8 of the
+# peak), a one-sided 2x2 block at ~1, 1/3, 1/3, 1/5 in R/B from the demosaic.
+# The fainter footprint pixels read z ~10-30 on a dark night, so they clear
+# z>25 only some nights and lose the monthly vote. Detections are grown into
+# same-channel 3x3 neighbours above this z (one step of hysteresis); without it
+# the monthly masks are 26-30% smaller and ~500 pixels at a median z ~15, every
+# one adjacent to a masked defect, go unrepaired.
 ALCOR_BADPIX_GROW_THRESH = 8.0
 # A month with fewer voting nights than this gets no mask (the nearest-date
 # loader then falls back to a neighbouring month).

@@ -122,11 +122,13 @@ def build_alcor_badpix_mask(median_cube, ksize=5, z_thresh=25.0, valid=None,
     a sensor defect only if it fires in AT MOST TWO channels -- one present in all
     three is a real broadband source and is excluded from every plane.
 
-    With ``grow_thresh`` set, each detection is grown into its same-channel 3x3
-    neighbours whose z exceeds ``grow_thresh`` (one step of hysteresis). The cube
-    is demosaiced, so one hot photosite spreads over a 3x3 footprint at roughly
-    1/2 and 1/4 amplitude in the neighbours; only the part above ``z_thresh`` is
-    otherwise caught, leaving the rest of the footprint in the data.
+    A real defect is confined to one channel. In G it is essentially one pixel
+    (edge neighbours ~1/8 of the peak); in R and B the demosaic spreads it over a
+    one-sided 2x2 block at ~1, 1/3, 1/3, 1/5. With ``grow_thresh`` set, each
+    detection is grown into its same-channel 3x3 neighbours whose z exceeds
+    ``grow_thresh`` (one step of hysteresis), which picks up the fainter part of
+    that footprint: it sits just below ``z_thresh`` on most nights, so a pixel
+    that clears it only some of the time would otherwise lose a consensus vote.
 
     Parameters
     ----------

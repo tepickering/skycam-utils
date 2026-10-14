@@ -105,6 +105,25 @@ def test_apply_badpix_repair_local_median():
     assert data[0, 2, 2] == 1000                # input not mutated
 
 
+
+def test_apply_badpix_repair_matches_full_median_filter():
+    """The masked-pixel-only repair equals the full-frame median filter, edges included."""
+    from scipy.ndimage import median_filter
+    from skycam_utils.alcor import _apply_badpix_repair
+    rng = np.random.default_rng(3)
+    data = rng.normal(1000, 50, (3, 40, 50)).astype(">i2")   # big-endian, as FITS
+    mask = rng.random(data.shape) < 0.01
+    mask[0, 0, 0] = mask[1, -1, 7] = mask[2, 20, -1] = True  # corner and edges
+    data[mask] = 30000
+
+    out = _apply_badpix_repair(data, mask)
+
+    for c in range(3):
+        local = median_filter(data[c].astype(np.float32), size=5)
+        assert np.array_equal(out[c][mask[c]], local[mask[c]].astype(data.dtype))
+        assert np.array_equal(out[c][~mask[c]], data[c][~mask[c]])
+    assert out.dtype == data.dtype
+
 def _write_alcor_raw(path, cube):
     # alcor raw layout is (3, ny, nx) int16
     fits.PrimaryHDU(data=cube.astype(np.int16)).writeto(path, overwrite=True)

@@ -101,6 +101,34 @@ ALCOR_COLOR_FLAT_TOL = 0.05   # mag per mag of B-V
 ALCOR_BADPIX_POLE_RADIUS = 15   # pixels
 
 
+# Consensus bad-pixel masks (create_badpix_consensus_masks). A single night's
+# detections are a stable sensor core plus one-night sky structure: over 644
+# archived nights (2025-01..2026-10) 99k pixel/channels were flagged at least
+# once but only ~1000 on more than half the nights, and the transients sit at a
+# median altitude of 5 deg toward the light domes -- sky gradient and ground
+# lights just above the dilated horizon mask, different every night. A pixel is
+# therefore masked for a calendar month only when it is flagged on at least
+# ALCOR_BADPIX_CONSENSUS of that month's nights...
+ALCOR_BADPIX_CONSENSUS = 0.5
+# ...counting only nights sensitive enough to see it. The detector thresholds in
+# noise units, and moonlight raises the G-channel noise of a night median from
+# ~6 to ~20 ADU, so a moonlit night reaches only the brighter hot pixels: January
+# 2026 held both of its full-Moon stretches and an all-night vote dropped 170
+# real defects for that one month. Nights with G sigma above this cap do not
+# vote; that leaves 13-19 voting nights a month, and the masks then grow
+# smoothly (~27 defects a month net, sensor aging) with no lunar signature.
+ALCOR_BADPIX_SIGMA_MAX = 9.0   # ADU, robust sigma of the G high-pass residual
+# The cube is demosaiced, so one hot photosite lights a 3x3 footprint at ~1/2
+# and ~1/4 amplitude in the neighbours, and z>25 catches only its core: ~15% of
+# the unflagged neighbours of known defects sit at z>5. Detections are grown
+# into same-channel 3x3 neighbours above this z (one step of hysteresis), which
+# adds ~40% to the mask, still ~0.1% of the frame.
+ALCOR_BADPIX_GROW_THRESH = 8.0
+# A month with fewer voting nights than this gets no mask (the nearest-date
+# loader then falls back to a neighbouring month).
+ALCOR_BADPIX_MIN_NIGHTS = 8
+
+
 # Fixed sky-brightness sampling apertures for the nightly archive summary
 # (alcor_process_night). Each is the median surface brightness of the pixels
 # within ALCOR_SB_APERTURE_RADIUS degrees of a fixed (azimuth, altitude), so the

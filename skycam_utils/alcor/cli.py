@@ -2,6 +2,7 @@
 
 import argparse
 import sys
+from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -9,7 +10,8 @@ from astropy.io import fits
 from astropy.time import Time
 
 from .config import (
-    ALCOR_BADPIX_POLE_RADIUS, ALCOR_BADPIX_RIM_DILATION,
+    ALCOR_BADPIX_CONSENSUS, ALCOR_BADPIX_GROW_THRESH, ALCOR_BADPIX_MIN_NIGHTS,
+    ALCOR_BADPIX_POLE_RADIUS, ALCOR_BADPIX_RIM_DILATION, ALCOR_BADPIX_SIGMA_MAX,
     ALCOR_NONLINEAR_THRESHOLD, ALCOR_RADIUS, ALCOR_SATURATION,
     ALCOR_SB_APERTURE_RADIUS, ALCOR_SB_BEST_MIN_ALTITUDE
 )
@@ -18,7 +20,7 @@ from .wcs import build_alcor_wcs
 from .wcsfit import (
     _format_calibration_entry, fit_alcor_wcs, save_alcor_residual_plot
 )
-from .badpix import create_badpix_mask
+from .badpix import create_badpix_consensus_masks, create_badpix_mask
 from .horizon import alcor_median_stack, create_horizon_mask
 from .io import alcor_proc_fits
 from .photometry import (
@@ -973,6 +975,68 @@ def create_badpix_mask_cli():
         print("# no mask written (insufficient dark frames)")
     else:
         print(out)
+
+
+
+def create_badpix_consensus_masks_cli():
+    """
+    CLI entry point for :func:`create_badpix_consensus_masks`.
+    """
+    parser = argparse.ArgumentParser(
+        description="Build monthly consensus alcor bad-pixel masks from the "
+                    "<night>_median.fits stacks of an archive products tree.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("products_dir",
+                        help="Products tree holding <night>/<night>_median.fits "
+                             "(alcor_process_night --median-stack output).")
+    parser.add_argument("--out-dir", default=None,
+                        help="Output directory (default: $ALCOR_BADPIX_DIR or packaged data/badpix).")
+    parser.add_argument("--start", type=date.fromisoformat, default=None,
+                        help="First night to read (YYYY-MM-DD).")
+    parser.add_argument("--end", type=date.fromisoformat, default=None,
+                        help="Last night to read (YYYY-MM-DD).")
+    parser.add_argument("--consensus", type=float, default=ALCOR_BADPIX_CONSENSUS,
+                        help="Fraction of a month's voting nights that must flag a pixel.")
+    parser.add_argument("--sigma-max", type=float, default=ALCOR_BADPIX_SIGMA_MAX,
+                        help="A night votes only if its G high-pass sigma (ADU) is "
+                             "at most this; moonlit nights are blind to fainter defects.")
+    parser.add_argument("--min-nights", type=int, default=ALCOR_BADPIX_MIN_NIGHTS,
+                        help="Write no mask for a month with fewer voting nights.")
+    parser.add_argument("--grow-thresh", type=float, default=ALCOR_BADPIX_GROW_THRESH,
+                        help="Grow detections into 3x3 same-channel neighbours above "
+                             "this z (completes the demosaic footprint).")
+    parser.add_argument("--no-grow", action="store_true",
+                        help="Disable footprint growth.")
+    parser.add_argument("--z-thresh", type=float, default=25.0,
+                        help="Robust-sigma threshold for a hot pixel.")
+    parser.add_argument("--ksize", type=int, default=5, help="High-pass median kernel (px).")
+    parser.add_argument("--rim-dilation", type=int, default=ALCOR_BADPIX_RIM_DILATION,
+                        help="Horizon-mask dilation (px) before excluding not-sky.")
+    parser.add_argument("--pole-radius", type=int, default=ALCOR_BADPIX_POLE_RADIUS,
+                        help="Celestial-pole exclusion radius (px); 0 to disable.")
+    parser.add_argument("--horizon-dir", default=None,
+                        help="Horizon-mask directory (default: $ALCOR_HORIZON_DIR "
+                             "or packaged data/horizon).")
+    parser.add_argument("--workers", type=int, default=None,
+                        help="Worker processes (default: one per core).")
+    parser.add_argument("--quiet", action="store_true",
+                        help="Do not print per-month progress messages.")
+    args = parser.parse_args()
+
+    log = None if args.quiet else (lambda message: print(message, file=sys.stderr))
+    written = create_badpix_consensus_masks(
+        args.products_dir, out_dir=args.out_dir, start=args.start, end=args.end,
+        consensus=args.consensus, sigma_max=args.sigma_max,
+        min_nights=args.min_nights,
+        grow_thresh=None if args.no_grow else args.grow_thresh,
+        z_thresh=args.z_thresh, ksize=args.ksize, rim_dilation=args.rim_dilation,
+        pole_radius=args.pole_radius, horizon_dir=args.horizon_dir,
+        workers=args.workers, log=log)
+    if not written:
+        print("# no masks written")
+    for path in written:
+        print(path)
 
 
 

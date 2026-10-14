@@ -279,3 +279,104 @@ def test_search_region_disabled_pieces_are_noops():
 
     valid = alcor_badpix_search_region((50, 60), time=None, wcs=None)
     assert valid.all()
+
+
+def test_build_badpix_mask_grows_footprint():
+    # demosaic-like footprint: a seed with half-amplitude edge neighbours and
+    # quarter-amplitude corners, on a noisy background so the robust sigma is ~1
+    rng = np.random.default_rng(1)
+    cube = rng.normal(100.0, 1.0, size=(3, 21, 21))
+    cube[0, 10, 10] += 400.0                     # seed, z ~ 400
+    for dy, dx in ((0, 1), (0, -1), (1, 0), (-1, 0)):
+        cube[0, 10 + dy, 10 + dx] += 30.0        # z ~ 30: already above 25
+    for dy, dx in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
+        cube[0, 10 + dy, 10 + dx] += 12.0        # z ~ 12: only grown
+    cube[0, 3, 3] += 12.0                        # weak, isolated: never a seed
+
+    seed = build_alcor_badpix_mask(cube)
+    assert seed[0, 10, 10] and not seed[0, 11, 11]
+    grown = build_alcor_badpix_mask(cube, grow_thresh=8.0)
+    assert grown[0, 9:12, 9:12].all()            # whole 3x3 footprint
+    assert not grown[0, 3, 3]                    # growth needs an adjacent seed
+    assert not grown[1:].any()                   # same channel only
+    # one step only: a pixel two away from the seed is not reached
+    assert not grown[0, 10, 12]
+
+
+def test_build_badpix_mask_return_sigma():
+    rng = np.random.default_rng(2)
+    cube = rng.normal(0.0, 3.0, size=(3, 40, 40))
+    mask, sigma = build_alcor_badpix_mask(cube, return_sigma=True)
+    assert mask.shape == cube.shape and sigma.shape == (3,)
+    assert np.all((sigma > 1.5) & (sigma < 4.5))
+
+
+def _write_night_median(products, night, noise, hot, rng, shape=(3, 24, 24)):
+    d = products / night
+    d.mkdir()
+    cube = rng.normal(1000.0, noise, size=shape).astype(np.float32)
+    for c, y, x in hot:
+        cube[c, y, x] += 300.0
+    fits.PrimaryHDU(data=cube).writeto(d / f"{night}_median.fits")
+
+
+def test_consensus_masks_vote_on_dark_nights_only(tmp_path, patch_alcor):
+    from skycam_utils import alcor
+    patch_alcor("alcor_badpix_search_region",
+                lambda shape, **kw: np.ones(shape, dtype=bool))
+    rng = np.random.default_rng(3)
+    products = tmp_path / "products"
+    products.mkdir()
+    steady, transient = (0, 5, 5), (2, 15, 15)
+    # January: two dark nights see the steady pixel (and one sees a transient);
+    # three moonlit nights are too noisy (sigma ~20) to reach it at z > 25. An
+    # all-night vote would be 2/5 and drop it; the dark-night vote is 2/2.
+    _write_night_median(products, "2026-01-05", 2.0, [steady, transient], rng)
+    _write_night_median(products, "2026-01-20", 2.0, [steady], rng)
+    for night in ("2026-01-10", "2026-01-11", "2026-01-12"):
+        _write_night_median(products, night, 20.0, [steady], rng)
+    # February: one dark night, below min_nights -> no mask
+    _write_night_median(products, "2026-02-05", 2.0, [steady], rng)
+    (products / "not-a-night").mkdir()           # ignored
+    out = tmp_path / "masks"
+
+    written = alcor.create_badpix_consensus_masks(
+        products, out_dir=out, consensus=0.6, sigma_max=9.0, min_nights=2,
+        workers=1)
+
+    assert [p.name for p in written] == ["alcor_badpix_2026-01-15.fits.gz"]
+    hdr = fits.getheader(written[0])
+    assert hdr["MASKTYPE"] == "consensus" and hdr["WINDOW"] == "2026-01"
+    assert hdr["NNIGHTS"] == 2 and hdr["NMEDIAN"] == 5
+    m, d = alcor.load_alcor_badpix_mask(date(2026, 1, 31), masks_dir=str(out))
+    assert d == date(2026, 1, 15)
+    assert m[steady]                             # dark-night consensus keeps it
+    assert not m[transient]                      # one night of two: voted out
+    assert hdr["NBADR"] == int(m[0].sum())
+
+
+def test_consensus_masks_respects_date_range(tmp_path, patch_alcor):
+    from skycam_utils import alcor
+    patch_alcor("alcor_badpix_search_region",
+                lambda shape, **kw: np.ones(shape, dtype=bool))
+    rng = np.random.default_rng(4)
+    products = tmp_path / "products"
+    products.mkdir()
+    for night in ("2026-01-05", "2026-03-05"):
+        _write_night_median(products, night, 2.0, [(1, 8, 8)], rng)
+    written = alcor.create_badpix_consensus_masks(
+        products, out_dir=tmp_path, min_nights=1, workers=1,
+        start=date(2026, 2, 1))
+    assert [p.name for p in written] == ["alcor_badpix_2026-03-15.fits.gz"]
+
+
+def test_build_badpix_mask_growth_respects_valid_region():
+    # a seed just outside the search region must not grow into it
+    rng = np.random.default_rng(5)
+    cube = rng.normal(100.0, 1.0, size=(3, 21, 21))
+    cube[0, 10, 10] += 400.0
+    cube[0, 10, 11] += 12.0                      # growable neighbour, inside
+    valid = np.ones((21, 21), dtype=bool)
+    valid[:, :11] = False                        # the seed is outside
+    grown = build_alcor_badpix_mask(cube, grow_thresh=8.0, valid=valid)
+    assert not grown.any()

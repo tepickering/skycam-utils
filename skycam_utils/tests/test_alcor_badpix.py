@@ -124,6 +124,7 @@ def test_apply_badpix_repair_matches_full_median_filter():
         assert np.array_equal(out[c][~mask[c]], data[c][~mask[c]])
     assert out.dtype == data.dtype
 
+
 def _write_alcor_raw(path, cube):
     # alcor raw layout is (3, ny, nx) int16
     fits.PrimaryHDU(data=cube.astype(np.int16)).writeto(path, overwrite=True)

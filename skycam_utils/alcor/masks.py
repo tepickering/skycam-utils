@@ -91,15 +91,34 @@ def _apply_badpix_repair(data, mask, ksize=5):
     ``data`` and ``mask`` are ``(3, ny, nx)``. Returns a repaired copy; the input
     is not mutated. The local median (computed over the surrounding ``ksize``
     window) is robust to the spike itself, so it recovers the underlying sky.
+
+    The median is taken only at the masked pixels: a full-frame median filter
+    of a 1411 x 1422 x 3 frame takes ~1.7 s, this ~20 ms for a typical mask of
+    ~2000 pixels, with an identical result (same ``reflect`` edge handling as
+    `scipy.ndimage.median_filter`). Dense masks or an even ``ksize`` fall back
+    to the full filter.
     """
     out = np.array(data, copy=True)
-    for c in range(data.shape[0]):
-        if not mask[c].any():
-            continue
-        # filter on a native float copy (FITS data is big-endian int16, which
-        # median_filter can choke on), then cast back to the frame's dtype.
-        local = median_filter(np.asarray(out[c], dtype=np.float32), size=ksize)
-        out[c][mask[c]] = local[mask[c]].astype(out.dtype)
+    nbad = int(np.count_nonzero(mask))
+    if nbad == 0:
+        return out
+    if ksize % 2 == 0 or nbad > 0.05 * mask.size:
+        for c in range(data.shape[0]):
+            if not mask[c].any():
+                continue
+            # filter on a native float copy (FITS data is big-endian int16, which
+            # median_filter can choke on), then cast back to the frame's dtype.
+            local = median_filter(np.asarray(out[c], dtype=np.float32), size=ksize)
+            out[c][mask[c]] = local[mask[c]].astype(out.dtype)
+        return out
+    h = ksize // 2
+    # numpy's "symmetric" padding is scipy.ndimage's default "reflect" mode
+    padded = np.pad(np.asarray(data, dtype=np.float32), ((0, 0), (h, h), (h, h)),
+                    mode="symmetric")
+    c, y, x = np.nonzero(mask)
+    dy, dx = np.mgrid[-h:h + 1, -h:h + 1]
+    windows = padded[c[:, None], y[:, None] + h + dy.ravel(), x[:, None] + h + dx.ravel()]
+    out[c, y, x] = np.median(windows, axis=1).astype(out.dtype)
     return out
 
 

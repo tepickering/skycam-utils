@@ -55,10 +55,12 @@ per night. (2) **4x4 superpixels binned by MEDIAN** (~0.5 deg at the zenith): a
 star only pushes pixels brighter, so the block median rejects it where a mean
 would smear it in, the same reason `allsky_mv_best` takes a cone median and not
 a darkest pixel. (3) **Hot pixels are MASKED in the per-night precompute, not
-repaired per frame** -- repair is ~1.9 s of the ~2.4 s each frame costs, and
-masking is both cheaper and more honest, since a repaired pixel is an
-interpolated guess that still votes in the block median while a masked one does
-not. It matters because the hot-pixel pattern is FIXED: left in, it biases the
+repaired per frame** -- masking is the more honest choice, since a repaired
+pixel is an interpolated guess that still votes in the block median while a
+masked one does not. (It was also chosen for speed, when repair was a
+full-frame median filter at ~1.9 s of the ~2.4 s each frame cost; since
+`_apply_badpix_repair` takes the median only at the masked pixels it is ~20 ms,
+so honesty is now the whole argument.) It matters because the hot-pixel pattern is FIXED: left in, it biases the
 same superpixels on every night and so survives the across-night median
 (measured, one night: ~1700 of 1.2M superpixels shifted by up to 0.07 mag).
 (4) **Per-pixel geometry is computed once per night, not per frame**, exactly as
@@ -320,9 +322,10 @@ alcor_process_night <night-dir> [-o OUT-DIR] [--pattern *.fits.bz2] [--sun-alt-m
 #   RESUME: a frame whose <frame>_phot.csv already exists and is non-empty is NOT
 #   re-measured (the real-time ingest will eventually write those as images come
 #   in), but IS still read -- the SB map and both keogram columns need its pixels
-#   and the CSV does not carry them, so every product stays complete. Photometry is
-#   only ~17% of per-frame cost (load+repair is ~63%), so this saves the measurement,
-#   not the frame. --reprocess forces re-measurement; use it after changing
+#   and the CSV does not carry them, so every product stays complete. Measured per
+#   frame: bz2 load ~0.9-1.3 s (more on a cold USB read), bad-pixel repair ~20 ms
+#   (median only at the masked pixels), --both photometry ~1.1-1.4 s, SB map ~0.6 s
+#   -- so resuming saves roughly a third of each frame, not the frame. --reprocess forces re-measurement; use it after changing
 #   photometry options, since a CSV written in another mode is otherwise reused
 #   as-is and collect_alcor_photometry would pool a mixed schema.
 #   Reusable as alcor_process_night(night_dir, ...), which returns a dict of the

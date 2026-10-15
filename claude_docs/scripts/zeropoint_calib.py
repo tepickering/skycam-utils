@@ -103,6 +103,7 @@ def star_m0(df):
         if ok: recs.append(rec)
     return pd.DataFrame(recs)
 
+TERMS = "0.4·X" + (" + blend" if ARGS.blend else "") + (" + flat" if ARGS.flat else "")
 fig, axes = plt.subplots(len(NIGHTS), 3, figsize=(16, 5 * len(NIGHTS)), squeeze=False)
 print(f"{'night':12s} {'ch->cat':8s} {'ZP':>7s} {'color c':>9s} {'rms':>6s} {'Nstar':>6s}")
 print("-"*52)
@@ -130,9 +131,9 @@ for row, (tag, nd) in enumerate(NIGHTS):
         ax.axhline(zp, color="0.5", ls=":", lw=1.0)
         ax.set_title(f"[{tag}]  instr {chlabel} → catalog {catband}", fontsize=12)
         ax.set_xlabel("B−V  (catalog color)")
-        ax.set_ylabel(f"catalog {catband} − (m_{chlabel} − 0.4·X)")
+        ax.set_ylabel(f"catalog {catband} − (m_{chlabel} − {TERMS})")
         ax.grid(alpha=.25); ax.legend(fontsize=9, loc="best")
-fig.suptitle("Zeropoint + color-term calibration (aperture, k=0.40/airmass, bright cut −11.5).\n"
+fig.suptitle(f"Zeropoint + color-term calibration (aperture; m − {TERMS}; bright cut −11.5).\n"
              "Slope = color coefficient vs B−V.  Prediction: G→V flat (small c), "
              "R & B color-dependent (steep c).", fontsize=13)
 fig.tight_layout(rect=(0,0,1,0.93))

@@ -11,22 +11,10 @@ Alcor OMEA 8C
 =============
 
 The RGB all-sky camera module: WCS calibration, star photometry, the horizon
-mask, and sky-brightness mapping.
+mask, sky-brightness mapping, and cloud-extinction maps.
 
 .. automodapi:: skycam_utils.alcor
    :no-inheritance-diagram:
-   :skip: as_completed
-   :skip: disk
-   :skip: files
-   :skip: get_body
-   :skip: get_sun
-   :skip: hstack
-   :skip: least_squares
-   :skip: lru_cache
-   :skip: median_filter
-   :skip: opening
-   :skip: sigma_clipped_stats
-   :skip: sobel
 
 Stellacam pipeline
 ==================

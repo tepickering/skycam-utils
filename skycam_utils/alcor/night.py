@@ -303,8 +303,8 @@ def alcor_process_night(night_dir, out_dir=None, pattern="*.fits.bz2",
     out_dir : str or `~pathlib.Path` or None (default=None)
         Where every product is written. Defaults to ``night_dir``; pass an
         explicit directory when the archive is read-only or on slow media.
-    pattern : str (default="*.fits.bz2")
-        Glob pattern selecting frames within `night_dir`.
+    pattern : str
+        Glob pattern selecting frames within `night_dir` (default ``"*.fits.bz2"``).
     sun_alt_max : float (default=-12.0)
         Night is the Sun below this altitude in degrees.
     targets : dict or None (default=None)

@@ -113,8 +113,8 @@ def night_last_modified(night_dir, pattern="*.fits.bz2"):
     ----------
     night_dir : str or `~pathlib.Path`
         The night directory.
-    pattern : str (default="*.fits.bz2")
-        Glob selecting the frames.
+    pattern : str
+        Glob selecting the frames (default ``"*.fits.bz2"``).
 
     Returns
     -------
@@ -145,8 +145,8 @@ def is_too_recent(night_dir, min_age_hours, pattern="*.fits.bz2", now=None):
         The night directory.
     min_age_hours : float
         Quiet period in hours. 0 (or None) disables the rule.
-    pattern : str (default="*.fits.bz2")
-        Glob selecting the frames.
+    pattern : str
+        Glob selecting the frames (default ``"*.fits.bz2"``).
     now : float or None (default=None)
         Unix timestamp to compare against; None uses the current time.
 
@@ -386,8 +386,8 @@ def alcor_process_archive(archive_dir, out_dir, start=None, end=None,
         Explicit night names instead of scanning `archive_dir`.
     reverse : bool (default=False)
         Newest first.
-    pattern : str (default="*.fits.bz2")
-        Glob selecting frames, passed to `alcor_process_night`.
+    pattern : str
+        Glob selecting frames, passed to `alcor_process_night` (default ``"*.fits.bz2"``).
     min_age : float (default ALCOR_ARCHIVE_MIN_AGE)
         Hours a night must have been unchanged before it is processed. 0
         disables the rule.

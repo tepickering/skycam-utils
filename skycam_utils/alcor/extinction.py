@@ -47,7 +47,7 @@ from .config import (
 )
 from .wcs import build_alcor_wcs
 from .masks import load_alcor_horizon_mask
-from .photometry import collect_alcor_photometry
+from .photometry import alcor_calibrate_photometry, collect_alcor_photometry
 
 
 # Per-pixel (az, alt) for a given WCS + shape is the same array every call and
@@ -194,7 +194,19 @@ def alcor_extinction_stars(df, band="g", method="ap",
     measured, and light from the obstruction makes it read too bright -- a
     false *negative* extinction -- or, if fully hidden, a false lost star.
     ``None`` disables the cut; ``0`` drops only stars on not-sky pixels.
+
+    Photometry written before the aperture-blending correction (no
+    ``blend_<band>`` column) is recalibrated here first, so a map from an old CSV
+    gets the de-blended zeropoints and the blend term together -- mixing the
+    new zeropoints with old, blended ``ext_*`` would be off by ~0.1 mag. Those
+    CSVs were also measured without frame registration, so their blend terms
+    assume a centred aperture that may have sat 1-2 px off; re-measure the
+    frames for the exact value.
     """
+    legacy = (f"blend_{band}" not in df.columns and "altitude" in df.columns
+              and any(c.startswith(f"cal_{band}") for c in df.columns))
+    if legacy:
+        df = alcor_calibrate_photometry(df)
     ext_col = _resolve_column(df, "ext", band, method)
     mag_col = _resolve_column(df, "mag", band, method)
     flux_col = _resolve_column(df, "flux", band, method)

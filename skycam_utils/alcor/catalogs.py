@@ -189,12 +189,12 @@ def alcor_photometry_reference_altaz(time, vmag_limit=5.5, min_alt=20.0,
     star is measured twice. A star present in both keeps its calibration-catalog
     row -- it has real catalog magnitudes, so its ``ext_*`` stays meaningful --
     and is merely flagged. Returns a table with at least ``NAME``, ``HD``,
-    ``Alt``, ``Az`` and ``Variable``.
+    ``Vmag``, ``Alt``, ``Az`` and ``Variable`` (``Vmag`` is a variable's maximum).
     """
     named = alcor_named_reference_altaz(
         time, vmag_limit=vmag_limit, min_alt=min_alt, refraction=refraction,
         location=location)
-    out = named[[c for c in ("NAME", "HD", "Alt", "Az")
+    out = named[[c for c in ("NAME", "HD", "Vmag", "Alt", "Az")
                  if c in named.colnames]].copy()
     out["Variable"] = np.zeros(len(out), dtype=bool)
     if not variables:
@@ -219,6 +219,7 @@ def alcor_photometry_reference_altaz(time, vmag_limit=5.5, min_alt=20.0,
     add = Table()
     add["NAME"] = [str(n).strip() for n in var["NAME"]]
     add["HD"] = np.array(var["HD"], dtype=int)
+    add["Vmag"] = np.array(var["Vmag"], dtype=float)
     add["Alt"] = np.array(var["Alt"], dtype=float)
     add["Az"] = np.array(var["Az"], dtype=float)
     add["Variable"] = np.ones(len(add), dtype=bool)

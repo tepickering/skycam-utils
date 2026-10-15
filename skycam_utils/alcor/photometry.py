@@ -11,8 +11,12 @@ from astropy.time import Time
 
 from .config import (
     _DATA_ROOT,
-    ALCOR_AIRMASS_TERM, ALCOR_BRIGHT_CUT, ALCOR_COLOR_FLAT_TOL,
-    ALCOR_NONLINEAR_THRESHOLD, ALCOR_SATURATION, ALCOR_ZEROPOINTS,
+    ALCOR_AIRMASS_TERM, ALCOR_BLEND_APERTURE_RADIUS, ALCOR_BRIGHT_CUT,
+    ALCOR_COLOR_FLAT_TOL,
+    ALCOR_NONLINEAR_THRESHOLD, ALCOR_REGISTER_BOX, ALCOR_REGISTER_MAX_SHIFT,
+    ALCOR_REGISTER_MIN_ALTITUDE, ALCOR_REGISTER_MIN_SNR,
+    ALCOR_REGISTER_MIN_STARS, ALCOR_REGISTER_VMAG, ALCOR_SATURATION,
+    ALCOR_ZEROPOINTS,
     ALCOR_ZEROPOINT_BANDS, _GAUSS_MIN_CHANNEL_PIXELS, _GAUSS_MIN_LUM_PIXELS
 )
 from .timeutils import _alcor_frame_time, _filename_ut_datetime, _sun_altitude
@@ -21,6 +25,7 @@ from .catalogs import (
     alcor_photometry_reference_altaz
 )
 from .io import _corner_bias, load_alcor_fits
+from .blend import alcor_blend_terms
 from .display import save_alcor_photometry_check_plot
 
 
@@ -241,6 +246,67 @@ def _gaussian_psf_photometry(data, cube, lum_frame, xcen, ycen,
 
 
 
+def _centroid(image, x, y, box):
+    """
+    Peak-weighted centroid in a ``(2 box + 1)``-pixel square about ``(x, y)``,
+    and the peak's signal-to-noise against the box's robust noise. Weights are
+    the squared positive residual over the box median, which keys on the core
+    and keeps a faint neighbour in the box from pulling the centre. Returns
+    ``(cx, cy, snr)``, all NaN when the box leaves the frame.
+    """
+    ny, nx = image.shape
+    xi, yi = int(round(x)), int(round(y))
+    if xi - box < 0 or yi - box < 0 or xi + box >= nx or yi + box >= ny:
+        return np.nan, np.nan, np.nan
+    sub = image[yi - box:yi + box + 1, xi - box:xi + box + 1]
+    med = np.median(sub)
+    noise = 1.4826 * np.median(np.abs(sub - med))
+    resid = np.clip(sub - med, 0.0, None)
+    if not resid.any() or noise <= 0:
+        return np.nan, np.nan, np.nan
+    w = resid ** 2
+    yy, xx = np.mgrid[yi - box:yi + box + 1, xi - box:xi + box + 1]
+    return (float((w * xx).sum() / w.sum()), float((w * yy).sum() / w.sum()),
+            float(resid.max() / noise))
+
+
+def _frame_registration(image, xcen, ycen, vmag, altitude,
+                        vmag_limit=ALCOR_REGISTER_VMAG,
+                        min_altitude=ALCOR_REGISTER_MIN_ALTITUDE,
+                        box=ALCOR_REGISTER_BOX, min_snr=ALCOR_REGISTER_MIN_SNR,
+                        min_stars=ALCOR_REGISTER_MIN_STARS,
+                        max_shift=ALCOR_REGISTER_MAX_SHIFT):
+    """
+    The frame's translation off the WCS, ``(dx, dy, nstars)`` in px.
+
+    The median centroid-minus-prediction offset of the bright stars, found in
+    two passes (the second re-centred on the first, so a star near the edge of
+    the box is not dragged back toward the prediction). A frame with fewer than
+    ``min_stars`` usable stars -- cloud, twilight -- or whose median shift
+    exceeds ``max_shift`` returns ``(0, 0, n)``: no registration beats a wrong
+    one, and the apertures are then exactly where they always were.
+    """
+    pick = (np.asarray(vmag, dtype=float) <= vmag_limit) & \
+        (np.asarray(altitude, dtype=float) >= min_altitude)
+    xs, ys = np.asarray(xcen, float)[pick], np.asarray(ycen, float)[pick]
+    dx = dy = 0.0
+    n = 0
+    for _ in range(2):
+        off = []
+        for x, y in zip(xs + dx, ys + dy):
+            cx, cy, snr = _centroid(image, x, y, box)
+            if np.isfinite(snr) and snr >= min_snr:
+                off.append((cx - (x - dx), cy - (y - dy)))
+        n = len(off)
+        if n < min_stars:
+            return 0.0, 0.0, n
+        off = np.asarray(off)
+        dx, dy = float(np.median(off[:, 0])), float(np.median(off[:, 1]))
+        if np.hypot(dx, dy) > max_shift:
+            return 0.0, 0.0, n
+    return dx, dy, n
+
+
 def _default_alcor_photometry_output(filename):
     stem = str(filename)
     for ext in (".fits.bz2", ".fits.gz", ".fits"):
@@ -406,7 +472,8 @@ def _zeropoint_row_params(df, time):
 
 
 
-def alcor_calibrate_photometry(df, time=None):
+def alcor_calibrate_photometry(df, time=None, blend=True,
+                               aperture_radius=ALCOR_BLEND_APERTURE_RADIUS):
     """
     Add calibrated catalog-system magnitudes and cloud-extinction offsets.
 
@@ -420,9 +487,16 @@ def alcor_calibrate_photometry(df, time=None):
         ``ALCOR_BRIGHT_CUT`` (the CMOS non-linear regime, where the calibration
         is invalid).
     ``ext_{band}[suffix]``
-        ``cal - catalog_mag``: the offset from the star's catalog magnitude --
-        the line-of-sight extinction (e.g. cloud attenuation) in magnitudes,
-        positive when the star is dimmer than catalog.
+        ``cal - (catalog_mag + blend)``: the offset from what the aperture
+        should see -- the line-of-sight extinction (e.g. cloud attenuation) in
+        magnitudes, positive when the star is dimmer than expected.
+    ``blend_{band}``
+        the aperture-blending term from :func:`alcor_blend_terms` (<= 0; 0 for an
+        isolated star): the light that catalog neighbours inside an
+        ``aperture_radius``-pixel aperture add, at this row's position on the
+        sky. It is subtracted only from the REFERENCE, so ``cal_*`` stays the
+        measured, blended light. ``blend=False`` (or no ``azimuth`` column)
+        writes zeros and reproduces the old, blended ``ext_*``.
 
     Zeropoints come from :func:`alcor_zeropoint`; the epoch is resolved from
     ``time`` when given, else per row from an ``OBSTIME`` column when present,
@@ -454,6 +528,17 @@ def alcor_calibrate_photometry(df, time=None):
     }
     airmass = _airmass(df["altitude"].to_numpy(dtype=float))
     zp, color = _zeropoint_row_params(df, time)
+    if blend and "azimuth" in df.columns:
+        blend_time = time
+        if blend_time is None and len(df) and "OBSTIME" in df.columns:
+            stamps = np.asarray(df["OBSTIME"], dtype="datetime64[ns]")
+            blend_time = Time(stamps[len(stamps) // 2])
+        terms = alcor_blend_terms(
+            df.assign(name=names.to_numpy()),
+            {band: catmag[band] for band in ALCOR_ZEROPOINT_BANDS},
+            time=blend_time, aperture_radius=aperture_radius)
+    else:
+        terms = {band: np.zeros(len(df)) for band in ALCOR_ZEROPOINT_BANDS}
     for band in ALCOR_ZEROPOINT_BANDS:
         # For a colour-flat band a missing B-V costs less than the photometric
         # scatter, so assume zero rather than throw the measurement away.
@@ -469,7 +554,8 @@ def alcor_calibrate_photometry(df, time=None):
             cal = np.where(np.isfinite(instr) & (instr > ALCOR_BRIGHT_CUT),
                            cal, np.nan)
             df[f"cal_{band}{suffix}"] = cal
-            df[f"ext_{band}{suffix}"] = cal - catmag[band]
+            df[f"ext_{band}{suffix}"] = cal - (catmag[band] + terms[band])
+        df[f"blend_{band}"] = terms[band]
     return df
 
 
@@ -482,7 +568,7 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
                           sun_alt_max=-12.0, saturation=ALCOR_SATURATION,
                           gaussian=False,
                           mask_threshold=ALCOR_NONLINEAR_THRESHOLD,
-                          both=False, frame=None):
+                          both=False, frame=None, register=True):
     """
     Measure fixed-position aperture photometry for bright named stars.
 
@@ -536,6 +622,15 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
     for measurements brighter than ``ALCOR_BRIGHT_CUT`` (CMOS non-linear regime)
     or for stars lacking a catalog color.
 
+    With ``register`` (the default) the frame is first registered: the fitted
+    geometry is stationary but the image drifts 1-2 px on the sensor over
+    months, so every aperture is shifted by the median centroid offset of the
+    frame's bright stars (:func:`_frame_registration`). It is one shift for the
+    whole frame, so the photometry stays fixed-position -- a star behind cloud is
+    still measured where it should be. The shift is recorded per row as
+    ``frame_dx``/``frame_dy`` with ``frame_nreg`` stars behind it, and is
+    ``(0, 0)`` when too few stars are usable.
+
     Pass ``frame`` as an already-loaded ``(cube, wcs, mask)`` tuple (the
     :func:`load_alcor_fits` return) to skip the internal load. The cube must
     already be bad-pixel-repaired, since that is what the internal load does.
@@ -562,7 +657,8 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
         raise ValueError("annulus_width must be positive")
     channels = ("r", "g", "b")
     if both:
-        columns = ["altitude", "azimuth", "variable", "xcen", "ycen"]
+        columns = ["altitude", "azimuth", "variable", "xcen", "ycen",
+                   "frame_dx", "frame_dy", "frame_nreg"]
         for channel in channels:
             columns += [f"flux_{channel}_ap", f"mag_{channel}_ap",
                         f"cal_{channel}_ap", f"ext_{channel}_ap",
@@ -574,7 +670,8 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
                         f"background_{channel}_gauss", f"sat_{channel}_gauss"]
         sort_key = "flux_g_ap"
     else:
-        columns = ["altitude", "azimuth", "variable", "xcen", "ycen", "fwhm"]
+        columns = ["altitude", "azimuth", "variable", "xcen", "ycen",
+                   "frame_dx", "frame_dy", "frame_nreg", "fwhm"]
         for channel in channels:
             columns += [f"flux_{channel}", f"mag_{channel}",
                         f"cal_{channel}", f"ext_{channel}",
@@ -617,6 +714,13 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
     xcen, ycen = wcs.all_world2pix(cat["Az"], cat["Alt"], 0, quiet=True)
     xcen = np.asarray(xcen, dtype=float)
     ycen = np.asarray(ycen, dtype=float)
+    frame_dx = frame_dy = 0.0
+    frame_nreg = 0
+    if register and "Vmag" in cat.colnames:
+        frame_dx, frame_dy, frame_nreg = _frame_registration(
+            data[1], xcen, ycen, cat["Vmag"], cat["Alt"])
+        xcen = xcen + frame_dx
+        ycen = ycen + frame_dy
 
     rows = []
     labels = []
@@ -626,7 +730,9 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
         base = {"altitude": float(cat["Alt"][i]),
                 "azimuth": float(cat["Az"][i]),
                 "variable": bool(cat["Variable"][i])
-                            if "Variable" in cat.colnames else False}
+                            if "Variable" in cat.colnames else False,
+                "frame_dx": frame_dx, "frame_dy": frame_dy,
+                "frame_nreg": frame_nreg}
         if both:
             ap = _aperture_measure(data, cube, x, y, aperture_radius,
                                    annulus_width, saturation, channels)
@@ -702,7 +808,8 @@ def alcor_star_photometry(filename, output_file=None, aperture_radius=4.0,
 
     phot = pd.DataFrame(rows, index=labels, columns=columns)
     phot.index.name = "name"
-    phot = alcor_calibrate_photometry(phot, time=time)
+    phot = alcor_calibrate_photometry(phot, time=time,
+                                      aperture_radius=aperture_radius)
     phot = phot.sort_values(sort_key, ascending=False, na_position="last")
     output_file = (_default_alcor_photometry_output(filename)
                    if output_file is None else Path(output_file))

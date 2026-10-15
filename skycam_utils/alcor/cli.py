@@ -32,7 +32,8 @@ from .skybright import (
     plot_alcor_sky_brightness
 )
 from .extinction import (
-    ALCOR_EXT_KERNEL_SIGMA, ALCOR_EXT_LOOKUP_RADIUS, ALCOR_EXT_NFRAMES,
+    ALCOR_EXT_HORIZON_MARGIN, ALCOR_EXT_KERNEL_SIGMA, ALCOR_EXT_LOOKUP_RADIUS,
+    ALCOR_EXT_NFRAMES,
     ALCOR_EXT_VMAX, alcor_extinction_at, alcor_extinction_fits,
     alcor_extinction_movie, plot_alcor_extinction, plot_alcor_extinction_fits
 )
@@ -411,6 +412,11 @@ def plot_alcor_sb_summary_cli():
 
 
 
+def _margin(value):
+    """``--horizon-margin``: a negative value disables the cut (None)."""
+    return None if value < 0 else value
+
+
 def alcor_extinction_map_cli():
     """
     CLI entry point for :func:`alcor_extinction_fits`: build one cloud-extinction
@@ -450,6 +456,11 @@ def alcor_extinction_map_cli():
                         help="Also print the extinction at this position.")
     parser.add_argument("--radius", type=float, default=ALCOR_EXT_LOOKUP_RADIUS,
                         help="Great-circle radius for --at, in degrees.")
+    parser.add_argument("--horizon-margin", type=float,
+                        default=ALCOR_EXT_HORIZON_MARGIN,
+                        help="Drop stars within this many raw pixels of not-sky "
+                             "(the horizon mask); a star behind an obstruction "
+                             "reads falsely bright. Negative disables.")
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
@@ -462,6 +473,7 @@ def alcor_extinction_map_cli():
         inputs, output_file=args.output, band=args.band, method=args.method,
         latest=args.latest, nframes=args.nframes,
         kernel_sigma=args.kernel_sigma, overwrite=args.overwrite,
+        horizon_margin=_margin(args.horizon_margin),
         return_products=True, **kwargs)
     print(out)
 
@@ -538,6 +550,11 @@ def alcor_extinction_movie_cli():
     parser.add_argument("--keep-frames", action="store_true",
                         help="Do not delete --frames-dir afterwards.")
     parser.add_argument("--title", default=None)
+    parser.add_argument("--horizon-margin", type=float,
+                        default=ALCOR_EXT_HORIZON_MARGIN,
+                        help="Drop stars within this many raw pixels of not-sky "
+                             "(the horizon mask); a star behind an obstruction "
+                             "reads falsely bright. Negative disables.")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
@@ -546,7 +563,8 @@ def alcor_extinction_movie_cli():
         inputs, output_file=args.output, frames_dir=args.frames_dir,
         nframes=args.nframes, stride=args.stride, fps=args.fps,
         band=args.band, method=args.method, vmax=args.vmax, cmap=args.cmap,
-        title=args.title, keep_frames=args.keep_frames, quiet=args.quiet))
+        title=args.title, keep_frames=args.keep_frames, quiet=args.quiet,
+        horizon_margin=_margin(args.horizon_margin)))
 
 
 def alcor_process_night_cli():

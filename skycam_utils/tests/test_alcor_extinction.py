@@ -15,6 +15,7 @@ os.environ.setdefault("MPLCONFIGDIR", str(_MPLCONFIGDIR))
 
 from skycam_utils.alcor import (
     ALCOR_EXT_FRAME_SHAPE,
+    ALCOR_EXT_HORIZON_MARGIN,
     ALCOR_EXT_KERNEL_SIGMA,
     _resolve_column,
     alcor_calibration,
@@ -24,10 +25,15 @@ from skycam_utils.alcor import (
     alcor_extinction_map,
     alcor_extinction_stars,
     build_alcor_wcs,
+    load_alcor_horizon_mask,
     plot_alcor_extinction_fits,
 )
 
 BLOB_AZ, BLOB_ALT, BLOB_EXT, BLOB_SIGMA = 120.0, 50.0, 1.0, 10.0
+
+# A point on the flagpole: inside the horizon mask's not-sky region (az
+# 296.8-300.6, alt 15-39.5), well above the 20 deg altitude floor.
+FLAGPOLE_AZ, FLAGPOLE_ALT = 298.5, 30.0
 
 
 def _wcs():
@@ -61,6 +67,12 @@ def _synthetic_frames(nframes=10, nstars=400, lost_names=(), seed=1):
     # uniform on the cap, so stars are not piled up at the zenith
     alt = np.degrees(np.arcsin(rng.uniform(np.sin(np.radians(21.0)), 1.0,
                                            nstars)))
+    # Keep the synthetic stars clear of the obstructions above the altitude
+    # floor (the SW buildings and the flagpole), so the horizon-margin cut
+    # leaves every one of them and the counts below stay exact.
+    near = (alt < 45.0) & (((az > 210.0) & (az < 265.0))
+                           | ((az > 285.0) & (az < 312.0)))
+    az = np.where(near, np.mod(az + 90.0, 360.0), az)
     names = np.array([f"star{i:04d}" for i in range(nstars)])
 
     rows = []
@@ -260,6 +272,7 @@ def test_extinction_fits_header_and_stars_table(tmp_path):
     assert header["KERNSIG"] == ALCOR_EXT_KERNEL_SIGMA
     assert header["EXTFLAT"] == "none"     # reserved, not yet applied
     assert header["PIXSCALE"] > 0
+    assert header["HORMARG"] == ALCOR_EXT_HORIZON_MARGIN
     assert "TSTART" in header and "TEND" in header and "TMID" in header
     assert header["NSTARS"] == int(detected.sum())
     assert header["NLOST"] == int((~detected).sum())
@@ -285,3 +298,45 @@ def test_plot_alcor_extinction_fits_replots_from_the_stars_table(tmp_path):
     png = plot_alcor_extinction_fits(out)
     assert Path(png) == tmp_path / "ext.png"
     assert Path(png).exists() and Path(png).stat().st_size > 0
+
+
+def test_extinction_stars_drops_stars_on_not_sky():
+    """
+    Photometry is fixed-position, so a star behind the flagpole is still
+    "measured" -- and light from the obstruction makes it read too bright. It
+    must not reach the map, as a measurement or as a (false) lost star.
+    """
+    mask, _ = load_alcor_horizon_mask(pd.Timestamp("2025-01-02").date())
+    assert mask is not None
+    df = _synthetic_frames(nframes=10, nstars=40,
+                           lost_names=["star0001"])
+    for name in ("star0000", "star0001"):
+        df.loc[df["name"] == name, ["azimuth", "altitude"]] = (FLAGPOLE_AZ,
+                                                               FLAGPOLE_ALT)
+    measured, lost = alcor_extinction_stars(df)
+    assert "star0000" not in measured.index
+    assert "star0001" not in lost.index
+    assert len(measured) == 38          # 40, less the two on the flagpole
+
+    # None disables the cut entirely.
+    measured, lost = alcor_extinction_stars(df, horizon_margin=None)
+    assert "star0000" in measured.index
+    assert "star0001" in lost.index
+
+
+def test_extinction_stars_prefers_the_measured_pixel_position():
+    """
+    xcen/ycen are where the aperture actually sat, so they decide -- not the
+    WCS position of (az, alt).
+    """
+    from skycam_utils.alcor.extinction import _star_horizon_distance
+    mask, _ = load_alcor_horizon_mask(pd.Timestamp("2025-01-02").date())
+    ys, xs = np.nonzero(mask)
+    df = _synthetic_frames(nframes=10, nstars=10)
+    df["xcen"], df["ycen"] = 700.0, 700.0          # near the zenith: open sky
+    df.loc[df["name"] == "star0000", ["xcen", "ycen"]] = (xs[0], ys[0])
+    dist = _star_horizon_distance(df)
+    assert (dist[df["name"] == "star0000"] == 0).all()
+    assert (dist[df["name"] != "star0000"] > ALCOR_EXT_HORIZON_MARGIN).all()
+    measured, _ = alcor_extinction_stars(df)
+    assert set(measured.index) == {f"star{i:04d}" for i in range(1, 10)}

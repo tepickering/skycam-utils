@@ -184,6 +184,21 @@ ALCOR_EXT_MIN_WEIGHT = 1.5        # blank a cell below this summed weight
 ALCOR_EXT_MIN_BLOCK_FRAMES = 3    # frames a star needs for a block mean
 ALCOR_EXT_LOST_MIN_FRAMES = 5     # frames undetected before it counts as lost
 
+# Stars within this many raw pixels of not-sky (load_alcor_horizon_mask) are
+# dropped from the extinction maps, as measurements AND as lost stars.
+# Photometry is fixed-position, so a star behind the flagpole or a building is
+# still "measured", and light from the obstruction lands in its aperture: on a
+# clear night (2026-10-14) stars on not-sky pixels read 0.15-0.2 mag too BRIGHT
+# against stars at the same altitude clear of it, and within 8 px (the 5 px
+# aperture+annulus plus centring slop) nearly as much. 8 px is the reach of that
+# mechanism. A weaker ~0.05 mag excess persists further out, but there is no
+# plateau to set a margin by -- a wider one mostly removes low-altitude stars and
+# so trades against the residual altitude trend (EXTFLAT), which is where it
+# belongs. Found because the flagpole sits ~4 deg below where the MMT often
+# points; note that the bulk of that target's -0.2 was aperture BLENDING, not
+# the flagpole.
+ALCOR_EXT_HORIZON_MARGIN = 8.0
+
 # Great-circle radius in DEGREES for alcor_extinction_at. The map is already
 # smoothed on ALCOR_EXT_KERNEL_SIGMA, so this adds little smoothing -- its job
 # is robustness against a blank pixel, a resampling edge, or a pointing that

@@ -341,3 +341,24 @@ def test_extinction_stars_prefers_the_measured_pixel_position():
     assert (dist[df["name"] != "star0000"] > ALCOR_EXT_HORIZON_MARGIN).all()
     measured, _ = alcor_extinction_stars(df)
     assert set(measured.index) == {f"star{i:04d}" for i in range(1, 10)}
+
+
+def test_pixel_altaz_cache_key_keeps_the_sip_terms():
+    """The cache key must change with the SIP distortion, and build silently."""
+    import warnings
+
+    from astropy.wcs import Sip
+
+    from skycam_utils.alcor.extinction import _pixel_altaz
+
+    wcs = _wcs()
+    shape = (8, 12)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        az, alt = _pixel_altaz(wcs, shape)
+        bent = wcs.deepcopy()
+        a = wcs.sip.a.copy()
+        a[2, 0] += 1e-6
+        bent.sip = Sip(a, wcs.sip.b, wcs.sip.ap, wcs.sip.bp, wcs.sip.crpix)
+        az2, alt2 = _pixel_altaz(bent, shape)
+    assert not np.allclose(az, az2) or not np.allclose(alt, alt2)

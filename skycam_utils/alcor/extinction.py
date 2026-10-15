@@ -52,13 +52,14 @@ from .photometry import alcor_calibrate_photometry, collect_alcor_photometry
 
 # Per-pixel (az, alt) for a given WCS + shape is the same array every call and
 # costs ~2 million SIP transforms to build, so it is memoized. The key is the
-# WCS header text, which changes exactly when the geometry does.
+# full WCS header text (relax=True keeps the SIP terms), which changes
+# exactly when the geometry does.
 _ALTAZ_CACHE = {}
 
 
 def _pixel_altaz(wcs, shape):
     """Per-pixel ``(az, alt)`` in degrees for a raw frame of ``shape``."""
-    key = (tuple(shape), wcs.to_header_string())
+    key = (tuple(shape), wcs.to_header_string(relax=True))
     cached = _ALTAZ_CACHE.get(key)
     if cached is not None:
         return cached

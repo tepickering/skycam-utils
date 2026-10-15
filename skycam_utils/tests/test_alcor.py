@@ -598,7 +598,7 @@ def test_alcor_zeropoint_resolves_nearest_epoch():
 def test_alcor_calibrate_photometry_adds_calibrated_and_offset(monkeypatch, patch_alcor):
     from astropy.time import Time
     from skycam_utils import alcor
-    from skycam_utils.alcor import ALCOR_AIRMASS_TERM, _airmass
+    from skycam_utils.alcor import ALCOR_AIRMASS_TERM, _airmass, alcor_altitude_flat
 
     cmap = {"teststar": {"BV": 0.6, "V": 3.0, "R": 2.6, "B": 3.6}}
     patch_alcor("_catalog_calibration_map", lambda: cmap)
@@ -613,8 +613,10 @@ def test_alcor_calibrate_photometry_adds_calibrated_and_offset(monkeypatch, patc
     for band, catband in (("r", "R"), ("g", "V"), ("b", "B")):
         instr = float(df[f"mag_{band}"].iloc[0])
         expected_cal = (instr - ALCOR_AIRMASS_TERM * airmass
+                        - alcor_altitude_flat(60.0, band)
                         + zp[band]["zp"] + zp[band]["color_coeff"] * 0.6)
         assert out[f"cal_{band}"].iloc[0] == pytest.approx(expected_cal)
+        assert out[f"flat_{band}"].iloc[0] == alcor_altitude_flat(60.0, band)
         assert out[f"ext_{band}"].iloc[0] == pytest.approx(
             expected_cal - cmap["teststar"][catband])
 
@@ -689,8 +691,10 @@ def test_alcor_star_photometry_includes_calibrated_columns(tmp_path, monkeypatch
     # the calibrated G maps to catalog V via the resolved zeropoint
     zp = alcor_zeropoint(alcor._alcor_frame_time(tmp_path / "s.fits"))["g"]
     instr = float(phot.loc["star", "mag_g"])
-    airmass = _airmass(float(phot.loc["star", "altitude"]))
-    expected = instr - ALCOR_AIRMASS_TERM * airmass + zp["zp"] + zp["color_coeff"] * 0.5
+    alt = float(phot.loc["star", "altitude"])
+    expected = (instr - ALCOR_AIRMASS_TERM * _airmass(alt)
+                - alcor.alcor_altitude_flat(alt, "g")
+                + zp["zp"] + zp["color_coeff"] * 0.5)
     assert phot.loc["star", "cal_g"] == pytest.approx(expected)
     assert phot.loc["star", "ext_g"] == pytest.approx(expected - 3.0)
     # columns survive the round trip to disk

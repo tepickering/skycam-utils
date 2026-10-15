@@ -53,6 +53,8 @@ from .config import (  # noqa: F401
     ALCOR_EXT_VMAX,
     ALCOR_SB_BEST_MIN_ALTITUDE,
     ALCOR_AIRMASS_TERM,
+    ALCOR_ALTITUDE_FLAT,
+    ALCOR_ALTITUDE_FLAT_EPOCH,
     ALCOR_BRIGHT_CUT,
     _GAUSS_MIN_LUM_PIXELS,
     _GAUSS_MIN_CHANNEL_PIXELS,
@@ -172,6 +174,7 @@ from .photometry import (  # noqa: F401
     _airmass,
     _catalog_calibration_map,
     _zeropoint_row_params,
+    alcor_altitude_flat,
     alcor_calibrate_photometry,
     alcor_star_photometry,
     collect_alcor_photometry,
@@ -305,6 +308,8 @@ from .cli import (  # noqa: F401
 
 __all__ = [
     "ALCOR_AIRMASS_TERM",
+    "ALCOR_ALTITUDE_FLAT",
+    "ALCOR_ALTITUDE_FLAT_EPOCH",
     "ALCOR_ARCHIVE_LOG_INTERVAL",
     "ALCOR_ARCHIVE_MAX_CONSECUTIVE_FAILURES",
     "ALCOR_ARCHIVE_MIN_AGE",
@@ -377,6 +382,7 @@ __all__ = [
     "_night_date",
     "alcor_archive_status",
     "alcor_badpix_search_region",
+    "alcor_altitude_flat",
     "alcor_calibrate_photometry",
     "alcor_blend_terms",
     "alcor_calibration",

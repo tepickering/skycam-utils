@@ -11,7 +11,8 @@ from astropy.time import Time
 
 from .config import (
     _DATA_ROOT,
-    ALCOR_AIRMASS_TERM, ALCOR_BLEND_APERTURE_RADIUS, ALCOR_BRIGHT_CUT,
+    ALCOR_AIRMASS_TERM, ALCOR_ALTITUDE_FLAT, ALCOR_BLEND_APERTURE_RADIUS,
+    ALCOR_BRIGHT_CUT,
     ALCOR_COLOR_FLAT_TOL,
     ALCOR_NONLINEAR_THRESHOLD, ALCOR_REGISTER_BOX, ALCOR_REGISTER_MAX_SHIFT,
     ALCOR_REGISTER_MIN_ALTITUDE, ALCOR_REGISTER_MIN_SNR,
@@ -395,6 +396,17 @@ def _airmass(altitude_deg):
 
 
 
+def alcor_altitude_flat(altitude_deg, band, table=ALCOR_ALTITUDE_FLAT):
+    """
+    The clear-night altitude flat (mag) for ``band`` at ``altitude_deg``,
+    interpolated from :data:`ALCOR_ALTITUDE_FLAT` and held at the end values
+    outside it. ``alcor_calibrate_photometry`` subtracts it from ``cal_*``.
+    """
+    return np.interp(np.asarray(altitude_deg, dtype=float),
+                     table["alt"], table[band])
+
+
+
 def _catalog_calibration_map():
     """
     Map each named-catalog star label to its catalog colors and magnitudes.
@@ -472,7 +484,7 @@ def _zeropoint_row_params(df, time):
 
 
 
-def alcor_calibrate_photometry(df, time=None, blend=True,
+def alcor_calibrate_photometry(df, time=None, blend=True, flat=True,
                                aperture_radius=ALCOR_BLEND_APERTURE_RADIUS):
     """
     Add calibrated catalog-system magnitudes and cloud-extinction offsets.
@@ -482,7 +494,9 @@ def alcor_calibrate_photometry(df, time=None, blend=True,
 
     ``cal_{band}[suffix]``
         the magnitude on the catalog system,
-        ``(instr_mag - ALCOR_AIRMASS_TERM*airmass) + zp + color_coeff*(B-V)``,
+        ``instr_mag - ALCOR_AIRMASS_TERM*airmass - flat(alt) + zp
+        + color_coeff*(B-V)``, with ``flat`` the clear-night altitude flat
+        (:func:`alcor_altitude_flat`; ``flat=False`` leaves it out),
         ``nan`` where the instrument mag is non-finite or brighter than
         ``ALCOR_BRIGHT_CUT`` (the CMOS non-linear regime, where the calibration
         is invalid).
@@ -497,6 +511,10 @@ def alcor_calibrate_photometry(df, time=None, blend=True,
         sky. It is subtracted only from the REFERENCE, so ``cal_*`` stays the
         measured, blended light. ``blend=False`` (or no ``azimuth`` column)
         writes zeros and reproduces the old, blended ``ext_*``.
+    ``flat_{band}``
+        the altitude flat that was subtracted (0 with ``flat=False``). Its
+        presence also marks the row as calibrated by this version, which is how
+        :func:`alcor_extinction_stars` recognises older CSVs to recalibrate.
 
     Zeropoints come from :func:`alcor_zeropoint`; the epoch is resolved from
     ``time`` when given, else per row from an ``OBSTIME`` column when present,
@@ -526,7 +544,8 @@ def alcor_calibrate_photometry(df, time=None, blend=True,
         ).to_numpy(dtype=float)
         for band, cat in ALCOR_ZEROPOINT_BANDS.items()
     }
-    airmass = _airmass(df["altitude"].to_numpy(dtype=float))
+    altitude = df["altitude"].to_numpy(dtype=float)
+    airmass = _airmass(altitude)
     zp, color = _zeropoint_row_params(df, time)
     if blend and "azimuth" in df.columns:
         blend_time = time
@@ -542,20 +561,23 @@ def alcor_calibrate_photometry(df, time=None, blend=True,
     for band in ALCOR_ZEROPOINT_BANDS:
         # For a colour-flat band a missing B-V costs less than the photometric
         # scatter, so assume zero rather than throw the measurement away.
-        flat = bool(np.all(np.abs(color[band]) <= ALCOR_COLOR_FLAT_TOL))
-        bv_band = np.where(np.isfinite(bv), bv, 0.0) if flat else bv
+        flat_color = bool(np.all(np.abs(color[band]) <= ALCOR_COLOR_FLAT_TOL))
+        bv_band = np.where(np.isfinite(bv), bv, 0.0) if flat_color else bv
+        alt_flat = (alcor_altitude_flat(altitude, band) if flat
+                    else np.zeros(len(df)))
         for col in (f"mag_{band}", f"mag_{band}_ap", f"mag_{band}_gauss"):
             if col not in df.columns:
                 continue
             suffix = col[len(f"mag_{band}"):]
             instr = df[col].to_numpy(dtype=float)
-            cal = (instr - ALCOR_AIRMASS_TERM * airmass
+            cal = (instr - ALCOR_AIRMASS_TERM * airmass - alt_flat
                    + zp[band] + color[band] * bv_band)
             cal = np.where(np.isfinite(instr) & (instr > ALCOR_BRIGHT_CUT),
                            cal, np.nan)
             df[f"cal_{band}{suffix}"] = cal
             df[f"ext_{band}{suffix}"] = cal - (catmag[band] + terms[band])
         df[f"blend_{band}"] = terms[band]
+        df[f"flat_{band}"] = alt_flat
     return df
 
 

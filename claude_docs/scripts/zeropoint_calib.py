@@ -17,7 +17,13 @@ what the original epochs did. Blend geometry assumes a centred aperture, so the
 input photometry should be registered (alcor_star_photometry's default since
 then) or come from a night whose image offset was ~0 (2026-05-18 was).
 
-Usage:  zeropoint_calib.py [--blend] TAG=DIR [TAG=DIR ...]
+--flat (2026-10-14): the clear-night altitude flat (ALCOR_ALTITUDE_FLAT) is also
+subtracted, m - blend_b - flat_b(alt), matching alcor_calibrate_photometry. The
+flat's LEVEL is degenerate with the zeropoint, and ALCOR_ALTITUDE_FLAT is
+shifted per band so that this changes the fitted zeropoints by ~0; the colour
+terms move by under 0.01.
+
+Usage:  zeropoint_calib.py [--blend] [--flat] TAG=DIR [TAG=DIR ...]
         (no arguments: the two original calibration nights)"""
 import numpy as np, os, pandas as pd
 from astropy.table import Table
@@ -27,7 +33,7 @@ import argparse
 import skycam_utils.alcor as a
 from skycam_utils.alcor import (collect_alcor_photometry,
                                 alcor_calibrate_photometry,
-                                _catalog_calibration_map)
+                                _catalog_calibration_map, alcor_altitude_flat)
 
 OUT = "/tmp/gplots"; os.makedirs(OUT, exist_ok=True)
 K_AIRMASS = 0.40          # single achromatic extinction term
@@ -39,6 +45,7 @@ NIGHTS = [
 ]
 _ap = argparse.ArgumentParser()
 _ap.add_argument("--blend", action="store_true")
+_ap.add_argument("--flat", action="store_true")
 _ap.add_argument("nights", nargs="*")
 ARGS = _ap.parse_args()
 if ARGS.nights:
@@ -83,6 +90,8 @@ def star_m0(df):
             mag = g[f"mag_{ch}{sfx}"].values
             if ARGS.blend:
                 mag = mag - g[f"blend_{ch}"].values
+            if ARGS.flat:
+                mag = mag - alcor_altitude_flat(g["altitude"].values, ch)
             sat = g[f"sat_{ch}{sfx}"].fillna(False).astype(bool).values
             clean = np.isfinite(mag) & ~sat & (mag > BRIGHT_CUT)
             if clean.sum() >= MIN_FRAMES:

@@ -7,12 +7,14 @@ from astropy.coordinates import AltAz, SkyCoord
 from astropy.time import Time
 
 from skycam_utils.alcor import (
+    ALCOR_ALTITUDE_FLAT,
     ALCOR_BLEND_EFFICIENCY,
     MMT_LOCATION,
     _catalog_calibration_map,
     _frame_registration,
     _neighbor_table,
     _parallactic_angle,
+    alcor_altitude_flat,
     alcor_blend_terms,
     alcor_calibrate_photometry,
     alcor_extinction_stars,
@@ -154,3 +156,46 @@ def test_extinction_stars_recalibrates_legacy_photometry():
     measured, _ = alcor_extinction_stars(df, horizon_margin=None)
     assert len(measured)
     assert (measured["ext"] < 50).all()
+
+
+def test_extinction_stars_recalibrates_photometry_without_the_flat():
+    """
+    A CSV written after the blend correction but before the altitude flat has
+    blend_* but no flat_*; it too must be recalibrated, or low-altitude stars
+    keep the ~0.1 mag trend the flat removes.
+    """
+    names = ["HD 166229", "Vega", "Deneb"]
+    rows = []
+    for k in range(5):
+        rows.append(pd.DataFrame({
+            "name": names, "OBSTIME": pd.Timestamp("2026-10-15T04:00:00")
+            + pd.Timedelta(seconds=30 * k),
+            "altitude": [42.0, 60.0, 70.0], "azimuth": [292.0, 280.0, 40.0],
+            "variable": False, "xcen": 700.0, "ycen": 700.0,
+            "mag_g": -10.2, "cal_g": 99.0, "ext_g": 99.0, "blend_g": 0.0,
+            "flux_g": 1000.0, "sat_g": False}))
+    df = pd.concat(rows, ignore_index=True)
+    measured, _ = alcor_extinction_stars(df, horizon_margin=None)
+    assert len(measured)
+    assert (measured["ext"] < 50).all()
+
+
+def test_altitude_flat_is_subtracted_and_can_be_turned_off():
+    df = pd.DataFrame({"altitude": [22.0, 45.0, 88.0], "azimuth": 0.0,
+                       "mag_g": -10.0}, index=["Vega", "Deneb", "Altair"])
+    t = Time("2026-10-15T04:00:00")
+    on = alcor_calibrate_photometry(df, time=t)
+    off = alcor_calibrate_photometry(df, time=t, flat=False)
+    flat = alcor_altitude_flat(df["altitude"], "g")
+    assert np.allclose(on["flat_g"], flat)
+    assert (off["flat_g"] == 0).all()
+    assert np.allclose(off["cal_g"] - on["cal_g"], flat)
+    # the clear-night shape: low altitude and the zenith read bright, mid-sky faint
+    assert flat[0] < -0.05 and flat[1] > 0.03 and flat[2] < -0.05
+
+
+def test_altitude_flat_holds_its_end_values():
+    assert alcor_altitude_flat(5.0, "r") == ALCOR_ALTITUDE_FLAT["r"][0]
+    assert alcor_altitude_flat(90.0, "b") == ALCOR_ALTITUDE_FLAT["b"][-1]
+    for band in "rgb":
+        assert len(ALCOR_ALTITUDE_FLAT[band]) == len(ALCOR_ALTITUDE_FLAT["alt"])

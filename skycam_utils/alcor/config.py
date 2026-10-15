@@ -262,6 +262,37 @@ ALCOR_SB_BEST_MIN_ALTITUDE = 30.0   # deg
 # dropped pending more calibration nights.
 ALCOR_AIRMASS_TERM = 0.40   # mag/airmass, single term for R/G/B
 
+# Clear-night altitude flat, per band (mag), SUBTRACTED from the calibrated mag:
+#   cal = instr - ALCOR_AIRMASS_TERM*airmass - flat_b(alt) + zp + color*(B-V)
+# It is what ext_* read on clear nights with only the airmass term applied: the
+# same shape on every clear night from 2025-01-01 to 2026-10-14 (seven nights,
+# per-night bins agree to ~0.01), azimuthally symmetric to ~0.01, and the same
+# for bright and faint stars at a given altitude -- so it is a fixed property of
+# the instrument, not the atmosphere or a magnitude effect. In g it rises from
+# -0.12 at alt 20 to +0.06 at alt 45 and falls back to -0.11 at the zenith: the
+# single airmass term over-corrects low altitudes (as if k ~0.28 rather than
+# 0.40) and on-axis stars read bright (vignetting). The two are degenerate for
+# a fixed all-sky camera, so this is an empirical correction, not a split into
+# atmosphere and optics. Nodes are a quartic in zenith distance fit to 2.5 deg
+# bins of per-(night, star)-offset residuals of isolated window stars (six
+# registered nights, ~100k rows a band; claude_docs/scripts/altitude_flat.py).
+# The LEVEL of a flat is degenerate with the zeropoint; it is left as measured,
+# since applying it moves the zeropoint fits by <= 0.01 mag with mixed sign --
+# within how well a refit reproduces at all -- so ALCOR_ZEROPOINTS stand. It cut
+# the zeropoint fit's per-star rms from 0.097 to 0.076 in G (2026-10-14).
+# np.interp holds the end values below alt 20, where photometry stops.
+ALCOR_ALTITUDE_FLAT_EPOCH = "2026-10-14"
+ALCOR_ALTITUDE_FLAT = {
+    "alt": (20.0, 25.0, 30.0, 35.0, 40.0, 45.0, 50.0, 55.0, 60.0, 65.0, 70.0,
+            75.0, 80.0, 85.0, 90.0),
+    "r": (-0.134, -0.064, -0.014, 0.020, 0.040, 0.050, 0.052, 0.048, 0.041,
+          0.032, 0.022, 0.013, 0.006, 0.000, -0.002),
+    "g": (-0.124, -0.052, -0.002, 0.031, 0.049, 0.056, 0.054, 0.044, 0.030,
+          0.012, -0.010, -0.034, -0.061, -0.090, -0.124),
+    "b": (-0.074, -0.037, -0.006, 0.018, 0.032, 0.038, 0.035, 0.024, 0.008,
+          -0.012, -0.032, -0.048, -0.056, -0.051, -0.026),
+}
+
 ALCOR_BRIGHT_CUT = -12.5    # instr mag; brighter is non-linear, calibration void
 
 

@@ -39,7 +39,7 @@ from astropy.time import Time
 from scipy.ndimage import distance_transform_edt, map_coordinates
 
 from .config import (
-    ALCOR_EXT_CADENCE, ALCOR_EXT_FRAME_SHAPE, ALCOR_EXT_GRID_STEP,
+    ALCOR_ALTITUDE_FLAT_EPOCH, ALCOR_EXT_CADENCE, ALCOR_EXT_FRAME_SHAPE, ALCOR_EXT_GRID_STEP,
     ALCOR_EXT_HORIZON_MARGIN, ALCOR_EXT_KERNEL_CUT, ALCOR_EXT_KERNEL_SIGMA, ALCOR_EXT_LOOKUP_RADIUS,
     ALCOR_EXT_LOST_MIN_FRAMES, ALCOR_EXT_MAG_WINDOW, ALCOR_EXT_MIN_ALTITUDE,
     ALCOR_EXT_MIN_BLOCK_FRAMES, ALCOR_EXT_MIN_WEIGHT, ALCOR_EXT_NFRAMES,
@@ -195,15 +195,16 @@ def alcor_extinction_stars(df, band="g", method="ap",
     false *negative* extinction -- or, if fully hidden, a false lost star.
     ``None`` disables the cut; ``0`` drops only stars on not-sky pixels.
 
-    Photometry written before the aperture-blending correction (no
-    ``blend_<band>`` column) is recalibrated here first, so a map from an old CSV
-    gets the de-blended zeropoints and the blend term together -- mixing the
-    new zeropoints with old, blended ``ext_*`` would be off by ~0.1 mag. Those
-    CSVs were also measured without frame registration, so their blend terms
-    assume a centred aperture that may have sat 1-2 px off; re-measure the
+    Photometry written before the altitude flat (no ``flat_<band>`` column,
+    which includes everything from before the aperture-blending correction) is
+    recalibrated here first, so a map from an old CSV gets the current
+    zeropoints, blend term and flat together -- mixing them with an old ``ext_*``
+    would be off by up to ~0.15 mag at low altitude. CSVs from before the blend
+    correction were also measured without frame registration, so their blend
+    terms assume a centred aperture that may have sat 1-2 px off; re-measure the
     frames for the exact value.
     """
-    legacy = (f"blend_{band}" not in df.columns and "altitude" in df.columns
+    legacy = (f"flat_{band}" not in df.columns and "altitude" in df.columns
               and any(c.startswith(f"cal_{band}") for c in df.columns))
     if legacy:
         df = alcor_calibrate_photometry(df)
@@ -371,10 +372,10 @@ def _extinction_header(wcs, measured, lost, times, band, method,
     header["PIXSCALE"] = (_pixels_per_degree(wcs), "radial plate scale (px/deg)")
     header["HORMARG"] = ("none" if horizon_margin is None else float(horizon_margin),
                          "stars this near not-sky dropped (px)")
-    # Reserved for the clear-night flat field. The measured clear-night trend is
-    # ~ -0.12 mag at alt 20-30 and ~ -0.09 at 75-90 against ~0 at 45-60; it is
-    # recorded, not corrected, until several clear nights are in hand.
-    header["EXTFLAT"] = ("none", "clear-night flat field applied")
+    # The clear-night altitude flat (ALCOR_ALTITUDE_FLAT) is applied by
+    # alcor_calibrate_photometry; this records which one.
+    header["EXTFLAT"] = (f"altitude {ALCOR_ALTITUDE_FLAT_EPOCH}",
+                         "clear-night flat field applied")
     if len(times):
         header["TSTART"] = (Time(min(times)).isot, "UT of the first frame")
         header["TEND"] = (Time(max(times)).isot, "UT of the last frame")

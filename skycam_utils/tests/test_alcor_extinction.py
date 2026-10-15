@@ -17,6 +17,7 @@ from skycam_utils.alcor import (
     ALCOR_EXT_FRAME_SHAPE,
     ALCOR_EXT_HORIZON_MARGIN,
     ALCOR_EXT_KERNEL_SIGMA,
+    ALCOR_ALTITUDE_FLAT_EPOCH,
     _resolve_column,
     alcor_calibration,
     alcor_extinction_at,
@@ -270,7 +271,7 @@ def test_extinction_fits_header_and_stars_table(tmp_path):
     assert header["EXTBAND"] == "g"
     assert header["EXTMETH"] == "ap"
     assert header["KERNSIG"] == ALCOR_EXT_KERNEL_SIGMA
-    assert header["EXTFLAT"] == "none"     # reserved, not yet applied
+    assert header["EXTFLAT"] == f"altitude {ALCOR_ALTITUDE_FLAT_EPOCH}"
     assert header["PIXSCALE"] > 0
     assert header["HORMARG"] == ALCOR_EXT_HORIZON_MARGIN
     assert "TSTART" in header and "TEND" in header and "TMID" in header

@@ -8,13 +8,26 @@ Model (per star s, band b):  catalog_b(s) = m0_b(s) + ZP_b + c_b*(B-V)
 where m0_b(s) = median over clean frames of (mag_b - 0.4*X)  [top-of-atmosphere
 instrumental mag]. Regress (catalog_b - m0_b) vs B-V => intercept ZP_b, slope c_b.
 Channel->catalog: G->V, R->R(Johnson)=V-(V-R), B->B(Johnson)=V+(B-V).
-Tests the prediction: G~V (small color term), R & B color-dependent."""
+Tests the prediction: G~V (small color term), R & B color-dependent.
+
+--blend (2026-10-14): the instrumental mag is first DE-BLENDED, m - blend_b, with
+the per-row aperture-blending term from alcor_calibrate_photometry. Without it
+the zeropoints absorb the average neighbour light (~+0.07 mag in G), which is
+what the original epochs did. Blend geometry assumes a centred aperture, so the
+input photometry should be registered (alcor_star_photometry's default since
+then) or come from a night whose image offset was ~0 (2026-05-18 was).
+
+Usage:  zeropoint_calib.py [--blend] TAG=DIR [TAG=DIR ...]
+        (no arguments: the two original calibration nights)"""
 import numpy as np, os, pandas as pd
 from astropy.table import Table
 import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import argparse
 import skycam_utils.alcor as a
-from skycam_utils.alcor import collect_alcor_photometry
+from skycam_utils.alcor import (collect_alcor_photometry,
+                                alcor_calibrate_photometry,
+                                _catalog_calibration_map)
 
 OUT = "/tmp/gplots"; os.makedirs(OUT, exist_ok=True)
 K_AIRMASS = 0.40          # single achromatic extinction term
@@ -24,17 +37,20 @@ NIGHTS = [
     ("2024-09-04", "/Users/tim/MMT/skycam_data/2024-09-04"),
     ("2026-05-18", "/Volumes/Samsung_4TB/skycam/2026-05-18"),
 ]
+_ap = argparse.ArgumentParser()
+_ap.add_argument("--blend", action="store_true")
+_ap.add_argument("nights", nargs="*")
+ARGS = _ap.parse_args()
+if ARGS.nights:
+    NIGHTS = [tuple(n.split("=", 1)) for n in ARGS.nights]
 # channel -> (catalog band label, function building catalog mag from a catalog row)
-cat = Table.read(os.path.join(os.path.dirname(a.__file__), "data", "bright_star_sloan_named.fits"))
 def _f(x):
     try: return float(x)
     except Exception: return np.nan
-CATALOG = {}   # NAME -> dict(V, B, R, BV)
-for row in cat:
-    if row["NAME"] is None: continue
-    name = str(row["NAME"]).strip()
-    V, BV, VR = _f(row["Vmag"]), _f(row["B-V"]), _f(row["V-R"])
-    CATALOG[name] = dict(V=V, B=V+BV, R=V-VR, BV=BV)
+# label -> dict(V, B, R, BV), keyed exactly as the photometry rows are (an
+# unnamed star is "HD <n>"; keying on NAME alone silently dropped ~2000 of them)
+CATALOG = {k: v for k, v in _catalog_calibration_map().items()
+           if np.isfinite(v["V"])}
 CHAN = {"r": ("R", "R"), "g": ("V", "G"), "b": ("B", "B")}
 CHCOL = {"r": "#d62728", "g": "#2ca02c", "b": "#1f77b4"}
 
@@ -63,8 +79,11 @@ def star_m0(df):
         rec = dict(name=name, BV=c["BV"], V=c["V"], B=c["B"], R=c["R"])
         ok = False
         for ch in "rgb":
-            mag = g[f"mag_{ch}_ap"].values
-            sat = g[f"sat_{ch}_ap"].fillna(False).astype(bool).values
+            sfx = "_ap" if f"mag_{ch}_ap" in g.columns else ""
+            mag = g[f"mag_{ch}{sfx}"].values
+            if ARGS.blend:
+                mag = mag - g[f"blend_{ch}"].values
+            sat = g[f"sat_{ch}{sfx}"].fillna(False).astype(bool).values
             clean = np.isfinite(mag) & ~sat & (mag > BRIGHT_CUT)
             if clean.sum() >= MIN_FRAMES:
                 rec[f"m0_{ch}"] = np.median(mag[clean] - K_AIRMASS*X[clean])
@@ -75,12 +94,17 @@ def star_m0(df):
         if ok: recs.append(rec)
     return pd.DataFrame(recs)
 
-fig, axes = plt.subplots(2, 3, figsize=(16, 10))
+fig, axes = plt.subplots(len(NIGHTS), 3, figsize=(16, 5 * len(NIGHTS)), squeeze=False)
 print(f"{'night':12s} {'ch->cat':8s} {'ZP':>7s} {'color c':>9s} {'rms':>6s} {'Nstar':>6s}")
 print("-"*52)
 summary = {}
+STARS = {}
 for row, (tag, nd) in enumerate(NIGHTS):
-    S = star_m0(collect_alcor_photometry(nd))
+    phot = collect_alcor_photometry(nd)
+    if ARGS.blend:
+        phot = pd.concat([alcor_calibrate_photometry(g)
+                          for _, g in phot.groupby("OBSTIME")])
+    S = STARS[tag] = star_m0(phot)
     for col, ch in enumerate("rgb"):
         catband, chlabel = CHAN[ch]
         x = S["BV"].values
@@ -109,7 +133,7 @@ print("\nwrote zeropoint_calib.png")
 # zeropoint-only (no color term) rms, to quantify how much the color term buys
 print(f"\n{'night':12s} {'ch':4s} {'rms(ZP only)':>12s} {'rms(ZP+color)':>14s}")
 for (tag, ch), (zp, slope, rms, n) in summary.items():
-    S = star_m0(collect_alcor_photometry(dict(NIGHTS)[tag]))
+    S = STARS[tag]
     catband, chlabel = CHAN[ch]
     resid = (S[catband] - S[f"m0_{ch}"]).values
     resid = resid[np.isfinite(resid)]

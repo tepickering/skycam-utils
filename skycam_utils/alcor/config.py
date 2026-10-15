@@ -199,6 +199,39 @@ ALCOR_EXT_LOST_MIN_FRAMES = 5     # frames undetected before it counts as lost
 # the flagpole.
 ALCOR_EXT_HORIZON_MARGIN = 8.0
 
+# --- per-frame registration (alcor_star_photometry) -------------------------
+# The fitted geometry is stationary, but the image itself TRANSLATES on the
+# sensor by 1-2 px over months: bright-star centroids minus WCS predictions are
+# a pure shift, the same in every azimuth quadrant and stable to +-0.15 px over a
+# night, running dy -1.0 (2025-01) -> 0.0 (2026-05-18, the fitted epoch) -> +1.3
+# to +1.8 (2026-07..10), with dx ~ -0.1. A 4 px aperture still captures the star
+# with that offset, but it changes which NEIGHBOURS fall inside, so the blend
+# correction cannot be right without it. Each frame is therefore registered: the
+# median centroid offset of its bright stars shifts every aperture.
+ALCOR_REGISTER_VMAG = 4.0         # stars bright enough to centroid in any frame
+ALCOR_REGISTER_MIN_ALTITUDE = 30.0
+ALCOR_REGISTER_BOX = 5            # half-width (px) of the centroid box
+ALCOR_REGISTER_MIN_SNR = 20.0     # peak / robust box noise to use a star
+ALCOR_REGISTER_MIN_STARS = 10     # fewer (cloud): leave the frame unregistered
+ALCOR_REGISTER_MAX_SHIFT = 4.0    # px; a larger median offset is not trusted
+
+# --- aperture blending (alcor/blend.py) -----------------------------------
+# The default photometry aperture radius (px) the blend terms assume, matching
+# alcor_star_photometry's default. A different --aperture-radius changes which
+# neighbours land inside, so pass it through to alcor_calibrate_photometry.
+ALCOR_BLEND_APERTURE_RADIUS = 4.0
+# Gaussian PSF sigma (px): FWHM 1.6 px, the median of the --both Gaussian fits
+# on 2026-10-03 (1.4 near the zenith, 1.8 at alt 20-30). The PSF is so much
+# smaller than the aperture that this only softens the aperture edge.
+ALCOR_BLEND_PSF_SIGMA = 0.68
+# Fraction of a neighbour's PREDICTED flux that the aperture actually records.
+# Fit jointly with an offset and an airmass slope over every window star of two
+# registered nights: 0.87 (2026-10-14, ~20k rows) and 0.91 (2026-05-18, ~81k).
+# Flat in neighbour brightness and in distance from the aperture centre, so it is
+# a single factor -- most plausibly Hipparcos V against the camera's G passband
+# plus the pixelated aperture edge -- not the faint-end non-linearity.
+ALCOR_BLEND_EFFICIENCY = 0.9
+
 # Great-circle radius in DEGREES for alcor_extinction_at. The map is already
 # smoothed on ALCOR_EXT_KERNEL_SIGMA, so this adds little smoothing -- its job
 # is robustness against a blank pixel, a resampling edge, or a pointing that
@@ -332,19 +365,43 @@ ALCOR_AXIS_TILT = _LATEST_CALIBRATION["axis_tilt"]
 # ALCOR_ZEROPOINT_BANDS). G->V is essentially color-flat; R and B carry sizeable
 # B-V color terms set by the instrument bandpasses. The zeropoints were fit with
 # ALCOR_AIRMASS_TERM held fixed, so the term and the zeropoints are a matched
-# set. They are stable to ~0.03 mag across the two epochs (~21 months); add a new
-# epoch like ALCOR_CALIBRATIONS and the nearest epoch in time is used (see
-# alcor_zeropoint). Derived by docs/scripts/zeropoint_calib.py. `epoch` is the
-# calibration night (UT, not local night -- do not "fix" it).
+# set. Add a new epoch like ALCOR_CALIBRATIONS and the nearest epoch in time is
+# used (see alcor_zeropoint). Derived by claude_docs/scripts/zeropoint_calib.py.
+# `epoch` is the calibration night (UT, not local night -- do not "fix" it).
+#
+# They are DE-BLENDED zeropoints (zeropoint_calib.py --blend, 2026-10-14): the
+# instrumental mag is corrected by the per-row aperture-blending term before the
+# fit, and alcor_calibrate_photometry adds the same term back to the catalog
+# side, so the two must change together. The original fits absorbed the average
+# neighbour light, which made them ~0.1 mag too high in G; de-blending also cut
+# the per-star rms of the fit from 0.134 to 0.078 mag in G on 2026-05-18 (0.139
+# to 0.097 on 2026-10-14), with R and B improving similarly.
+#   2026-05-19  refit on registered-equivalent photometry (that night's image
+#               offset was ~0 px, so its archived CSVs were already centred).
+#   2026-10-15  new, from registered photometry of the clear 2026-10-14 night.
+#               ~0.1 mag above May in every band: the dome-throughput drift, not
+#               a calibration change. Nearest-epoch resolution makes this a step
+#               at ~2026-07-31 where the drift is really a ramp; a time-dependent
+#               zeropoint is the proper fix.
+#   2024-09-05  its night (2024-09-04) is not on any mounted volume, so it was
+#               NOT refit: it is shifted by the 2026-05-19 blend-vs-no-blend
+#               difference (zp r -0.111 g -0.098 b -0.061; color r +0.049
+#               g +0.022 b -0.045), the absorbed neighbour light being a property
+#               of the catalog and the star sample rather than of the night.
+#               Refit it if the frames turn up.
 ALCOR_ZEROPOINTS = [
     {"epoch": "2024-09-05",
-     "r": {"zp": 14.670, "color_coeff": -0.323},
-     "g": {"zp": 15.438, "color_coeff": -0.023},
-     "b": {"zp": 14.988, "color_coeff": 0.479}},
+     "r": {"zp": 14.559, "color_coeff": -0.274},
+     "g": {"zp": 15.340, "color_coeff": -0.001},
+     "b": {"zp": 14.927, "color_coeff": 0.434}},
     {"epoch": "2026-05-19",
-     "r": {"zp": 14.639, "color_coeff": -0.343},
-     "g": {"zp": 15.423, "color_coeff": -0.038},
-     "b": {"zp": 15.015, "color_coeff": 0.470}},
+     "r": {"zp": 14.521, "color_coeff": -0.287},
+     "g": {"zp": 15.331, "color_coeff": -0.022},
+     "b": {"zp": 14.961, "color_coeff": 0.415}},
+    {"epoch": "2026-10-15",
+     "r": {"zp": 14.618, "color_coeff": -0.285},
+     "g": {"zp": 15.429, "color_coeff": -0.013},
+     "b": {"zp": 15.058, "color_coeff": 0.422}},
 ]
 
 # instrument channel -> catalog Johnson band measured against

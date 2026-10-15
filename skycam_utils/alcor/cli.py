@@ -814,6 +814,9 @@ def alcor_star_photometry_cli():
                         help="Minimum catalog-star altitude in degrees.")
     parser.add_argument("--vmag-limit", type=float, default=5.5,
                         help="Faintest V magnitude to measure.")
+    parser.add_argument("--no-register", action="store_true",
+                        help="Do not register the frame: measure at the raw WCS "
+                             "positions (the image drifts 1-2 px over months).")
     parser.add_argument("--no-refraction", action="store_true",
                         help="Disable atmospheric refraction in the catalog Alt/Az transform.")
     parser.add_argument("--masks-dir", default=None,
@@ -849,6 +852,7 @@ def alcor_star_photometry_cli():
         vmag_limit=args.vmag_limit,
         variables=args.variables,
         refraction=not args.no_refraction,
+        register=not args.no_register,
         masks_dir=args.masks_dir,
         check_plot=args.check_plot,
         check_radius=args.check_radius,

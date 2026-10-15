@@ -1114,3 +1114,25 @@ def test_plot_alcor_fits_writes_outputs_and_returns_figure(tmp_path):
         import matplotlib.pyplot as plt
 
         plt.close(fig)
+
+
+def test_alcor_star_photometry_registers_the_frame(tmp_path):
+    """
+    The test frame is from the 2026-05-18 calibration night, whose image offset
+    is ~0 px: registration must find plenty of stars and (nearly) no shift, and
+    every row carries the shift and the per-row blend term.
+    """
+    input_file = tmp_path / TEST_FITS.name
+    shutil.copyfile(TEST_FITS, input_file)
+    phot, _ = alcor_star_photometry(input_file, output_file=tmp_path / "s.csv")
+    assert (phot["frame_nreg"] >= 50).all()
+    assert abs(phot["frame_dx"].iloc[0]) < 0.3
+    assert abs(phot["frame_dy"].iloc[0]) < 0.3
+    assert phot["frame_dx"].nunique() == 1
+    assert {"blend_r", "blend_g", "blend_b"} <= set(phot.columns)
+    assert (phot["blend_g"].dropna() <= 0).all()
+
+    raw, _ = alcor_star_photometry(input_file, output_file=tmp_path / "r.csv",
+                                   register=False)
+    assert (raw["frame_nreg"] == 0).all()
+    assert (raw["frame_dx"] == 0).all()

@@ -36,16 +36,17 @@ from matplotlib.colors import Normalize
 from astropy.io import fits
 from astropy.time import Time
 
-from scipy.ndimage import map_coordinates
+from scipy.ndimage import distance_transform_edt, map_coordinates
 
 from .config import (
     ALCOR_EXT_CADENCE, ALCOR_EXT_FRAME_SHAPE, ALCOR_EXT_GRID_STEP,
-    ALCOR_EXT_KERNEL_CUT, ALCOR_EXT_KERNEL_SIGMA, ALCOR_EXT_LOOKUP_RADIUS,
+    ALCOR_EXT_HORIZON_MARGIN, ALCOR_EXT_KERNEL_CUT, ALCOR_EXT_KERNEL_SIGMA, ALCOR_EXT_LOOKUP_RADIUS,
     ALCOR_EXT_LOST_MIN_FRAMES, ALCOR_EXT_MAG_WINDOW, ALCOR_EXT_MIN_ALTITUDE,
     ALCOR_EXT_MIN_BLOCK_FRAMES, ALCOR_EXT_MIN_WEIGHT, ALCOR_EXT_NFRAMES,
     ALCOR_EXT_VMAX, ALCOR_HORIZON_RADIUS, alcor_calibration
 )
 from .wcs import build_alcor_wcs
+from .masks import load_alcor_horizon_mask
 from .photometry import collect_alcor_photometry
 
 
@@ -67,6 +68,73 @@ def _pixel_altaz(wcs, shape):
     out = (np.asarray(az, dtype=np.float32), np.asarray(alt, dtype=np.float32))
     _ALTAZ_CACHE[key] = out
     return out
+
+
+# Distance from every raw pixel to the nearest not-sky pixel, per horizon-mask
+# epoch. The mask changes only when the camera moves, so one transform serves
+# every map.
+_HORIZON_DIST_CACHE = {}
+
+
+def _horizon_distance(time=None):
+    """
+    ``(ny, nx)`` float32 distance in raw pixels to the nearest not-sky pixel of
+    the horizon mask nearest ``time`` (0 on not-sky itself), or None when no
+    mask is available.
+    """
+    mask, date = load_alcor_horizon_mask(Time.now() if time is None else time)
+    if mask is None:
+        return None
+    dist = _HORIZON_DIST_CACHE.get(date)
+    if dist is None:
+        dist = distance_transform_edt(~mask).astype(np.float32)
+        _HORIZON_DIST_CACHE[date] = dist
+    return dist
+
+
+def _star_horizon_distance(df, time=None):
+    """
+    Per-row distance (raw px) from each star's aperture to not-sky, or None when
+    no horizon mask is available. Uses the ``xcen``/``ycen`` the photometry was
+    measured at when present, else places the star with the calibration WCS. An
+    off-frame or unplaceable star gets distance 0, i.e. it counts as not-sky.
+    """
+    dist = _horizon_distance(time)
+    if dist is None:
+        return None
+    if {"xcen", "ycen"} <= set(df.columns):
+        x = df["xcen"].to_numpy(dtype=float)
+        y = df["ycen"].to_numpy(dtype=float)
+    else:
+        cal = alcor_calibration(time)
+        wcs = build_alcor_wcs(xcen=cal["xcen"], ycen=cal["ycen"],
+                              rotation=cal["rotation"],
+                              radial_coeffs=cal["radial_coeffs"],
+                              horizon_radius=cal["horizon_radius"],
+                              tangential_coeffs=cal["tangential_coeffs"],
+                              axis_tilt=cal["axis_tilt"])
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            x, y = wcs.world_to_pixel_values(
+                df["azimuth"].to_numpy(dtype=float),
+                df["altitude"].to_numpy(dtype=float))
+        x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+    ny, nx = dist.shape
+    ok = np.isfinite(x) & np.isfinite(y)
+    xi = np.where(ok, np.round(x), -1).astype(int)
+    yi = np.where(ok, np.round(y), -1).astype(int)
+    ok &= (xi >= 0) & (xi < nx) & (yi >= 0) & (yi < ny)
+    out = np.zeros(len(df), dtype=np.float32)
+    out[ok] = dist[yi[ok], xi[ok]]
+    return out
+
+
+def _block_time(df):
+    """Median OBSTIME of a photometry block, or None without that column."""
+    if "OBSTIME" not in df.columns or not len(df):
+        return None
+    stamps = pd.to_datetime(df["OBSTIME"].unique())
+    return Time(np.median(Time(stamps.to_pydatetime()).mjd), format="mjd")
 
 
 def _unit_vectors(az_deg, alt_deg):
@@ -96,7 +164,8 @@ def alcor_extinction_stars(df, band="g", method="ap",
                            mag_window=ALCOR_EXT_MAG_WINDOW,
                            min_altitude=ALCOR_EXT_MIN_ALTITUDE,
                            min_frames=ALCOR_EXT_MIN_BLOCK_FRAMES,
-                           lost_min_frames=ALCOR_EXT_LOST_MIN_FRAMES):
+                           lost_min_frames=ALCOR_EXT_LOST_MIN_FRAMES,
+                           horizon_margin=ALCOR_EXT_HORIZON_MARGIN):
     """
     Reduce a block of per-frame photometry to one extinction value per star.
 
@@ -118,6 +187,13 @@ def alcor_extinction_stars(df, band="g", method="ap",
     Variables are excluded because a variable has no single catalog magnitude,
     so its ``ext`` is NaN by construction -- differencing against a catalog
     magnitude would conflate cloud with the star's own variation.
+
+    Stars within ``horizon_margin`` raw pixels of not-sky (the horizon mask
+    nearest the block's time) are dropped from both outputs. Photometry is
+    fixed-position, so a star behind the flagpole or a building is still
+    measured, and light from the obstruction makes it read too bright -- a
+    false *negative* extinction -- or, if fully hidden, a false lost star.
+    ``None`` disables the cut; ``0`` drops only stars on not-sky pixels.
     """
     ext_col = _resolve_column(df, "ext", band, method)
     mag_col = _resolve_column(df, "mag", band, method)
@@ -134,6 +210,10 @@ def alcor_extinction_stars(df, band="g", method="ap",
         work = work[~work["variable"].astype(bool)]
     work = work[~work[sat_col].astype(bool)]
     work = work[work["altitude"] > min_altitude]
+    if horizon_margin is not None and len(work):
+        dist = _star_horizon_distance(work, _block_time(work))
+        if dist is not None:
+            work = work[dist > horizon_margin]
 
     usable = (np.isfinite(work[ext_col])
               & work[mag_col].between(*mag_window))
@@ -262,7 +342,8 @@ def _pixels_per_degree(wcs=None, header=None):
 
 
 def _extinction_header(wcs, measured, lost, times, band, method,
-                       kernel_sigma, min_weight, mag_window, nframes):
+                       kernel_sigma, min_weight, mag_window, nframes,
+                       horizon_margin=None):
     """Raw-frame WCS plus the full provenance of the map's calibration chain."""
     header = wcs.to_header(relax=True)
     header["BUNIT"] = ("mag", "G-band cloud extinction")
@@ -276,6 +357,8 @@ def _extinction_header(wcs, measured, lost, times, band, method,
     header["MAGLO"] = (float(mag_window[0]), "bright end of the usable window")
     header["MAGHI"] = (float(mag_window[1]), "faint end of the usable window")
     header["PIXSCALE"] = (_pixels_per_degree(wcs), "radial plate scale (px/deg)")
+    header["HORMARG"] = ("none" if horizon_margin is None else float(horizon_margin),
+                         "stars this near not-sky dropped (px)")
     # Reserved for the clear-night flat field. The measured clear-night trend is
     # ~ -0.12 mag at alt 20-30 and ~ -0.09 at 75-90 against ~0 at 45-60; it is
     # recorded, not corrected, until several clear nights are in hand.
@@ -323,6 +406,7 @@ def alcor_extinction_fits(inputs, output_file=None, band="g", method="ap",
                           min_weight=ALCOR_EXT_MIN_WEIGHT,
                           mag_window=ALCOR_EXT_MAG_WINDOW,
                           min_altitude=ALCOR_EXT_MIN_ALTITUDE,
+                          horizon_margin=ALCOR_EXT_HORIZON_MARGIN,
                           return_products=False):
     """
     Build an extinction map from per-frame photometry CSVs and write it as FITS.
@@ -353,7 +437,7 @@ def alcor_extinction_fits(inputs, output_file=None, band="g", method="ap",
 
     measured, lost = alcor_extinction_stars(
         df, band=band, method=method, mag_window=mag_window,
-        min_altitude=min_altitude)
+        min_altitude=min_altitude, horizon_margin=horizon_margin)
     if not len(measured):
         raise ValueError("no usable star measurements in the given frames")
 
@@ -365,7 +449,7 @@ def alcor_extinction_fits(inputs, output_file=None, band="g", method="ap",
 
     header = _extinction_header(wcs, measured, lost, times, band, method,
                                 kernel_sigma, min_weight, mag_window,
-                                len(times) or nframes)
+                                len(times) or nframes, horizon_margin)
     hdul = fits.HDUList([fits.PrimaryHDU(data=ext_map, header=header),
                          _stars_hdu(measured, lost)])
 
@@ -574,7 +658,7 @@ def alcor_extinction_movie(inputs, output_file=None, frames_dir=None,
                            band="g", method="ap", vmax=ALCOR_EXT_VMAX,
                            cmap="inferno_r", title=None, keep_frames=False,
                            min_altitude=ALCOR_EXT_MIN_ALTITUDE, quiet=False,
-                           **kwargs):
+                           horizon_margin=ALCOR_EXT_HORIZON_MARGIN, **kwargs):
     """
     Animate a night's extinction maps.
 
@@ -627,7 +711,8 @@ def alcor_extinction_movie(inputs, output_file=None, frames_dir=None,
     first = True
     for i, (stamp, sub) in enumerate(all_blocks):
         measured, lost = alcor_extinction_stars(sub, band=band, method=method,
-                                                min_altitude=min_altitude)
+                                                min_altitude=min_altitude,
+                                                horizon_margin=horizon_margin)
         if not len(measured):
             continue
         grid, az_values, alt_values = alcor_extinction_grid(

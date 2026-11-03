@@ -281,6 +281,7 @@ from .archive import (  # noqa: F401
     _night_date,
     discover_nights,
     is_too_recent,
+    night_is_settled,
     night_last_modified,
     prune_night_jpegs,
 )
@@ -429,6 +430,7 @@ __all__ = [
     "load_alcor_keogram_fits",
     "load_alcor_sb_keogram_fits",
     "lookup_sloan_photometry",
+    "night_is_settled",
     "night_last_modified",
     "options_fingerprint",
     "plot_alcor_fits",

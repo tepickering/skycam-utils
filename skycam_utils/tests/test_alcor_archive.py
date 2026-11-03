@@ -105,12 +105,14 @@ def test_timing_averages_only_completed_nights(tmp_path):
     ledger.mark_failed("2025-01-03", "boom")
 
     assert ledger.timing() == (2, 1500.0)
+import datetime
 import time
 
 from skycam_utils.alcor import (
     ALCOR_ARCHIVE_MIN_AGE,
     discover_nights,
     is_too_recent,
+    night_is_settled,
     night_last_modified,
 )
 
@@ -445,9 +447,276 @@ def _aged_archive(root, names=("2025-01-01", "2025-01-02", "2025-01-03")):
     for name in names:
         night = archive / name
         (night / f"{name.replace('-', '_')}__20_00_00.fits.bz2").write_bytes(b"x")
+        (night / _next_morning_frame(name)).write_bytes(b"x")
         for path in sorted(night.iterdir()) + [night]:
             os.utime(path, (old, old))
     return archive
+
+
+def _next_morning_frame(name, clock="11_59_00"):
+    """The frame name that closes night `name`, which runs noon to noon."""
+    morning = datetime.date.fromisoformat(name) + datetime.timedelta(days=1)
+    return f"{morning.strftime('%Y_%m_%d')}__{clock}.fits.bz2"
+
+
+def _age(path, hours=72):
+    """Backdate a file or directory, as rsync -t leaves a finished transfer."""
+    then = time.time() - hours * 3600
+    os.utime(path, (then, then))
+
+
+def _partial_night(archive, name, clock="15_45_59"):
+    """A night a daytime sync left holding only its afternoon, already quiet."""
+    night = archive / name
+    night.mkdir(parents=True, exist_ok=True)
+    frame = night / f"{name.replace('-', '_')}__{clock}.fits.bz2"
+    frame.write_bytes(b"x")
+    _age(frame)
+    _age(night)
+    return night
+
+
+def test_a_night_ending_in_the_afternoon_is_not_settled(tmp_path):
+    """Sync at 15:46 and the newest night holds no darkness at all yet."""
+    assert not night_is_settled(_partial_night(tmp_path, "2026-11-03"))
+
+
+def test_a_night_reaching_the_next_morning_is_settled(tmp_path):
+    night = _partial_night(tmp_path, "2026-11-03")
+    (night / "2026_11_04__11_59_58.fits.bz2").write_bytes(b"x")
+    assert night_is_settled(night)
+
+
+def test_a_partial_night_is_settled_once_a_later_night_has_frames(tmp_path):
+    """rsync works in date order, so a later night means this one is finished.
+
+    That is what lets a real camera outage through with no timeout to tune:
+    2026-09-28 really does end early, and it is not the newest night.
+    """
+    night = _partial_night(tmp_path, "2026-09-28")
+    assert not night_is_settled(night)
+    _partial_night(tmp_path, "2026-09-29")
+    assert night_is_settled(night)
+
+
+def test_an_empty_later_directory_does_not_settle_a_night(tmp_path):
+    """rsync creates the directory before any frame lands in it."""
+    night = _partial_night(tmp_path, "2026-11-03")
+    (tmp_path / "2026-11-04").mkdir()
+    assert not night_is_settled(night)
+
+
+def test_an_earlier_night_does_not_settle_a_later_one(tmp_path):
+    _partial_night(tmp_path, "2026-11-02")
+    assert not night_is_settled(_partial_night(tmp_path, "2026-11-03"))
+
+
+def test_a_daytime_partial_night_is_left_pending_rather_than_failed(tmp_path, patch_alcor):
+    """The bug: 'no frames with the Sun down' failed these nights for good."""
+    archive = _aged_archive(tmp_path / "archive", names=("2026-11-02",))
+    _partial_night(archive, "2026-11-03")
+    seen = []
+    patch_alcor("alcor_process_night", _stub_night(seen))
+
+    result = alcor_process_archive(archive, out_dir=tmp_path / "out")
+
+    assert seen == ["2026-11-02"]
+    assert result["skipped_recent"] == ["2026-11-03"]
+    assert result["ledger"].state("2026-11-03") == "pending"
+
+
+def test_a_truncated_night_is_not_recorded_done(tmp_path, patch_alcor):
+    """A sync at 21:07 leaves real night frames, so this one used to succeed."""
+    archive = _aged_archive(tmp_path / "archive", names=("2026-10-13",))
+    _partial_night(archive, "2026-10-14", clock="21_07_00")
+    seen = []
+    patch_alcor("alcor_process_night", _stub_night(seen))
+
+    alcor_process_archive(archive, out_dir=tmp_path / "out")
+
+    assert seen == ["2026-10-13"]
+
+
+def test_min_age_zero_also_processes_a_partial_night(tmp_path, patch_alcor):
+    archive = tmp_path / "archive"
+    _partial_night(archive, "2026-11-03")
+    seen = []
+    patch_alcor("alcor_process_night", _stub_night(seen))
+
+    alcor_process_archive(archive, out_dir=tmp_path / "out", min_age=0)
+
+    assert seen == ["2026-11-03"]
+
+
+def _record_kwargs(calls):
+    """A night stub that also records the keywords each night was run with."""
+    stub = _stub_night([])
+
+    def _run(night_dir, **kwargs):
+        calls.append((Path(night_dir).name, kwargs))
+        return stub(night_dir, **kwargs)
+
+    return _run
+
+
+def _select_as(counts):
+    """Stand in for the Sun test: `counts` maps night name to its dark frames."""
+    def _select(frames, **kwargs):
+        frames = list(frames)
+        if not frames:
+            return []
+        return ["f"] * counts[Path(frames[0]).parent.name]
+
+    return _select
+
+
+def _grow(night):
+    """More frames arrive; rsync -t leaves the directory a changed but old mtime."""
+    (night / f"{night.name.replace('-', '_')}__21_00_00.fits.bz2").write_bytes(b"x")
+    _age(night, hours=48)
+
+
+def test_a_done_night_that_gained_night_frames_is_remeasured(tmp_path, patch_alcor):
+    archive = _aged_archive(tmp_path / "archive", names=("2026-10-14",))
+    calls = []
+    patch_alcor("alcor_process_night", _record_kwargs(calls))
+    alcor_process_archive(archive, out_dir=tmp_path / "out")
+    assert [night for night, _ in calls] == ["2026-10-14"]
+    assert "reprocess" not in calls[0][1]
+
+    _grow(archive / "2026-10-14")
+    patch_alcor("select_dark_frames", _select_as({"2026-10-14": 9}))
+    alcor_process_archive(archive, out_dir=tmp_path / "out")
+
+    # Re-measured, not resumed: the old CSVs may be in an older calibration.
+    assert [night for night, _ in calls] == ["2026-10-14", "2026-10-14"]
+    assert calls[1][1]["reprocess"] is True
+
+    # And that is the end of it: a third run has nothing to do.
+    alcor_process_archive(archive, out_dir=tmp_path / "out")
+    assert len(calls) == 2
+
+
+def test_a_failed_night_that_gained_night_frames_is_retried(tmp_path, patch_alcor):
+    archive = _aged_archive(tmp_path / "archive", names=("2026-10-19",))
+    patch_alcor("alcor_process_night", _stub_night([], fail_on=("2026-10-19",)))
+    alcor_process_archive(archive, out_dir=tmp_path / "out")
+
+    _grow(archive / "2026-10-19")
+    patch_alcor("select_dark_frames", _select_as({"2026-10-19": 1137}))
+    seen = []
+    patch_alcor("alcor_process_night", _stub_night(seen))
+    result = alcor_process_archive(archive, out_dir=tmp_path / "out")
+
+    assert seen == ["2026-10-19"]
+    assert result["ledger"].state("2026-10-19") == "done"
+
+
+def test_a_failed_night_with_no_darkness_stays_failed(tmp_path, patch_alcor):
+    """2025-05-01 and 2026-09-28 failed correctly, so are not retried on their own."""
+    archive = _aged_archive(tmp_path / "archive", names=("2025-05-01",))
+    patch_alcor("alcor_process_night", _stub_night([], fail_on=("2025-05-01",)))
+    alcor_process_archive(archive, out_dir=tmp_path / "out")
+
+    _grow(archive / "2025-05-01")
+    patch_alcor("select_dark_frames", _select_as({"2025-05-01": 0}))
+    seen = []
+    patch_alcor("alcor_process_night", _stub_night(seen))
+    result = alcor_process_archive(archive, out_dir=tmp_path / "out")
+
+    assert seen == []
+    assert result["skipped_failed"] == ["2025-05-01"]
+
+
+def test_daylight_frames_alone_do_not_trigger_a_remeasure(tmp_path, patch_alcor):
+    """The tail of a morning adds frames, but nothing the night products use."""
+    archive = _aged_archive(tmp_path / "archive", names=("2026-10-27",))
+    seen = []
+    patch_alcor("alcor_process_night", _stub_night(seen))
+    alcor_process_archive(archive, out_dir=tmp_path / "out")
+
+    _grow(archive / "2026-10-27")
+    patch_alcor("select_dark_frames", _select_as({"2026-10-27": 2}))  # the stub's count
+    alcor_process_archive(archive, out_dir=tmp_path / "out")
+
+    assert seen == ["2026-10-27"]
+
+
+def test_an_unchanged_directory_never_runs_the_sun_test(tmp_path, patch_alcor):
+    """This check runs on every night of every daily run, so one stat must do."""
+    archive = _aged_archive(tmp_path / "archive", names=("2026-10-27",))
+    patch_alcor("alcor_process_night", _stub_night([]))
+    alcor_process_archive(archive, out_dir=tmp_path / "out")
+
+    def _boom(frames, **kwargs):
+        raise AssertionError("listed a night whose directory had not changed")
+
+    patch_alcor("select_dark_frames", _boom)
+    alcor_process_archive(archive, out_dir=tmp_path / "out")
+
+
+def test_a_ledger_from_before_this_check_catches_a_truncated_night(tmp_path, patch_alcor):
+    """No recorded mtime means check once: that is how 2026-10-14 gets found."""
+    archive = _aged_archive(tmp_path / "archive", names=("2026-10-14",))
+    calls = []
+    patch_alcor("alcor_process_night", _record_kwargs(calls))
+    ledger = alcor_process_archive(archive, out_dir=tmp_path / "out")["ledger"]
+    ledger.entry("2026-10-14").pop("dir_mtime")
+    ledger.save()
+
+    patch_alcor("select_dark_frames", _select_as({"2026-10-14": 1084}))
+    alcor_process_archive(archive, out_dir=tmp_path / "out")
+
+    assert calls[-1][1]["reprocess"] is True
+
+
+def test_the_recorded_mtime_persists_for_a_night_that_did_not_grow(tmp_path, patch_alcor):
+    """Otherwise every daily run would repeat the whole archive's Sun test."""
+    archive = _aged_archive(tmp_path / "archive", names=("2026-10-27",))
+    patch_alcor("alcor_process_night", _stub_night([]))
+    ledger = alcor_process_archive(archive, out_dir=tmp_path / "out")["ledger"]
+    ledger.entry("2026-10-27").pop("dir_mtime")
+    ledger.save()
+
+    patch_alcor("select_dark_frames", _select_as({"2026-10-27": 2}))
+    alcor_process_archive(archive, out_dir=tmp_path / "out")
+
+    reread = ArchiveLedger(tmp_path / "out" / ".archive_state")
+    assert reread.entry("2026-10-27")["dir_mtime"] == (archive / "2026-10-27").stat().st_mtime
+
+
+def test_a_capped_run_does_not_read_as_a_night_that_grew(tmp_path, patch_alcor):
+    """--max-frames makes n_frames smaller than the night by design."""
+    archive = _aged_archive(tmp_path / "archive", names=("2026-10-27",))
+    seen = []
+    patch_alcor("alcor_process_night", _stub_night(seen))
+    alcor_process_archive(archive, out_dir=tmp_path / "out", max_frames=2)
+
+    _grow(archive / "2026-10-27")
+    patch_alcor("select_dark_frames", _select_as({"2026-10-27": 1000}))
+    alcor_process_archive(archive, out_dir=tmp_path / "out", max_frames=2)
+
+    assert seen == ["2026-10-27"]
+
+
+def test_a_night_awaiting_a_remeasure_survives_a_failure(tmp_path, patch_alcor):
+    """The flag lives in the ledger, or a retry would resume from stale CSVs."""
+    archive = _aged_archive(tmp_path / "archive", names=("2026-10-14",))
+    patch_alcor("alcor_process_night", _stub_night([]))
+    alcor_process_archive(archive, out_dir=tmp_path / "out")
+
+    _grow(archive / "2026-10-14")
+    patch_alcor("select_dark_frames", _select_as({"2026-10-14": 9}))
+    patch_alcor("alcor_process_night", _stub_night([], fail_on=("2026-10-14",)))
+    alcor_process_archive(archive, out_dir=tmp_path / "out")
+
+    calls = []
+    patch_alcor("alcor_process_night", _record_kwargs(calls))
+    alcor_process_archive(archive, out_dir=tmp_path / "out", retry_failed=True)
+
+    assert calls[0][1]["reprocess"] is True
+    entry = ArchiveLedger(tmp_path / "out" / ".archive_state").entry("2026-10-14")
+    assert "reprocess" not in entry
 
 
 def test_archive_run_processes_every_night_and_records_it(tmp_path, patch_alcor):

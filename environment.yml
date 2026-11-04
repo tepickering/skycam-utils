@@ -15,7 +15,10 @@ dependencies:
   - ccdproc
   - regions
   - redis-py
-  - pytest
+  # pytest 9.2 refuses two plugins sharing an option dest, and pytest-astropy and
+  # pytest-remotedata 0.4.2 both use remote_data, so collection dies at startup.
+  # Fixed in pytest-remotedata 0.4.3; drop this pin once conda-forge has it.
+  - pytest<9.2
   - pytest-astropy
   - pytest-cov
   - sphinx-astropy

@@ -374,6 +374,27 @@ alcor_process_archive <archive-dir> -o <out-dir> [--status] [--start YYYY-MM-DD]
 #   old night being back-filled has old names and fresh mtimes, and only mtime
 #   catches both. Without this a half-arrived night would be recorded `done` and
 #   never revisited. --min-age 0 disables it.
+#   MTIME ALONE IS NOT ENOUGH, and that cost 7 nights in Oct 2026: a sync during the
+#   day leaves the current night holding only the frames taken so far, a finished
+#   rsync goes quiet whether or not the night is whole, and if the next sync is over
+#   24 h away the night looks ready. An afternoon's frames failed as "No frames ...
+#   have the Sun below -12" (10-12/17/19/21/24, each one the date of a daytime sync)
+#   and a 21:07 sync recorded a truncated night as `done` (10-14: 241 of 1084 frames;
+#   10-10: 633 of 1496), with nothing flagging it. So a night is also held `pending`
+#   until night_is_settled: its frames reach 11:00 the next morning, OR a later night
+#   has frames. rsync works in date order, so the second test means the camera host
+#   had finished this night, which lets a real outage through (2025-05-01 and
+#   2026-09-28 truly have no dark frames and stay `failed`) with no timeout that would
+#   have to outlast the gap between syncs (24 days, once). These holds count in the
+#   "skipped as too recent" total.
+#   FINISHED NIGHTS ARE RE-CHECKED: the ledger keeps each night's directory mtime; when
+#   it differs (one stat per night, per run), the Sun test re-counts the frames, and a
+#   done or failed night that gained NIGHT frames goes back to `pending` with a stored
+#   `reprocess` flag -- re-measured, not resumed, since its old CSVs may be in an older
+#   calibration. The test is "differs", not "newer", because rsync -t restores the
+#   source's mtime. Daylight frames alone do not trigger it. This is the backstop for
+#   the one hole in the later-night rule: syncing 2026-11* without finishing 2026-10*.
+#   A ledger without mtimes is checked once in full (~2 s/night) and never again.
 #   --prune-jpegs DELETES a night's vendor JPEGs (~7.3 GB/night; "*.jpg" covers the
 #   Unwrap_ series too) after its products are written, gated on sky_brightness.csv
 #   and <night>_phot.csv existing non-empty and under 10% frame errors. Never

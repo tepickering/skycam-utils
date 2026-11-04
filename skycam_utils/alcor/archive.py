@@ -16,6 +16,7 @@ from pathlib import Path
 
 from .ledger import ArchiveLedger, options_fingerprint
 from .night import alcor_process_night
+from .timeutils import select_dark_frames
 
 #: Night directories are named YYYY-MM-DD (or YYYY_MM_DD in older archives).
 #: Matching on the name is what keeps the sibling ``keograms/`` and ``movies/``
@@ -27,6 +28,18 @@ NIGHT_NAME_RE = re.compile(r"^(\d{4})[-_](\d{2})[-_](\d{2})$")
 #: mid-download while the driver reads it; processing one would write partial
 #: products under a ``done`` ledger entry that no later run revisits.
 ALCOR_ARCHIVE_MIN_AGE = 24.0
+
+#: Local hour on the following morning a night's frames must reach for it to
+#: count as complete. A night directory runs noon to noon and the Sun is well up
+#: by this hour in every season, so all of its darkness has arrived.
+ALCOR_ARCHIVE_SETTLED_HOUR = 11
+
+#: The local timestamp in a frame name, YYYY_MM_DD__HH_MM_SS.
+_FRAME_STAMP_RE = re.compile(r"(\d{4})_(\d{2})_(\d{2})__(\d{2})_(\d{2})_(\d{2})")
+
+#: Sun altitude that `alcor_process_night` selects a night's frames with, and so
+#: what a ledger entry's ``n_frames`` counts, unless `sun_alt_max` is passed.
+_NIGHT_SUN_ALT_MAX = -12.0
 
 
 def _night_date(name):
@@ -349,6 +362,82 @@ def _wait_while_paused(pause_file, poll, log, stop, sleep=time.sleep):
     return False
 
 
+def _frame_stamp(path):
+    """The local time in a frame's name, or None if the name carries none."""
+    match = _FRAME_STAMP_RE.search(Path(path).name)
+    if match is None:
+        return None
+    try:
+        return datetime.datetime(*(int(part) for part in match.groups()))
+    except ValueError:
+        return None
+
+
+def night_is_settled(night_dir, pattern="*.fits.bz2"):
+    """
+    True when a night directory is not waiting for more frames from a later sync.
+
+    The quiet period (:func:`is_too_recent`) cannot answer this. A sync during the
+    day leaves the current night holding only what the camera has taken so far,
+    and a finished rsync goes quiet whether or not the night is whole. If the next
+    sync is more than `min_age` away, the night then looks old and ready: an
+    afternoon's frames fail as "no frames with the Sun down", and a sync at 21:00
+    records a truncated night as done.
+
+    So a night is settled when either its frames reach the following morning, or a
+    LATER night already has frames. rsync works in date order, so the second test
+    means this night was finished at the camera host, which is what lets a real
+    outage through (2026-09-28 stops early, and the next night says so) without a
+    timeout that would have to outlast the longest gap between syncs.
+
+    Parameters
+    ----------
+    night_dir : str or `~pathlib.Path`
+        The night directory, named ``YYYY-MM-DD``.
+    pattern : str
+        Glob selecting the frames (default ``"*.fits.bz2"``).
+
+    Returns
+    -------
+    bool
+        True when the night should not be expected to gain frames.
+    """
+    night_dir = Path(night_dir)
+    date = _night_date(night_dir.name)
+    if date is None:
+        return True
+    frames = sorted(night_dir.glob(pattern))
+    if frames:
+        newest = _frame_stamp(frames[-1])
+        settled_at = datetime.datetime.combine(
+            date + datetime.timedelta(days=1),
+            datetime.time(ALCOR_ARCHIVE_SETTLED_HOUR))
+        if newest is not None and newest >= settled_at:
+            return True
+    for sibling in night_dir.parent.iterdir():
+        later = _night_date(sibling.name)
+        if later is not None and later > date and sibling.is_dir() \
+                and next(sibling.glob(pattern), None) is not None:
+            return True
+    return False
+
+
+def _night_gained_frames(entry, night_dir, pattern, sun_alt_max):
+    """
+    True when a finished night now holds more night frames than it was run with.
+
+    Runs on every done or failed night of every run, so an unchanged directory
+    costs one `stat`. rsync restores the source's mtime rather than leaving a fresh
+    one, so the test is "differs", not "newer". Only a change pays for the Sun test
+    over the night's frames, and only frames with the Sun down count: the end of a
+    morning adds frames that no night product uses.
+    """
+    frames = sorted(night_dir.glob(pattern))
+    n_now = len(select_dark_frames(frames, sun_alt_max=sun_alt_max,
+                                   moon_alt_max=90.0, log=None))
+    return n_now > (entry.get("n_frames") or 0)
+
+
 def alcor_process_archive(archive_dir, out_dir, start=None, end=None,
                           nights=None, reverse=False, pattern="*.fits.bz2",
                           min_age=ALCOR_ARCHIVE_MIN_AGE, prune_jpegs=False,
@@ -365,9 +454,10 @@ def alcor_process_archive(archive_dir, out_dir, start=None, end=None,
     An archive is hundreds of night directories and days of wall clock, so this
     adds what that scale needs and nothing else: a ledger so a killed run picks
     up where it stopped, a ``PAUSE`` file so a detached run can be held without
-    its PID, throttled progress with an ETA, a quiet period that leaves alone the
-    nights still arriving from the camera host, and an opt-in prune of the
-    redundant vendor JPEGs.
+    its PID, throttled progress with an ETA, a quiet period and a completeness
+    test that leave alone the nights still arriving from the camera host, a
+    re-measure of any finished night that later gained night frames, and an opt-in
+    prune of the redundant vendor JPEGs.
 
     All state lives in ``<out_dir>/.archive_state/``: ``ledger.json``, the
     ``PAUSE`` sentinel the operator creates, and ``archive.log``. Each night's
@@ -390,7 +480,7 @@ def alcor_process_archive(archive_dir, out_dir, start=None, end=None,
         Glob selecting frames, passed to `alcor_process_night` (default ``"*.fits.bz2"``).
     min_age : float (default ALCOR_ARCHIVE_MIN_AGE)
         Hours a night must have been unchanged before it is processed. 0
-        disables the rule.
+        disables the rule, and with it the :func:`night_is_settled` test.
     prune_jpegs : bool (default=False)
         Delete each night's vendor JPEGs once its products are written.
     prune_dry_run : bool (default=False)
@@ -508,6 +598,20 @@ def alcor_process_archive(archive_dir, out_dir, start=None, end=None,
                 break
 
             state = ledger.state(night)
+            if state in ("done", "failed") and night_kwargs.get("max_frames") is None:
+                # A capped run's n_frames is smaller than the night by design.
+                entry = ledger.entry(night)
+                mtime = night_dir.stat().st_mtime
+                if entry.get("dir_mtime") != mtime:
+                    if _night_gained_frames(
+                            entry, night_dir, pattern,
+                            night_kwargs.get("sun_alt_max", _NIGHT_SUN_ALT_MAX)):
+                        _log(f"{prefix}gained night frames since it was run "
+                             f"({entry.get('n_frames') or 0} then); will re-measure")
+                        ledger.mark_remeasure(night, mtime)
+                        state = "pending"
+                    else:
+                        ledger.note_dir_mtime(night, mtime)
             if state == "done":
                 entry = ledger.entry(night) or {}
                 _maybe_prune(night, night_dir,
@@ -524,12 +628,20 @@ def alcor_process_archive(archive_dir, out_dir, start=None, end=None,
                 _log(f"{prefix}skipped: changed within {min_age:g} h, may still "
                      "be arriving from the camera host")
                 continue
+            if min_age and not night_is_settled(night_dir, pattern):
+                skipped_recent.append(night)
+                _log(f"{prefix}skipped: frames stop before the next morning and "
+                     "no later night has arrived, so a sync caught it part-way")
+                continue
             if consecutive >= max_consecutive_failures:
                 _log(f"aborting: {consecutive} nights failed in a row")
                 stop["requested"] = True
                 break
 
-            ledger.mark_running(night)
+            run_kwargs = dict(night_kwargs)
+            if (ledger.entry(night) or {}).get("reprocess"):
+                run_kwargs["reprocess"] = True
+            ledger.mark_running(night, dir_mtime=night_dir.stat().st_mtime)
             night_out = out_dir / night
             night_log = ThrottledLog(_log, prefix=prefix, interval=log_interval,
                                      verbose=verbose)
@@ -538,7 +650,7 @@ def alcor_process_archive(archive_dir, out_dir, start=None, end=None,
             try:
                 result = alcor_process_night(night_dir, out_dir=night_out,
                                              pattern=pattern, log=night_log,
-                                             **night_kwargs)
+                                             **run_kwargs)
             except Exception as exc:  # one bad night must not cost the rest
                 elapsed = time.monotonic() - started
                 ledger.mark_failed(night, exc, elapsed=elapsed)
@@ -570,6 +682,7 @@ def alcor_process_archive(archive_dir, out_dir, start=None, end=None,
     finally:
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
+        ledger.save()  # the mtimes noted for nights that needed no work
 
     _log(f"run finished: {len(processed)} processed, {len(failed)} failed, "
          f"{len(skipped_recent)} skipped as too recent, "

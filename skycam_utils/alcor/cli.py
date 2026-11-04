@@ -705,7 +705,8 @@ def alcor_process_archive_cli():
                         help="Hours a night must be unchanged before it is "
                              "processed. The archive syncs from the camera host, "
                              "so a night modified more recently may still be "
-                             "arriving. 0 disables the rule.")
+                             "arriving. 0 disables the rule, and also the test "
+                             "that holds back a night a sync caught part-way.")
     parser.add_argument("--prune-jpegs", action="store_true",
                         help="DELETE each night's vendor JPEGs once its products "
                              "are written and verified. Irreversible; frees "

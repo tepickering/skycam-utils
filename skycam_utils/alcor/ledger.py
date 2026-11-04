@@ -141,10 +141,17 @@ class ArchiveLedger:
         entry.update(fields)
         return entry
 
-    def mark_running(self, night):
-        """Record that `night` has started, and count the attempt."""
+    def mark_running(self, night, dir_mtime=None):
+        """
+        Record that `night` has started, and count the attempt.
+
+        `dir_mtime` is the night directory's mtime as this attempt saw it, taken
+        BEFORE processing so that frames landing mid-run still read as a change.
+        """
         entry = self._update(night, state="running", started=_now(),
                              finished=None, error=None)
+        if dir_mtime is not None:
+            entry["dir_mtime"] = dir_mtime
         entry["attempts"] = entry.get("attempts", 0) + 1
         self.save()
 
@@ -155,6 +162,7 @@ class ArchiveLedger:
                      products={key: str(value) for key, value in products.items()
                                if value is not None},
                      error=None)
+        self.data["nights"][night].pop("reprocess", None)
         self.save()
 
     def mark_failed(self, night, error, elapsed=None):
@@ -162,6 +170,21 @@ class ArchiveLedger:
         self._update(night, state="failed", finished=_now(), elapsed_s=elapsed,
                      error=str(error))
         self.save()
+
+    def mark_remeasure(self, night, dir_mtime):
+        """
+        Send `night` back to ``pending``, to be re-measured rather than resumed.
+
+        The ``reprocess`` flag is stored, not held in memory, so it outlives a
+        crash or a failed attempt: resuming would reuse per-frame CSVs that may
+        have been written under an older calibration.
+        """
+        self._update(night, state="pending", reprocess=True, dir_mtime=dir_mtime)
+        self.save()
+
+    def note_dir_mtime(self, night, dir_mtime):
+        """Remember a night directory's mtime. Not saved until the next `save`."""
+        self._update(night, dir_mtime=dir_mtime)
 
     def mark_pruned(self, night, n_files, n_bytes):
         """Record that `night`'s vendor JPEGs were deleted."""

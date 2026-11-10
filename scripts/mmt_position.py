@@ -64,7 +64,8 @@ def update_position():
         mmt_dec = mmt_lat
 
     try:
-        with open("/mnt/d/skycam/mmt_position.txt", "w") as f:
+        data_dir = os.environ.get("SKYCAM_DATA_DIR", "/mnt/d/skycam")
+        with open(os.path.join(data_dir, "mmt_position.txt"), "w") as f:
             f.write(f"{now_alcor}\n{mmt_ra}\n{mmt_dec}\n")
     except Exception as e:
         print(e)

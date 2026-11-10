@@ -5,7 +5,13 @@ import os
 import redis
 
 
-def read_telemetry(filename="/mnt/c/Users/skycam/Documents/skywatch/Heater/DataOut_Weather.csv"):
+# Skywatch's weather log: C:\Users\skycam\Documents\... seen from WSL by default;
+# set SKYCAM_WEATHER_CSV elsewhere (e.g. /home/skycam/Documents/skywatch/... on Debian)
+WEATHER_CSV = os.environ.get(
+    "SKYCAM_WEATHER_CSV", "/mnt/c/Users/skycam/Documents/skywatch/Heater/DataOut_Weather.csv")
+
+
+def read_telemetry(filename=WEATHER_CSV):
     with open(filename, "rb") as f:
         last = f.readlines()[-1].decode().split(';')
 

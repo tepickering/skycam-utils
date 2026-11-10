@@ -43,7 +43,8 @@ MMT = EarthLocation.from_geodetic("-110:53:04.4", "31:41:19.6", 2600 * u.m)
 # run, rather than one file per map: a raw-frame map is ~8 MB, so keeping every
 # five-minute map would be ~2.3 GB/day. The night's history lives in the
 # animation instead.
-DEFAULT_MAP = "/mnt/d/skycam/alcor_extinction_latest.fits"
+DEFAULT_MAP = os.path.join(os.environ.get("SKYCAM_DATA_DIR", "/mnt/d/skycam"),
+                           "alcor_extinction_latest.fits")
 
 MAX_AGE_DEFAULT = 1800.0     # s; publish nothing from a map older than this
 

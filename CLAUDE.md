@@ -555,7 +555,7 @@ Borrowed from LSST. Provides `wcs_zea` / `wcs_azp` callable classes used as obje
 
 ## `scripts/` is operational, not packaged
 
-These run on the live skycam host (Windows WSL — paths like `/mnt/d/skycam/...`, `/mnt/c/Users/skycam/...`) and on `ops.mmto.arizona.edu`. They are **not** part of the installed Python package and are not on PYTHONPATH:
+These run on the live skycam host and on `ops.mmto.arizona.edu`. The archive path defaults to the Windows WSL host's `/mnt/d/skycam`; set `SKYCAM_DATA_DIR` (e.g. `/data/skycam` on a native Linux host; in the crontab for the cron jobs) and, for `tcs_logger.py`, `SKYCAM_WEATHER_CSV`. They are **not** part of the installed Python package and are not on PYTHONPATH:
 
 - `make_movies.sh` / `daily_movies.sh` — ffmpeg concat-demuxer pipelines that produce `allsky.mp4` and `unwrap.mp4`. The `pad=ceil(iw/2)*2:ceil(ih/2)*2` filter is required because H.264 needs even dimensions; do not remove it. Bitrate/framerate constants in these scripts have been hand-tuned over many commits — change them only when explicitly asked.
 - `latest_image.sh` / `latest_movie.sh` — scp/ffmpeg jobs that publish the most-recent image and a rolling 150-frame movie to the public web host.
